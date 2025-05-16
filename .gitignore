@@ -130,3 +130,7 @@ dist
 .pnp.*
 package-lock.json
 claude_desktop_config.json
+
+memory.db
+memory.db-shm
+memory.db-wal
