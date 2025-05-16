@@ -166,7 +166,7 @@ server.tool(
 // 1. Get Screenshot
 server.tool(
   "get_screenshot",
-  "Take a screenshot of the current page and return it as a base64-encoded PNG.",
+  "Take a screenshot of the current page and return it as a base64-encoded PNG. Use this for visual confirmation of the current browser state. For screenshots after complex navigation or actions, use the agent_prompt tool to perform those actions first.",
   {},
   async () => {
     try {
@@ -203,9 +203,13 @@ server.tool(
 // 2. Agent / Prompt
 server.tool(
   "agent_prompt",
-  "Run an agent task or prompt in the browser context.",
+  "Use this tool for any high-level, multi-step, or vague browser task. For example: 'Go to nytimes.com and click the first article about AI', 'Search for OpenAI on Google and click the first result', or 'Log in to my account and take a screenshot'. The agent will interpret and execute the task using browser automation and LLM reasoning. This is the recommended tool for most user actions.",
   {
-    task: { type: "string", description: "The task or prompt for the agent." },
+    task: {
+      type: "string",
+      description:
+        "A detailed description of the task or prompt for the agent to perform. Be as specific as possible for best results.",
+    },
   },
   async ({ task }) => {
     try {
@@ -234,11 +238,11 @@ server.tool(
 // 3. Scroll Down
 server.tool(
   "scroll_down",
-  "Scroll down the page by a specified number of pixels (default 500).",
+  "Scroll down the page by a specified number of pixels (default 500). Use this for precise, atomic scrolling. For scrolling as part of a larger task (e.g., 'scroll down and click the blue button'), use agent_prompt instead.",
   {
     pixels: {
       type: "number",
-      description: "Number of pixels to scroll down.",
+      description: "Number of pixels to scroll down. Default is 500.",
       default: 500,
       optional: true,
     },
@@ -271,11 +275,11 @@ server.tool(
 // 4. Scroll Up
 server.tool(
   "scroll_up",
-  "Scroll up the page by a specified number of pixels (default 500).",
+  "Scroll up the page by a specified number of pixels (default 500). Use this for precise, atomic scrolling. For scrolling as part of a larger task (e.g., 'scroll up and click the first link'), use agent_prompt instead.",
   {
     pixels: {
       type: "number",
-      description: "Number of pixels to scroll up.",
+      description: "Number of pixels to scroll up. Default is 500.",
       default: 500,
       optional: true,
     },
@@ -308,7 +312,7 @@ server.tool(
 // 5. Go Back
 server.tool(
   "go_back",
-  "Go back to the previous page in the browser history.",
+  "Go back to the previous page in the browser history. For multi-step navigation (e.g., 'go back and then click a button'), use agent_prompt instead.",
   {},
   async () => {
     try {
@@ -338,7 +342,7 @@ server.tool(
 // 6. Go Forward
 server.tool(
   "go_forward",
-  "Go forward to the next page in the browser history.",
+  "Go forward to the next page in the browser history. For multi-step navigation (e.g., 'go forward and then fill a form'), use agent_prompt instead.",
   {},
   async () => {
     try {
@@ -366,33 +370,44 @@ server.tool(
 );
 
 // 7. Refresh
-server.tool("refresh", "Reload the current page.", {}, async () => {
-  try {
-    await mcpBeam.initialize();
-    if (!mcpBeam.context) throw new Error("Beam not initialized");
-    const page = await mcpBeam.context.getCurrentPage();
-    await page.reload();
-    return { content: [{ type: "text", text: "Page reloaded." }] };
-  } catch (err) {
-    const error = err as Error;
-    return {
-      isError: true,
-      content: [
-        { type: "text", text: error.message },
-        {
-          type: "text",
-          text: "Chat with the error tools to learn more about this error.",
-        },
-      ],
-    };
+server.tool(
+  "refresh",
+  "Reload the current page. For refreshing as part of a larger workflow (e.g., 'refresh and then take a screenshot'), use agent_prompt instead.",
+  {},
+  async () => {
+    try {
+      await mcpBeam.initialize();
+      if (!mcpBeam.context) throw new Error("Beam not initialized");
+      const page = await mcpBeam.context.getCurrentPage();
+      await page.reload();
+      return { content: [{ type: "text", text: "Page reloaded." }] };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error.message },
+          {
+            type: "text",
+            text: "Chat with the error tools to learn more about this error.",
+          },
+        ],
+      };
+    }
   }
-});
+);
 
 // 8. Google Search
 server.tool(
   "google_search",
-  "Perform a Google search for the given query.",
-  { query: { type: "string", description: "The search query." } },
+  "Perform a Google search for the given query and navigate to the results page. For searching and then interacting with results (e.g., clicking a link), use agent_prompt instead.",
+  {
+    query: {
+      type: "string",
+      description:
+        "The search query to use on Google. For searching and clicking/interacting, use agent_prompt instead.",
+    },
+  },
   async ({ query }) => {
     try {
       await mcpBeam.initialize();
@@ -424,8 +439,14 @@ server.tool(
 // 9. Go to URL
 server.tool(
   "go_to_url",
-  "Navigate the browser to the specified URL.",
-  { url: { type: "string", description: "The URL to navigate to." } },
+  "Navigate the browser directly to the specified URL. For navigation followed by further actions (e.g., 'go to this URL and click a button'), use agent_prompt instead.",
+  {
+    url: {
+      type: "string",
+      description:
+        "The URL to navigate to. For navigation and further actions, use agent_prompt instead.",
+    },
+  },
   async ({ url }) => {
     try {
       await mcpBeam.initialize();
