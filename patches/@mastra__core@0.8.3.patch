@@ -1,0 +1,62 @@
+diff --git a/dist/chunk-QBQ3CW2R.js b/dist/chunk-QBQ3CW2R.js
+index bec3517b28d9901f55d884311d831f83861e1b15..be56ca7ef2c0045d224ca4f78c927efa0bbc6ffb 100644
+--- a/dist/chunk-QBQ3CW2R.js
++++ b/dist/chunk-QBQ3CW2R.js
+@@ -140,7 +140,7 @@ var MastraMemory = class extends MastraBase {
+     } else {
+       this.storage = new DefaultProxyStorage({
+         config: {
+-          url: "file:memory.db"
++          url: ":memory:"
+         }
+       });
+     }
+@@ -153,16 +153,8 @@ var MastraMemory = class extends MastraBase {
+       config.vector !== false && // and semanticRecall is enabled
+       semanticRecallIsEnabled
+     ) {
+-      const oldDb = "memory-vector.db";
+-      const hasOldDb = existsSync(join(process.cwd(), oldDb)) || existsSync(join(process.cwd(), ".mastra", oldDb));
+-      const newDb = "memory.db";
+-      if (hasOldDb) {
+-        this.logger.warn(
+-          `Found deprecated Memory vector db file ${oldDb} this db is now merged with the default ${newDb} file. Delete the old one to use the new one. You will need to migrate any data if that's important to you. For now the deprecated path will be used but in a future breaking change we will only use the new db file path.`
+-        );
+-      }
+       this.vector = new LibSQLVector({
+-        connectionUrl: hasOldDb ? `file:${oldDb}` : `file:${newDb}`
++        connectionUrl: ":memory:"
+       });
+     }
+     if (config.embedder) {
+diff --git a/dist/chunk-X7MIXRDA.cjs b/dist/chunk-X7MIXRDA.cjs
+index 9e45be61d9278c6df974abc5452f53b7016a4093..2a04bea27d4dbeffe4ba03f74cc1e88aa8b18f20 100644
+--- a/dist/chunk-X7MIXRDA.cjs
++++ b/dist/chunk-X7MIXRDA.cjs
+@@ -147,7 +147,7 @@ var MastraMemory = class extends chunkD63P5O4Q_cjs.MastraBase {
+     } else {
+       this.storage = new chunk2LIFCMY6_cjs.DefaultProxyStorage({
+         config: {
+-          url: "file:memory.db"
++          url: ":memory:"
+         }
+       });
+     }
+@@ -160,16 +160,8 @@ var MastraMemory = class extends chunkD63P5O4Q_cjs.MastraBase {
+       config.vector !== false && // and semanticRecall is enabled
+       semanticRecallIsEnabled
+     ) {
+-      const oldDb = "memory-vector.db";
+-      const hasOldDb = fs.existsSync(path.join(process.cwd(), oldDb)) || fs.existsSync(path.join(process.cwd(), ".mastra", oldDb));
+-      const newDb = "memory.db";
+-      if (hasOldDb) {
+-        this.logger.warn(
+-          `Found deprecated Memory vector db file ${oldDb} this db is now merged with the default ${newDb} file. Delete the old one to use the new one. You will need to migrate any data if that's important to you. For now the deprecated path will be used but in a future breaking change we will only use the new db file path.`
+-        );
+-      }
+       this.vector = new chunkAAMFAGE5_cjs.LibSQLVector({
+-        connectionUrl: hasOldDb ? `file:${oldDb}` : `file:${newDb}`
++        connectionUrl: ":memory:"
+       });
+     }
+     if (config.embedder) {
