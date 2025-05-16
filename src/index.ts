@@ -161,6 +161,294 @@ server.tool(
   }
 );
 
+// --- MCP Tools Implementation ---
+
+// 1. Get Screenshot
+server.tool(
+  "get_screenshot",
+  "Take a screenshot of the current page and return it as a base64-encoded PNG.",
+  {},
+  async () => {
+    try {
+      await mcpBeam.initialize();
+      if (!mcpBeam.context) throw new Error("Beam not initialized");
+      const page = await mcpBeam.context.getCurrentPage();
+      const screenshot = await page.screenshot();
+      return {
+        content: [
+          { type: "text", text: "Screenshot taken." },
+          {
+            type: "image",
+            data: screenshot.toString("base64"),
+            mimeType: "image/png",
+          },
+        ],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error.message },
+          {
+            type: "text",
+            text: "Chat with the error tools to learn more about this error.",
+          },
+        ],
+      };
+    }
+  }
+);
+
+// 2. Agent / Prompt
+server.tool(
+  "agent_prompt",
+  "Run an agent task or prompt in the browser context.",
+  {
+    task: { type: "string", description: "The task or prompt for the agent." },
+  },
+  async ({ task }) => {
+    try {
+      await mcpBeam.initialize();
+      if (!mcpBeam.beam) throw new Error("Beam not initialized");
+      await mcpBeam.beam.run({ task });
+      return {
+        content: [{ type: "text", text: `Agent task completed: ${task}` }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error.message },
+          {
+            type: "text",
+            text: "Chat with the error tools to learn more about this error.",
+          },
+        ],
+      };
+    }
+  }
+);
+
+// 3. Scroll Down
+server.tool(
+  "scroll_down",
+  "Scroll down the page by a specified number of pixels (default 500).",
+  {
+    pixels: {
+      type: "number",
+      description: "Number of pixels to scroll down.",
+      default: 500,
+      optional: true,
+    },
+  },
+  async ({ pixels = 500 }) => {
+    try {
+      await mcpBeam.initialize();
+      if (!mcpBeam.context) throw new Error("Beam not initialized");
+      const page = await mcpBeam.context.getCurrentPage();
+      await page.evaluate(`window.scrollBy(0, ${pixels})`);
+      return {
+        content: [{ type: "text", text: `Scrolled down by ${pixels} pixels.` }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error.message },
+          {
+            type: "text",
+            text: "Chat with the error tools to learn more about this error.",
+          },
+        ],
+      };
+    }
+  }
+);
+
+// 4. Scroll Up
+server.tool(
+  "scroll_up",
+  "Scroll up the page by a specified number of pixels (default 500).",
+  {
+    pixels: {
+      type: "number",
+      description: "Number of pixels to scroll up.",
+      default: 500,
+      optional: true,
+    },
+  },
+  async ({ pixels = 500 }) => {
+    try {
+      await mcpBeam.initialize();
+      if (!mcpBeam.context) throw new Error("Beam not initialized");
+      const page = await mcpBeam.context.getCurrentPage();
+      await page.evaluate(`window.scrollBy(0, -${pixels})`);
+      return {
+        content: [{ type: "text", text: `Scrolled up by ${pixels} pixels.` }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error.message },
+          {
+            type: "text",
+            text: "Chat with the error tools to learn more about this error.",
+          },
+        ],
+      };
+    }
+  }
+);
+
+// 5. Go Back
+server.tool(
+  "go_back",
+  "Go back to the previous page in the browser history.",
+  {},
+  async () => {
+    try {
+      await mcpBeam.initialize();
+      if (!mcpBeam.context) throw new Error("Beam not initialized");
+      const page = await mcpBeam.context.getCurrentPage();
+      await page.goBack();
+      return {
+        content: [{ type: "text", text: "Went back to the previous page." }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error.message },
+          {
+            type: "text",
+            text: "Chat with the error tools to learn more about this error.",
+          },
+        ],
+      };
+    }
+  }
+);
+
+// 6. Go Forward
+server.tool(
+  "go_forward",
+  "Go forward to the next page in the browser history.",
+  {},
+  async () => {
+    try {
+      await mcpBeam.initialize();
+      if (!mcpBeam.context) throw new Error("Beam not initialized");
+      const page = await mcpBeam.context.getCurrentPage();
+      await page.goForward();
+      return {
+        content: [{ type: "text", text: "Went forward to the next page." }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error.message },
+          {
+            type: "text",
+            text: "Chat with the error tools to learn more about this error.",
+          },
+        ],
+      };
+    }
+  }
+);
+
+// 7. Refresh
+server.tool("refresh", "Reload the current page.", {}, async () => {
+  try {
+    await mcpBeam.initialize();
+    if (!mcpBeam.context) throw new Error("Beam not initialized");
+    const page = await mcpBeam.context.getCurrentPage();
+    await page.reload();
+    return { content: [{ type: "text", text: "Page reloaded." }] };
+  } catch (err) {
+    const error = err as Error;
+    return {
+      isError: true,
+      content: [
+        { type: "text", text: error.message },
+        {
+          type: "text",
+          text: "Chat with the error tools to learn more about this error.",
+        },
+      ],
+    };
+  }
+});
+
+// 8. Google Search
+server.tool(
+  "google_search",
+  "Perform a Google search for the given query.",
+  { query: { type: "string", description: "The search query." } },
+  async ({ query }) => {
+    try {
+      await mcpBeam.initialize();
+      if (!mcpBeam.context) throw new Error("Beam not initialized");
+      const page = await mcpBeam.context.getCurrentPage();
+      const url = `https://www.google.com/search?q=${encodeURIComponent(
+        query
+      )}`;
+      await page.goto(url);
+      return {
+        content: [{ type: "text", text: `Searched Google for '${query}'.` }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error.message },
+          {
+            type: "text",
+            text: "Chat with the error tools to learn more about this error.",
+          },
+        ],
+      };
+    }
+  }
+);
+
+// 9. Go to URL
+server.tool(
+  "go_to_url",
+  "Navigate the browser to the specified URL.",
+  { url: { type: "string", description: "The URL to navigate to." } },
+  async ({ url }) => {
+    try {
+      await mcpBeam.initialize();
+      if (!mcpBeam.context) throw new Error("Beam not initialized");
+      const page = await mcpBeam.context.getCurrentPage();
+      await page.goto(url);
+      return { content: [{ type: "text", text: `Navigated to ${url}` }] };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error.message },
+          {
+            type: "text",
+            text: "Chat with the error tools to learn more about this error.",
+          },
+        ],
+      };
+    }
+  }
+);
+
 async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
