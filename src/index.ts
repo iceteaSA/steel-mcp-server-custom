@@ -42,6 +42,7 @@ class BeamClass {
   public context: BrowserContext | undefined;
   private browser: Browser | undefined;
   private steelClient: Steel | undefined;
+  public debugUrl: string | undefined;
   // private run:
   constructor() {}
 
@@ -57,6 +58,7 @@ class BeamClass {
       });
 
       const session = await this.steelClient.sessions.create();
+      this.debugUrl = session.debugUrl;
 
       const connectUrl = "wss://connect.steel.dev";
       const cdpUrl = `${connectUrl}?apiKey=${process.env.STEEL_API_KEY}&sessionId=${session.id}`;
@@ -70,6 +72,7 @@ class BeamClass {
       this.browser = new Browser({
         headless: false,
       });
+      this.debugUrl = undefined;
     }
 
     this.context = new BrowserContext({
@@ -99,6 +102,18 @@ class BeamClass {
 
     await this.beam.initialize();
     this.initialized = true;
+  }
+
+  async stop() {
+    if (this.browser) {
+      if (typeof this.browser.close === "function") {
+        await this.browser.close();
+      }
+      this.browser = undefined;
+    }
+    this.context = undefined;
+    this.beam = undefined;
+    this.initialized = false;
   }
 }
 
@@ -409,6 +424,63 @@ const goToUrlTool = server.tool(
   }
 );
 
+const startBrowserTool = server.tool(
+  "start_browser",
+  "Start the browser if it is not already running.",
+  {},
+  async () => {
+    try {
+      await mcpBeam.initialize();
+      const content: { type: "text"; text: string }[] = [
+        { type: "text", text: "Browser started." },
+      ];
+      if (mcpBeam.debugUrl) {
+        content.push({
+          type: "text",
+          text: `Steel Debug URL: ${mcpBeam.debugUrl}`,
+        });
+      }
+      return { content };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error.message },
+          {
+            type: "text",
+            text: "Chat with the error tools to learn more about this error.",
+          },
+        ],
+      };
+    }
+  }
+);
+
+const stopBrowserTool = server.tool(
+  "stop_browser",
+  "Stop the browser and clean up resources.",
+  {},
+  async () => {
+    try {
+      await mcpBeam.stop();
+      return { content: [{ type: "text", text: "Browser stopped." }] };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: error.message },
+          {
+            type: "text",
+            text: "Chat with the error tools to learn more about this error.",
+          },
+        ],
+      };
+    }
+  }
+);
+
 const agentTools = [agentPromptTool];
 
 const browserTools = [
@@ -420,6 +492,8 @@ const browserTools = [
   refreshTool,
   googleSearchTool,
   goToUrlTool,
+  startBrowserTool,
+  stopBrowserTool,
 ];
 
 if (env.MCP_MODE === "agent") {
