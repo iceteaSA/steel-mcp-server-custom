@@ -516,3 +516,16 @@ runServer().catch((error) => {
   console.error("Fatal error running server:", error);
   process.exit(1);
 });
+
+// Graceful shutdown on SIGINT and SIGTERM
+process.on("SIGINT", async () => {
+  console.error("Received SIGINT, cleaning up browser sessions...");
+  await mcpBeam.stop();
+  process.exit(0);
+});
+
+process.on("SIGTERM", async () => {
+  console.error("Received SIGTERM, cleaning up browser sessions...");
+  await mcpBeam.stop();
+  process.exit(0);
+});
