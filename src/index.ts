@@ -34,27 +34,7 @@ const server = new McpServer({
   },
 });
 
-/*
-- get screenshot
-- agent / prompt
-- scroll down
-- scroll up
-- go back
-- go forward
-- refresh
-- google search
-- go to url
-*/
-
-const DEFAULT_WORKING_MEMORY_TEMPLATE = `
-# Browser Task Memory
-- Task: {task}
-- Current URL: {url}
-- Progress: Step {step}/{maxSteps}
-
-## Previous Actions and Findings
-{findings}
-`;
+const env = EnvSchema.parse(process.env);
 
 class BeamClass {
   initialized: boolean = false;
@@ -124,10 +104,7 @@ class BeamClass {
 
 const mcpBeam = new BeamClass();
 
-// --- MCP Tools Implementation ---
-
-// 1. Get Screenshot
-server.tool(
+const getScreenshotTool = server.tool(
   "get_screenshot",
   "Take a screenshot of the current page and return it as a base64-encoded PNG. Use this for visual confirmation of the current browser state. For screenshots after complex navigation or actions, use the agent_prompt tool to perform those actions first.",
   {},
@@ -163,8 +140,7 @@ server.tool(
   }
 );
 
-// 2. Agent / Prompt
-server.tool(
+const agentPromptTool = server.tool(
   "agent_prompt",
   "Use this tool for any high-level, multi-step, or vague browser task. For example: 'Go to nytimes.com and click the first article about AI', 'Search for OpenAI on Google and click the first result', or 'Log in to my account and take a screenshot'. The agent will interpret and execute the task using browser automation and LLM reasoning. This is the recommended tool for most user actions.",
   {
@@ -199,7 +175,7 @@ server.tool(
 );
 
 // 3. Scroll Down
-server.tool(
+const scrollDownTool = server.tool(
   "scroll_down",
   "Scroll down the page by a specified number of pixels (default 500). Use this for precise, atomic scrolling. For scrolling as part of a larger task (e.g., 'scroll down and click the blue button'), use agent_prompt instead.",
   {
@@ -234,8 +210,7 @@ server.tool(
   }
 );
 
-// 4. Scroll Up
-server.tool(
+const scrollUpTool = server.tool(
   "scroll_up",
   "Scroll up the page by a specified number of pixels (default 500). Use this for precise, atomic scrolling. For scrolling as part of a larger task (e.g., 'scroll up and click the first link'), use agent_prompt instead.",
   {
@@ -271,7 +246,7 @@ server.tool(
 );
 
 // 5. Go Back
-server.tool(
+const goBackTool = server.tool(
   "go_back",
   "Go back to the previous page in the browser history. For multi-step navigation (e.g., 'go back and then click a button'), use agent_prompt instead.",
   {},
@@ -300,8 +275,7 @@ server.tool(
   }
 );
 
-// 6. Go Forward
-server.tool(
+const goForwardTool = server.tool(
   "go_forward",
   "Go forward to the next page in the browser history. For multi-step navigation (e.g., 'go forward and then fill a form'), use agent_prompt instead.",
   {},
@@ -330,8 +304,7 @@ server.tool(
   }
 );
 
-// 7. Refresh
-server.tool(
+const refreshTool = server.tool(
   "refresh",
   "Reload the current page. For refreshing as part of a larger workflow (e.g., 'refresh and then take a screenshot'), use agent_prompt instead.",
   {},
@@ -358,8 +331,7 @@ server.tool(
   }
 );
 
-// 8. Google Search
-server.tool(
+const googleSearchTool = server.tool(
   "google_search",
   "Perform a Google search for the given query and navigate to the results page. For searching and then interacting with results (e.g., clicking a link), use agent_prompt instead.",
   {
@@ -404,8 +376,7 @@ server.tool(
   }
 );
 
-// 9. Go to URL
-server.tool(
+const goToUrlTool = server.tool(
   "go_to_url",
   "Navigate the browser directly to the specified URL. For navigation followed by further actions (e.g., 'go to this URL and click a button'), use agent_prompt instead.",
   {
@@ -438,6 +409,29 @@ server.tool(
   }
 );
 
+const agentTools = [agentPromptTool];
+
+const browserTools = [
+  getScreenshotTool,
+  scrollDownTool,
+  scrollUpTool,
+  goBackTool,
+  goForwardTool,
+  refreshTool,
+  googleSearchTool,
+  goToUrlTool,
+];
+
+if (env.MCP_MODE === "agent") {
+  agentTools.forEach((tool) => tool.enable());
+  browserTools.forEach((tool) => tool.disable());
+} else if (env.MCP_MODE === "toolset") {
+  agentTools.forEach((tool) => tool.disable());
+  browserTools.forEach((tool) => tool.enable());
+} else {
+  agentTools.forEach((tool) => tool.enable());
+  browserTools.forEach((tool) => tool.enable());
+}
 async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

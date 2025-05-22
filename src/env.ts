@@ -122,6 +122,15 @@ dotenv.config();
 
 export const EnvSchema = z
   .object({
+    MCP_MODE: z
+      .string()
+      .transform((arg) => arg.toLowerCase())
+      .refine((arg) => arg === "agent" || arg === "toolset" || arg === "both", {
+        message:
+          "MCP_MODE environment variable must be either 'agent' or 'tool' or 'both' (case insensitive)",
+      })
+      .default("both")
+      .optional(),
     BROWSER_MODE: z
       .string()
       .transform((arg) => arg.toLowerCase())
