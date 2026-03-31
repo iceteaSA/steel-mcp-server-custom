@@ -107,6 +107,10 @@ Every handler calls `await mgr.getPage()` (which auto-initialises) then works wi
 
 | Tool | Description |
 |---|---|
+| `list_tabs` | List all open tabs with ID, URL, title, active state |
+| `new_tab` | Open a new tab (optionally navigate to URL immediately), returns tab ID |
+| `switch_tab` | Switch active tab by ID — all tools then operate on that tab |
+| `close_tab` | Close a tab by ID (default: current); auto-switches to next remaining |
 | `get_current_url` | Returns current page URL and title |
 | `get_screenshot` | Screenshot with outputMode, format, scale, clip, quality |
 | `get_page_text` | Page text with selector, maxChars, outputMode, includeLinks |

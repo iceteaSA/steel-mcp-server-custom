@@ -29,13 +29,28 @@ type ConsoleMessage = { level: string; text: string; timestamp: number };
 class BrowserManager {
   private browser: Browser | undefined;
   private browserContext: BrowserContext | undefined;
-  private currentPage: Page | undefined;
   private steelClient: Steel | undefined;
   private sessionId: string | undefined;
   public debugUrl: string | undefined;
   public sessionViewerUrl: string | undefined;
   public consoleLogs: ConsoleMessage[] = [];
   public initialized = false;
+
+  // Tab management — integer IDs starting at 1.
+  private tabs: Map<number, Page> = new Map();
+  private nextTabId = 1;
+  private currentTabId = 1;
+
+  private allocateTab(page: Page): number {
+    const id = this.nextTabId++;
+    this.tabs.set(id, page);
+    this.attachConsoleListener(page);
+    return id;
+  }
+
+  get currentPage(): Page | undefined {
+    return this.tabs.get(this.currentTabId);
+  }
 
   /**
    * Rewrite an internal Steel URL to the public-facing URL.
@@ -97,7 +112,8 @@ class BrowserManager {
       // DO NOT call newContext() or newPage() — both create phantom objects
       // that are disconnected from the real Steel session tab.
       this.browserContext = this.browser.contexts()[0];
-      this.currentPage = this.browserContext.pages()[0];
+      const initialPage = this.browserContext.pages()[0];
+      this.currentTabId = this.allocateTab(initialPage);
     } else {
       // Local mode — launch Playwright Chromium directly.
       this.browser = await chromium.launch({ headless: false });
@@ -107,10 +123,10 @@ class BrowserManager {
           height: env.DEFAULT_VIEWPORT_HEIGHT,
         },
       });
-      this.currentPage = await this.browserContext.newPage();
+      const initialPage = await this.browserContext.newPage();
+      this.currentTabId = this.allocateTab(initialPage);
     }
 
-    this.attachConsoleListener(this.currentPage);
     this.initialized = true;
   }
 
@@ -134,15 +150,69 @@ class BrowserManager {
 
   async getPage(): Promise<Page> {
     await this.initialize();
-    // If the current page was closed (e.g. after stop/reinit), open a new one.
-    // Do not fall back to pages() — on a CDP-connected context the list may be
-    // empty even when the browser is live.
-    if (!this.currentPage || this.currentPage.isClosed()) {
-      this.currentPage = await this.browserContext!.newPage();
+    const page = this.currentPage;
+    if (!page || page.isClosed()) {
+      // Current tab was closed externally — open a fresh one and register it.
+      const newPage = await this.browserContext!.newPage();
+      this.currentTabId = this.allocateTab(newPage);
+      return newPage;
     }
-    // Re-attach console listener if the page changed (e.g. after navigation or popup).
-    this.attachConsoleListener(this.currentPage);
-    return this.currentPage;
+    return page;
+  }
+
+  /** Open a new tab, register it, switch to it, and return its ID and page. */
+  async newTab(url?: string): Promise<{ tabId: number; page: Page }> {
+    await this.initialize();
+    const page = await this.browserContext!.newPage();
+    const tabId = this.allocateTab(page);
+    this.currentTabId = tabId;
+    if (url) {
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+    }
+    return { tabId, page };
+  }
+
+  /** Switch the active tab. Throws if tabId does not exist or is closed. */
+  switchTab(tabId: number): Page {
+    const page = this.tabs.get(tabId);
+    if (!page) throw new Error(`Tab ${tabId} does not exist.`);
+    if (page.isClosed()) throw new Error(`Tab ${tabId} is closed.`);
+    this.currentTabId = tabId;
+    return page;
+  }
+
+  /** Close a tab by ID (default: current). Switches to nearest remaining tab. */
+  async closeTab(tabId?: number): Promise<void> {
+    const id = tabId ?? this.currentTabId;
+    const page = this.tabs.get(id);
+    if (!page) throw new Error(`Tab ${id} does not exist.`);
+    await page.close().catch(() => {});
+    this.tabs.delete(id);
+
+    // If we closed the active tab, switch to the highest remaining tab.
+    if (id === this.currentTabId) {
+      const remaining = [...this.tabs.keys()];
+      if (remaining.length > 0) {
+        this.currentTabId = remaining[remaining.length - 1];
+      }
+      // If no tabs remain, next getPage() will open a fresh one.
+    }
+  }
+
+  /** Return a snapshot of all open tabs. */
+  async listTabs(): Promise<{ tabId: number; url: string; title: string; active: boolean }[]> {
+    await this.initialize();
+    const result = [];
+    for (const [id, page] of this.tabs) {
+      if (page.isClosed()) continue;
+      result.push({
+        tabId: id,
+        url: page.url(),
+        title: await page.title(),
+        active: id === this.currentTabId,
+      });
+    }
+    return result;
   }
 
   async stop() {
@@ -164,7 +234,9 @@ class BrowserManager {
     }
 
     this.browserContext = undefined;
-    this.currentPage = undefined;
+    this.tabs.clear();
+    this.nextTabId = 1;
+    this.currentTabId = 1;
     this.consoleLogs = [];
     this.debugUrl = undefined;
     this.sessionViewerUrl = undefined;
@@ -202,6 +274,104 @@ async function writeToFile(
 // -----------------------------------------------------------------------------
 // Tools
 // -----------------------------------------------------------------------------
+
+// list_tabs -------------------------------------------------------------------
+server.tool(
+  "list_tabs",
+  "List all open browser tabs with their tab ID, URL, title, and which is currently active.",
+  {},
+  async () => {
+    try {
+      const tabs = await mgr.listTabs();
+      if (tabs.length === 0) {
+        return { content: [{ type: "text", text: "No open tabs." }] };
+      }
+      const lines = tabs.map(
+        (t) => `[Tab ${t.tabId}]${t.active ? " *" : ""}  ${t.url}  —  ${t.title}`
+      );
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// new_tab ---------------------------------------------------------------------
+server.tool(
+  "new_tab",
+  "Open a new browser tab and switch to it. Optionally navigate to a URL immediately. Returns the new tab ID.",
+  {
+    url: z.string().optional().describe("URL to navigate to immediately after opening. Optional — omit to open a blank tab."),
+  },
+  async ({ url }) => {
+    try {
+      const { tabId, page } = await mgr.newTab(url);
+      await globalWait();
+      const finalUrl = page.url();
+      const title = await page.title();
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Opened Tab ${tabId}${url ? `\nURL: ${finalUrl}\nTitle: ${title}` : " (blank)"}`,
+          },
+        ],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// switch_tab ------------------------------------------------------------------
+server.tool(
+  "switch_tab",
+  "Switch the active tab. All subsequent tool calls (get_screenshot, click, type, etc.) will operate on this tab.",
+  {
+    tabId: z.number().int().min(1).describe("Tab ID to switch to (as returned by list_tabs or new_tab)."),
+  },
+  async ({ tabId }) => {
+    try {
+      const page = mgr.switchTab(tabId);
+      const url = page.url();
+      const title = await page.title();
+      return {
+        content: [{ type: "text", text: `Switched to Tab ${tabId}\nURL: ${url}\nTitle: ${title}` }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// close_tab -------------------------------------------------------------------
+server.tool(
+  "close_tab",
+  "Close a browser tab by ID. Defaults to the currently active tab. Automatically switches to the next available tab.",
+  {
+    tabId: z.number().int().min(1).optional().describe("Tab ID to close. Defaults to the currently active tab."),
+  },
+  async ({ tabId }) => {
+    try {
+      const tabs = await mgr.listTabs();
+      const id = tabId ?? tabs.find((t) => t.active)?.tabId;
+      if (!id) return { isError: true, content: [{ type: "text", text: "No active tab to close." }] };
+      await mgr.closeTab(id);
+      const remaining = await mgr.listTabs();
+      const nowActive = remaining.find((t) => t.active);
+      const suffix = nowActive
+        ? `\nNow on Tab ${nowActive.tabId}: ${nowActive.url}`
+        : "\nNo tabs remaining.";
+      return { content: [{ type: "text", text: `Closed Tab ${id}.${suffix}` }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
 
 // get_current_url -------------------------------------------------------------
 server.tool(

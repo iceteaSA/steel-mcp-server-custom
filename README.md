@@ -73,6 +73,10 @@ BROWSER_MODE=local node dist/index.cjs
 
 | Tool | Description |
 |---|---|
+| `list_tabs` | List all open tabs with ID, URL, title, active state |
+| `new_tab` | Open a new tab (optionally navigate to URL), returns tab ID |
+| `switch_tab` | Switch active tab by ID |
+| `close_tab` | Close a tab by ID (default: current); auto-switches to next |
 | `get_current_url` | Current page URL and title |
 | `get_screenshot` | Screenshot — format, quality, scale, clip, fullPage, outputMode |
 | `get_page_text` | Visible page text — selector, maxChars, outputMode, includeLinks |
