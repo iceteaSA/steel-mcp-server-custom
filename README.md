@@ -130,9 +130,25 @@ Add to `~/.config/opencode/opencode.jsonc`:
 }
 ```
 
-### Claude Code / Claude Desktop
+### Claude Code
 
-Add to `~/.claude/settings.json` (Claude Code) or `~/Library/Application Support/Claude/claude_desktop_config.json` (Claude Desktop):
+Run once to register at user scope (available in all projects):
+
+```bash
+claude mcp add --transport stdio \
+  --env BROWSER_MODE=steel \
+  --env STEEL_BASE_URL=http://10.1.1.1:3000 \
+  --env GLOBAL_WAIT_SECONDS=2 \
+  --env OUTPUT_DIR=/tmp/steel-mcp \
+  --scope user \
+  steel -- node /path/to/steel-mcp-server-custom/dist/index.cjs
+```
+
+Verify with `claude mcp get steel`.
+
+### Claude Desktop
+
+Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `~/.config/Claude/claude_desktop_config.json` (Linux):
 
 ```json
 {
