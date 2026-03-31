@@ -47,13 +47,18 @@ const env = EnvSchema.parse(process.env);
 // -----------------------------------------------------------------------------
 // BeamClass — wraps browser lifecycle (Steel cloud or local)
 // -----------------------------------------------------------------------------
+
+type ConsoleMessage = { level: string; text: string; timestamp: number };
+
 class BeamClass {
   initialized: boolean = false;
   public beam: Beam | undefined;
   public context: BrowserContext | undefined;
   private browser: Browser | undefined;
   private steelClient: Steel | undefined;
+  private sessionId: string | undefined;
   public debugUrl: string | undefined;
+  public consoleLogs: ConsoleMessage[] = [];
 
   constructor() {}
 
@@ -61,7 +66,6 @@ class BeamClass {
     if (this.initialized) {
       return;
     }
-    const env = EnvSchema.parse(process.env);
 
     if (env.BROWSER_MODE === "steel") {
       this.steelClient = new Steel({
@@ -70,10 +74,11 @@ class BeamClass {
       });
 
       const session = await this.steelClient.sessions.create();
+      this.sessionId = session.id;
       this.debugUrl = session.debugUrl;
 
-      // Resolve the CDP WebSocket URL. If STEEL_BASE_URL is provided, derive
-      // the ws(s):// endpoint from it; otherwise fall back to Steel cloud.
+      // Resolve CDP WebSocket URL. Derive ws(s):// from STEEL_BASE_URL if set,
+      // otherwise fall back to Steel Cloud.
       let cdpUrl: string;
       if (env.STEEL_BASE_URL) {
         const base = env.STEEL_BASE_URL.replace(/\/$/, "");
@@ -91,7 +96,7 @@ class BeamClass {
         headless: false,
       });
     } else {
-      // Local mode — launch a browser directly (no Steel session).
+      // Local mode — launch a plain browser directly (no Steel session).
       this.browser = new Browser({
         headless: false,
       });
@@ -107,6 +112,25 @@ class BeamClass {
         },
       },
     });
+
+    // Wire up console log capture on the initial page.
+    // New pages opened later will not be captured automatically.
+    try {
+      const page = await this.context.getCurrentPage();
+      page.on("console", (msg) => {
+        this.consoleLogs.push({
+          level: msg.type(),
+          text: msg.text(),
+          timestamp: Date.now(),
+        });
+        // Keep at most 500 entries to avoid unbounded memory growth.
+        if (this.consoleLogs.length > 500) {
+          this.consoleLogs.splice(0, this.consoleLogs.length - 500);
+        }
+      });
+    } catch {
+      // Non-fatal — console capture is best-effort.
+    }
 
     const openAIModelName: OpenAIChatModelId =
       env.OPENAI_API_KEY && env.MODEL_NAME
@@ -133,6 +157,19 @@ class BeamClass {
   }
 
   async stop() {
+    // Release the Steel session if one was created (cloud or self-hosted).
+    if (this.steelClient && this.sessionId) {
+      try {
+        await this.steelClient.sessions.release(this.sessionId);
+      } catch (err) {
+        console.error(
+          `Failed to release Steel session ${this.sessionId}:`,
+          (err as Error).message
+        );
+      }
+      this.sessionId = undefined;
+    }
+
     if (this.browser) {
       if (typeof this.browser.close === "function") {
         await this.browser.close();
@@ -141,6 +178,7 @@ class BeamClass {
     }
     this.context = undefined;
     this.beam = undefined;
+    this.consoleLogs = [];
     this.initialized = false;
   }
 }
@@ -148,16 +186,32 @@ class BeamClass {
 const mcpBeam = new BeamClass();
 
 // -----------------------------------------------------------------------------
-// Helper: resolve inline vs file output mode
+// Helpers
 // -----------------------------------------------------------------------------
+
+/** Sleep for ms milliseconds. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Wait for GLOBAL_WAIT_SECONDS after an action tool completes (if > 0). */
+async function globalWait() {
+  if (env.GLOBAL_WAIT_SECONDS > 0) {
+    await sleep(env.GLOBAL_WAIT_SECONDS * 1000);
+  }
+}
+
+/**
+ * Write data to a file, creating parent directories as needed.
+ * Returns the resolved file path.
+ */
 async function writeToFile(
   data: Buffer | string,
-  defaultPath: string,
+  defaultName: string,
   outputPath?: string
 ): Promise<string> {
-  const dir = env.OUTPUT_DIR;
-  await fs.mkdir(dir, { recursive: true });
-  const filePath = outputPath ?? path.join(dir, defaultPath);
+  const filePath = outputPath ?? path.join(env.OUTPUT_DIR, defaultName);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, data);
   return filePath;
 }
@@ -185,6 +239,7 @@ This is the recommended tool for most user actions.`,
       await mcpBeam.initialize();
       if (!mcpBeam.beam) throw new Error("Beam not initialized");
       await mcpBeam.beam.run({ task });
+      await globalWait();
       return {
         content: [{ type: "text", text: `Agent task completed: ${task}` }],
       };
@@ -289,28 +344,32 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
         width: env.DEFAULT_VIEWPORT_WIDTH,
         height: env.DEFAULT_VIEWPORT_HEIGHT,
       };
-      if (scale !== 1.0) {
-        await page.setViewportSize({
-          width: Math.round(origVp.width * scale),
-          height: Math.round(origVp.height * scale),
-        });
+
+      let buffer: Buffer;
+      try {
+        if (scale !== 1.0) {
+          await page.setViewportSize({
+            width: Math.round(origVp.width * scale),
+            height: Math.round(origVp.height * scale),
+          });
+        }
+
+        const screenshotOpts: Parameters<typeof page.screenshot>[0] = {
+          type: format,
+          fullPage,
+        };
+        if (format === "jpeg") screenshotOpts.quality = effectiveQuality;
+        if (clip) screenshotOpts.clip = clip;
+
+        buffer = await page.screenshot(screenshotOpts);
+      } finally {
+        // Always restore original viewport even if screenshot throws.
+        if (scale !== 1.0) {
+          await page.setViewportSize(origVp).catch(() => {});
+        }
       }
 
-      const screenshotOpts: Parameters<typeof page.screenshot>[0] = {
-        type: format,
-        fullPage,
-      };
-      if (format === "jpeg") screenshotOpts.quality = effectiveQuality;
-      if (clip) screenshotOpts.clip = clip;
-
-      const buffer = await page.screenshot(screenshotOpts);
-
-      // Restore original viewport
-      if (scale !== 1.0) {
-        await page.setViewportSize(origVp);
-      }
-
-      // Auto-downgrade to file if too large
+      // Auto-downgrade to file if too large.
       const effectiveMode =
         outputMode === "inline" && buffer.length > effectiveMaxInlineBytes
           ? "file"
@@ -410,9 +469,7 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much i
 
       if (includeLinks) {
         text = await page.evaluate((sel: string | null) => {
-          const root = sel
-            ? document.querySelector(sel)
-            : document.body;
+          const root = sel ? document.querySelector(sel) : document.body;
           if (!root) return "";
           const walk = (node: Element): string => {
             if (node.tagName === "A") {
@@ -421,9 +478,7 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much i
             }
             return Array.from(node.childNodes)
               .map((n) =>
-                n.nodeType === 3
-                  ? n.textContent ?? ""
-                  : walk(n as Element)
+                n.nodeType === 3 ? n.textContent ?? "" : walk(n as Element)
               )
               .join(" ");
           };
@@ -431,9 +486,7 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much i
         }, selector ?? null);
       } else {
         text = await page.evaluate((sel: string | null) => {
-          const root = sel
-            ? document.querySelector(sel)
-            : document.body;
+          const root = sel ? document.querySelector(sel) : document.body;
           return (root as HTMLElement)?.innerText ?? "";
         }, selector ?? null);
       }
@@ -482,6 +535,211 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much i
   }
 );
 
+// wait_for --------------------------------------------------------------------
+const waitForTool = server.tool(
+  "wait_for",
+  `Wait for a condition on the page before proceeding — more reliable than sleeping.
+
+Use this after an action that triggers async changes (form submit, click, navigation) when you need to confirm the page has updated before reading or screenshotting.
+
+Conditions (at least one required):
+- selector: wait for a CSS selector to appear in the DOM
+- text: wait for a string to appear anywhere on the page
+- textGone: wait for a string to disappear from the page
+- timeout: max wait in ms (default 10000)
+
+Returns success with elapsed time, or an error on timeout.`,
+  {
+    selector: z
+      .string()
+      .optional()
+      .describe("CSS selector to wait for (e.g. '#results', '.loaded')."),
+    text: z
+      .string()
+      .optional()
+      .describe("Text string to wait for anywhere on the page."),
+    textGone: z
+      .string()
+      .optional()
+      .describe("Text string to wait for to disappear from the page."),
+    timeout: z
+      .number()
+      .min(100)
+      .max(60000)
+      .default(10000)
+      .optional()
+      .describe(
+        "Maximum time to wait in milliseconds. Default: 10000 (10s). Max: 60000 (60s)."
+      ),
+  },
+  async ({ selector, text, textGone, timeout = 10000 }) => {
+    try {
+      await mcpBeam.initialize();
+      if (!mcpBeam.context) throw new Error("Beam not initialized");
+      const page = await mcpBeam.context.getCurrentPage();
+
+      if (!selector && !text && !textGone) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: "At least one of 'selector', 'text', or 'textGone' must be provided.",
+            },
+          ],
+        };
+      }
+
+      const start = Date.now();
+      const conditions: Promise<void>[] = [];
+
+      if (selector) {
+        conditions.push(
+          page
+            .waitForSelector(selector, { timeout })
+            .then(() => undefined)
+        );
+      }
+
+      if (text) {
+        conditions.push(
+          page
+            .waitForFunction(
+              (t: string) => document.body?.innerText?.includes(t),
+              text,
+              { timeout }
+            )
+            .then(() => undefined)
+        );
+      }
+
+      if (textGone) {
+        conditions.push(
+          page
+            .waitForFunction(
+              (t: string) => !document.body?.innerText?.includes(t),
+              textGone,
+              { timeout }
+            )
+            .then(() => undefined)
+        );
+      }
+
+      await Promise.all(conditions);
+      const elapsed = Date.now() - start;
+
+      const parts: string[] = [];
+      if (selector) parts.push(`selector "${selector}"`);
+      if (text) parts.push(`text "${text}"`);
+      if (textGone) parts.push(`text gone "${textGone}"`);
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Condition met: ${parts.join(", ")} — elapsed ${elapsed}ms.`,
+          },
+        ],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: `wait_for timed out or failed: ${error.message}`,
+          },
+        ],
+      };
+    }
+  }
+);
+
+// console_log -----------------------------------------------------------------
+const consoleLogTool = server.tool(
+  "console_log",
+  `Return browser console messages captured since the browser was started or last cleared.
+
+CONTEXT BUDGET — console output can be large on noisy pages. Use the level filter to limit to errors/warnings. Use clear: true to reset the buffer after reading.
+
+Useful for debugging JavaScript errors, network failures, or confirming that an action triggered the expected log output.`,
+  {
+    level: z
+      .enum(["all", "error", "warning", "info", "log"])
+      .default("all")
+      .optional()
+      .describe(
+        "Filter by severity. 'all' returns everything. Default: 'all'."
+      ),
+    maxEntries: z
+      .number()
+      .min(1)
+      .max(500)
+      .default(50)
+      .optional()
+      .describe(
+        "Maximum number of entries to return (most recent). Default: 50."
+      ),
+    clear: z
+      .boolean()
+      .default(false)
+      .optional()
+      .describe(
+        "Clear the captured log buffer after returning results. Default: false."
+      ),
+  },
+  async ({ level = "all", maxEntries = 50, clear = false }) => {
+    try {
+      await mcpBeam.initialize();
+
+      let logs = mcpBeam.consoleLogs;
+      if (level !== "all") {
+        logs = logs.filter((m) => m.level === level);
+      }
+      // Return most recent entries.
+      const slice = logs.slice(-maxEntries);
+
+      if (clear) {
+        mcpBeam.consoleLogs = [];
+      }
+
+      if (slice.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No console messages captured${level !== "all" ? ` at level '${level}'` : ""}.`,
+            },
+          ],
+        };
+      }
+
+      const formatted = slice
+        .map((m) => {
+          const ts = new Date(m.timestamp).toISOString();
+          return `[${ts}] [${m.level.toUpperCase()}] ${m.text}`;
+        })
+        .join("\n");
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${slice.length} console message(s)${level !== "all" ? ` (level: ${level})` : ""}:\n\n${formatted}`,
+          },
+        ],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [{ type: "text", text: error.message }],
+      };
+    }
+  }
+);
+
 // scroll_down -----------------------------------------------------------------
 const scrollDownTool = server.tool(
   "scroll_down",
@@ -499,6 +757,7 @@ const scrollDownTool = server.tool(
       if (!mcpBeam.context) throw new Error("Beam not initialized");
       const page = await mcpBeam.context.getCurrentPage();
       await page.evaluate(`window.scrollBy(0, ${pixels})`);
+      await globalWait();
       return {
         content: [{ type: "text", text: `Scrolled down by ${pixels} pixels.` }],
       };
@@ -529,6 +788,7 @@ const scrollUpTool = server.tool(
       if (!mcpBeam.context) throw new Error("Beam not initialized");
       const page = await mcpBeam.context.getCurrentPage();
       await page.evaluate(`window.scrollBy(0, -${pixels})`);
+      await globalWait();
       return {
         content: [{ type: "text", text: `Scrolled up by ${pixels} pixels.` }],
       };
@@ -553,6 +813,7 @@ const goBackTool = server.tool(
       if (!mcpBeam.context) throw new Error("Beam not initialized");
       const page = await mcpBeam.context.getCurrentPage();
       await page.goBack();
+      await globalWait();
       return {
         content: [{ type: "text", text: "Went back to the previous page." }],
       };
@@ -577,6 +838,7 @@ const goForwardTool = server.tool(
       if (!mcpBeam.context) throw new Error("Beam not initialized");
       const page = await mcpBeam.context.getCurrentPage();
       await page.goForward();
+      await globalWait();
       return {
         content: [{ type: "text", text: "Went forward to the next page." }],
       };
@@ -601,6 +863,7 @@ const refreshTool = server.tool(
       if (!mcpBeam.context) throw new Error("Beam not initialized");
       const page = await mcpBeam.context.getCurrentPage();
       await page.reload();
+      await globalWait();
       return { content: [{ type: "text", text: "Page reloaded." }] };
     } catch (err) {
       const error = err as Error;
@@ -632,12 +895,13 @@ CONTEXT BUDGET — returns an inline screenshot of the results page. For searchi
       const page = await mcpBeam.context.getCurrentPage();
       const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
       await page.goto(url);
+      await globalWait();
       const screenshot = await page.screenshot();
       return {
         content: [
           {
             type: "image",
-            data: (screenshot as Buffer).toString("base64"),
+            data: screenshot.toString("base64"),
             mimeType: "image/png",
           },
         ],
@@ -669,6 +933,7 @@ const goToUrlTool = server.tool(
       if (!mcpBeam.context) throw new Error("Beam not initialized");
       const page = await mcpBeam.context.getCurrentPage();
       await page.goto(url);
+      await globalWait();
       return { content: [{ type: "text", text: `Navigated to ${url}` }] };
     } catch (err) {
       const error = err as Error;
@@ -711,7 +976,7 @@ const startBrowserTool = server.tool(
 // stop_browser ----------------------------------------------------------------
 const stopBrowserTool = server.tool(
   "stop_browser",
-  "Stop the browser and clean up resources.",
+  "Stop the browser and clean up resources. Releases the Steel session if one is active.",
   {},
   async () => {
     try {
@@ -735,6 +1000,8 @@ const agentTools = [agentPromptTool];
 const browserTools = [
   getScreenshotTool,
   getPageTextTool,
+  waitForTool,
+  consoleLogTool,
   scrollDownTool,
   scrollUpTool,
   goBackTool,

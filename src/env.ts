@@ -127,10 +127,9 @@ export const EnvSchema = z
       .transform((arg) => arg.toLowerCase())
       .refine((arg) => arg === "agent" || arg === "toolset" || arg === "both", {
         message:
-          "MCP_MODE environment variable must be either 'agent' or 'tool' or 'both' (case insensitive)",
+          "MCP_MODE environment variable must be either 'agent', 'toolset', or 'both' (case insensitive)",
       })
-      .default("both")
-      .optional(),
+      .default("both"),
     BROWSER_MODE: z
       .string()
       .transform((arg) => arg.toLowerCase())
@@ -178,15 +177,18 @@ export const EnvSchema = z
   })
   .refine(
     (env) => {
-      if (env.OPENAI_API_KEY && env.MODEL_NAME) {
-        return supportedOpenAIModels.includes(env.MODEL_NAME);
-      }
-      if (env.ANTHROPIC_API_KEY && env.MODEL_NAME) {
-        return supportedAnthropicModels.includes(
-          env.MODEL_NAME as AnthropicMessagesModelId
-        );
-      }
-      return true;
+      if (!env.MODEL_NAME) return true;
+      // Accept the model if it belongs to the list of whichever key is set.
+      // When only one key is set, validate against that provider's list.
+      // When both keys are set, accept any model from either provider.
+      const inOpenAI = supportedOpenAIModels.includes(env.MODEL_NAME);
+      const inAnthropic = supportedAnthropicModels.includes(
+        env.MODEL_NAME as AnthropicMessagesModelId
+      );
+      if (env.OPENAI_API_KEY && !env.ANTHROPIC_API_KEY) return inOpenAI;
+      if (env.ANTHROPIC_API_KEY && !env.OPENAI_API_KEY) return inAnthropic;
+      // Both keys set — accept either.
+      return inOpenAI || inAnthropic;
     },
     {
       message: "MODEL_NAME must be a supported OpenAI or Anthropic model.",
@@ -195,14 +197,16 @@ export const EnvSchema = z
   )
   .refine(
     (env) => {
-      if (env.BROWSER_MODE === "steel") {
+      // STEEL_API_KEY is required for Steel Cloud (no STEEL_BASE_URL).
+      // Self-hosted instances (STEEL_BASE_URL set) typically don't need a key.
+      if (env.BROWSER_MODE === "steel" && !env.STEEL_BASE_URL) {
         return !!env.STEEL_API_KEY;
       }
       return true;
     },
     {
       message:
-        "STEEL_API_KEY must be set when BROWSER_MODE is 'steel' ( steel is set by default ).",
+        "STEEL_API_KEY must be set when BROWSER_MODE is 'steel' and STEEL_BASE_URL is not set (Steel Cloud mode).",
       path: ["STEEL_API_KEY"],
     }
   );
