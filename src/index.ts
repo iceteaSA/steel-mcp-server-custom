@@ -1,1126 +1,1036 @@
 #!/usr/bin/env node
 
-import { Server } from "@modelcontextprotocol/sdk/server/index.js";
+import fs from "fs/promises";
+import path from "path";
+
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import {
-  CallToolRequestSchema,
-  ListResourcesRequestSchema,
-  ListToolsRequestSchema,
-  ReadResourceRequestSchema,
-  CallToolResult,
-  TextContent,
-  ImageContent,
-  Tool,
-} from "@modelcontextprotocol/sdk/types.js";
-import puppeteer, { Browser, Page } from "puppeteer";
+import { chromium, Browser, BrowserContext, Page } from "playwright";
 import { Steel } from "steel-sdk";
-import dotenv from "dotenv";
-
-dotenv.config();
-
-// -----------------------------------------------------------------------------
-// Environment Variables
-// -----------------------------------------------------------------------------
-const steelLocal = process.env.STEEL_LOCAL === "true";
-const steelKey = process.env.STEEL_API_KEY || undefined;
-const globalWaitSeconds = Number(process.env.GLOBAL_WAIT_SECONDS) || 0;
-
-/**
- * STEEL_BASE_URL is for self-hosted or custom Steel endpoints.
- * By default, set it to the public cloud endpoint (https://api.steel.dev).
- * If STEEL_LOCAL is true and no STEEL_BASE_URL is specified,
- * we'll default to http://localhost:3000.
- */
-let steelBaseURL = process.env.STEEL_BASE_URL || "https://api.steel.dev";
-if (steelLocal && !process.env.STEEL_BASE_URL) {
-  steelBaseURL = "http://localhost:3000";
-}
+import { EnvSchema } from "./env";
+import { z } from "zod";
 
 // -----------------------------------------------------------------------------
-// Logging / Debug Info
+// MCP server instance
 // -----------------------------------------------------------------------------
-console.error(
-  JSON.stringify({
-    message: "Initializing MCP server",
-    config: {
-      steelLocal,
-      hasSteelKey: !!steelKey,
-      globalWaitSeconds,
-      nodeVersion: process.version,
-      platform: process.platform,
-      steelBaseURL,
-    },
-  })
+const server = new McpServer(
+  { name: "Steel Browser MCP Server", version: "1.0.0" },
+  { capabilities: { tools: {} } }
 );
 
+const env = EnvSchema.parse(process.env);
+
 // -----------------------------------------------------------------------------
-// Globals and Utilities
+// BrowserManager — wraps Playwright browser lifecycle (Steel or local)
 // -----------------------------------------------------------------------------
-const screenshots = new Map<string, Buffer>();
-const consoleLogs: string[] = [];
 
-// Define the marking script (truncated for brevity here)
-const markPageScript = `
-  if (typeof window.labels === 'undefined') {
-    window.labels = [];
-  }
+type ConsoleMessage = { level: string; text: string; timestamp: number };
 
-  function unmarkPage() {
-    for (const label of window.labels) {
-      document.body.removeChild(label);
-    }
-    window.labels = [];
+class BrowserManager {
+  private browser: Browser | undefined;
+  private browserContext: BrowserContext | undefined;
+  private currentPage: Page | undefined;
+  private steelClient: Steel | undefined;
+  private sessionId: string | undefined;
+  public debugUrl: string | undefined;
+  public consoleLogs: ConsoleMessage[] = [];
+  public initialized = false;
 
-    const labeledElements = document.querySelectorAll('[data-label]');
-    labeledElements.forEach(el => el.removeAttribute('data-label'));
-  }
+  async initialize() {
+    if (this.initialized) return;
 
-  function markPage() {
-    unmarkPage();
-    var items = Array.from(document.querySelectorAll("a, button, input, select, textarea, [role='button'], [role='link']"))
-      .map(function (element) {
-        var vw = Math.max(document.documentElement.clientWidth || 0, window.innerWidth || 0);
-        var vh = Math.max(document.documentElement.clientHeight || 0, window.innerHeight || 0);
-        var textualContent = element.textContent?.trim().replace(/\\s{2,}/g, " ") || "";
-        var elementType = element.tagName.toLowerCase();
-        var ariaLabel = element.getAttribute("aria-label") || "";
-
-        var rect = element.getBoundingClientRect();
-        var bbox = {
-          left: Math.max(0, rect.left),
-          top: Math.max(0, rect.top),
-          right: Math.min(vw, rect.right),
-          bottom: Math.min(vh, rect.bottom),
-          width: Math.min(vw, rect.right) - Math.max(0, rect.left),
-          height: Math.min(vh, rect.bottom) - Math.max(0, rect.top)
-        };
-
-        return {
-          element,
-          include:
-            element.tagName === "INPUT" ||
-            element.tagName === "TEXTAREA" ||
-            element.tagName === "SELECT" ||
-            element.tagName === "BUTTON" ||
-            element.tagName === "A" ||
-            element.onclick != null ||
-            window.getComputedStyle(element).cursor == "pointer" ||
-            element.tagName === "IFRAME" ||
-            element.tagName === "VIDEO",
-          bbox,
-          rects: [bbox],
-          text: textualContent,
-          type: elementType,
-          ariaLabel
-        };
-      })
-      .filter(item => item.include && item.bbox.width * item.bbox.height >= 20);
-
-    items = items.filter(
-      (x) => !items.some((y) => x.element.contains(y.element) && x !== y)
-    );
-
-    items.forEach((item, index) => {
-      item.element.setAttribute("data-label", index.toString());
-
-      item.rects.forEach((bbox) => {
-        const newElement = document.createElement("div");
-        const borderColor = '#' + Math.floor(Math.random()*16777215).toString(16);
-        newElement.style.outline = \`2px dashed \${borderColor}\`;
-        newElement.style.position = "fixed";
-        newElement.style.left = bbox.left + "px";
-        newElement.style.top = bbox.top + "px";
-        newElement.style.width = bbox.width + "px";
-        newElement.style.height = bbox.height + "px";
-        newElement.style.pointerEvents = "none";
-        newElement.style.boxSizing = "border-box";
-        newElement.style.zIndex = "2147483647";
-
-        const label = document.createElement("span");
-        label.textContent = index.toString();
-        label.style.position = "absolute";
-        const hasSpaceAbove = bbox.top >= 20;
-        if (hasSpaceAbove) {
-            label.style.top = "-19px";
-            label.style.left = "0px";
-        } else {
-            label.style.top = "0px";
-            label.style.left = "0px";
-        }
-        label.style.background = borderColor;
-        label.style.color = "white";
-        label.style.padding = "2px 4px";
-        label.style.fontSize = "12px";
-        label.style.borderRadius = "2px";
-        label.style.zIndex = "2147483647";
-        newElement.appendChild(label);
-
-        document.body.appendChild(newElement);
-        window.labels.push(newElement);
+    if (env.BROWSER_MODE === "steel") {
+      // The Steel SDK requires steelAPIKey at construction time.
+      // For self-hosted instances, pass a placeholder — the server ignores it.
+      this.steelClient = new Steel({
+        steelAPIKey: env.STEEL_API_KEY ?? "local",
+        ...(env.STEEL_BASE_URL ? { baseURL: env.STEEL_BASE_URL } : {}),
       });
-    });
 
-    return items.map((item) => ({
-      x: item.bbox.left + item.bbox.width / 2,
-      y: item.bbox.top + item.bbox.height / 2,
-      type: item.type,
-      text: item.text,
-      ariaLabel: item.ariaLabel,
-    }));
+      const session = await this.steelClient.sessions.create();
+      this.sessionId = session.id;
+      this.debugUrl = session.debugUrl;
+
+      // Derive CDP WebSocket URL from STEEL_BASE_URL if set, else use Steel Cloud.
+      let wsUrl: string;
+      if (env.STEEL_BASE_URL) {
+        const base = env.STEEL_BASE_URL.replace(/\/$/, "");
+        wsUrl = base.startsWith("https://")
+          ? base.replace("https://", "wss://")
+          : base.replace("http://", "ws://");
+        wsUrl = `${wsUrl}/?sessionId=${session.id}`;
+      } else {
+        wsUrl = `wss://connect.steel.dev?apiKey=${env.STEEL_API_KEY}&sessionId=${session.id}`;
+      }
+
+      this.browser = await chromium.connectOverCDP(wsUrl);
+      // Use the existing context created by Steel, or create one.
+      const contexts = this.browser.contexts();
+      this.browserContext =
+        contexts.length > 0 ? contexts[0] : await this.browser.newContext();
+    } else {
+      // Local mode — launch Playwright Chromium directly.
+      this.browser = await chromium.launch({ headless: false });
+      this.browserContext = await this.browser.newContext({
+        viewport: {
+          width: env.DEFAULT_VIEWPORT_WIDTH,
+          height: env.DEFAULT_VIEWPORT_HEIGHT,
+        },
+      });
+    }
+
+    // Open initial page.
+    const pages = this.browserContext.pages();
+    this.currentPage =
+      pages.length > 0 ? pages[0] : await this.browserContext.newPage();
+
+    this.attachConsoleListener(this.currentPage);
+    this.initialized = true;
   }
-`;
 
-/**
- * Sleep for the specified number of milliseconds
- */
+  /** Attach console log capture to a page (idempotent label via WeakSet). */
+  private listenedPages = new WeakSet<Page>();
+  private attachConsoleListener(page: Page) {
+    if (this.listenedPages.has(page)) return;
+    this.listenedPages.add(page);
+    page.on("console", (msg) => {
+      this.consoleLogs.push({
+        level: msg.type(),
+        text: msg.text(),
+        timestamp: Date.now(),
+      });
+      // Ring buffer — keep at most 500 entries.
+      if (this.consoleLogs.length > 500) {
+        this.consoleLogs.splice(0, this.consoleLogs.length - 500);
+      }
+    });
+  }
+
+  async getPage(): Promise<Page> {
+    await this.initialize();
+    // Return current page if still open, otherwise pick the last open page.
+    if (!this.currentPage || this.currentPage.isClosed()) {
+      const pages = this.browserContext!.pages();
+      this.currentPage =
+        pages.length > 0
+          ? pages[pages.length - 1]
+          : await this.browserContext!.newPage();
+    }
+    // Re-attach console listener if the page changed (e.g. after navigation or popup).
+    this.attachConsoleListener(this.currentPage);
+    return this.currentPage;
+  }
+
+  async stop() {
+    if (this.steelClient && this.sessionId) {
+      try {
+        await this.steelClient.sessions.release(this.sessionId);
+      } catch (err) {
+        console.error(
+          `Failed to release Steel session ${this.sessionId}:`,
+          (err as Error).message
+        );
+      }
+      this.sessionId = undefined;
+    }
+
+    if (this.browser) {
+      await this.browser.close().catch(() => {});
+      this.browser = undefined;
+    }
+
+    this.browserContext = undefined;
+    this.currentPage = undefined;
+    this.consoleLogs = [];
+    this.debugUrl = undefined;
+    this.initialized = false;
+  }
+}
+
+const mgr = new BrowserManager();
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+
 function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function globalWait() {
+  if (env.GLOBAL_WAIT_SECONDS > 0) {
+    await sleep(env.GLOBAL_WAIT_SECONDS * 1000);
+  }
+}
+
+async function writeToFile(
+  data: Buffer | string,
+  defaultName: string,
+  outputPath?: string
+): Promise<string> {
+  const filePath = outputPath ?? path.join(env.OUTPUT_DIR, defaultName);
+  await fs.mkdir(path.dirname(filePath), { recursive: true });
+  await fs.writeFile(filePath, data);
+  return filePath;
 }
 
 // -----------------------------------------------------------------------------
-// SteelSessionManager Class
+// Tools
 // -----------------------------------------------------------------------------
-class SteelSessionManager {
-  private sessionId: string | null = null;
-  private browser: Browser | null = null;
-  private page: Page | null = null;
-  private isInitialized = false;
 
-  constructor(
-    private readonly steelLocal: boolean,
-    private readonly steelKey: string | undefined,
-    private readonly globalWaitSeconds: number
-  ) {
-    // Ensure STEEL_LOCAL is defined (should be "true" or "false").
-    if (typeof process.env.STEEL_LOCAL === "undefined") {
-      throw new Error(
-        "STEEL_LOCAL environment variable is not defined. Must be 'true' or 'false'."
-      );
-    }
-
-    // If in cloud mode (STEEL_LOCAL=false), ensure we have a Steel API key.
-    if (!this.steelLocal && !this.steelKey) {
-      throw new Error("STEEL_API_KEY must be set when STEEL_LOCAL is 'false'.");
-    }
-  }
-
-  /**
-   * Creates or recreates a Steel session. Called from createNewSession().
-   */
-  private async createSteelSession(timeoutMs: number = 900000): Promise<{
-    id: string;
-    websocketUrl: string;
-    status: "live" | "released" | "failed";
-  }> {
+// get_current_url -------------------------------------------------------------
+server.tool(
+  "get_current_url",
+  "Return the current page URL and title. Use this to confirm navigation succeeded, check for redirects, or orient yourself before deciding next steps.",
+  {},
+  async () => {
     try {
-      const response = await fetch(`${steelBaseURL}/v1/sessions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          // Only include the steel-api-key header if we actually have one
-          ...(this.steelKey ? { "steel-api-key": this.steelKey } : {}),
-        },
-        body: JSON.stringify({
-          timeout: timeoutMs, // 15 minute default
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Failed to create session: ${response.statusText}`);
-      }
-
-      const data = await response.json();
+      const page = await mgr.getPage();
+      const url = page.url();
+      const title = await page.title();
       return {
-        id: data.id,
-        websocketUrl: data.websocketUrl,
-        status: data.status,
+        content: [{ type: "text", text: `URL: ${url}\nTitle: ${title}` }],
       };
-    } catch (error) {
-      console.error(
-        JSON.stringify({
-          message: "Error creating Steel session",
-          error: (error as Error).message,
-        })
-      );
-      throw error;
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
-
-  /**
-   * Public method to initialize the session and return a Puppeteer Page.
-   */
-  async initialize(): Promise<Page> {
-    if (this.isInitialized) {
-      return this.page!;
-    }
-    try {
-      await this.createNewSession();
-      this.isInitialized = true;
-      return this.page!;
-    } catch (error) {
-      console.error(
-        JSON.stringify({
-          message: "Failed to initialize session",
-          error: (error as Error).message,
-          stack: (error as Error).stack,
-        })
-      );
-      throw error;
-    }
-  }
-
-  /**
-   * Ensures that we have a valid session. If we don't, initialize one.
-   */
-  async ensureSession(): Promise<Page> {
-    if (!this.sessionId) {
-      return this.initialize();
-    }
-    return this.page!;
-  }
-
-  /**
-   * Creates a new session, connecting Puppeteer to the correct endpoint
-   * (local or cloud).
-   */
-  private async createNewSession(): Promise<void> {
-    // If there's already a browser, clean up first
-    if (this.browser) {
-      await this.cleanup();
-    }
-
-    console.error(
-      JSON.stringify({
-        message: this.steelLocal
-          ? "Local mode. Creating a local session..."
-          : "Cloud mode. Creating a remote session...",
-      })
-    );
-
-    // Create a Steel session in both local and cloud modes
-    const session = await this.createSteelSession(900000); // 15 minute session
-    this.sessionId = session.id;
-
-    console.error(
-      JSON.stringify({
-        message: "New session created with 15 minute timeout",
-        sessionId: this.sessionId,
-      })
-    );
-
-    // Connect Puppeteer to the appropriate WebSocket
-    if (this.steelLocal) {
-      // Local WebSocket endpoint
-      const lowercaseBaseURL = steelBaseURL.toLowerCase();
-      let browserWSEndpoint;
-      if (lowercaseBaseURL.startsWith("http://")) {
-        browserWSEndpoint = `${steelBaseURL.replace("http://", "ws://")}/?sessionId=${this.sessionId}`;
-      }
-      else if (lowercaseBaseURL.startsWith("https://")) {
-        browserWSEndpoint = `${steelBaseURL.replace("https://", "wss://")}/?sessionId=${this.sessionId}`;
-      }
-      else {
-        throw new Error("Invalid Steel base URL");
-      }
-      console.error(JSON.stringify({
-        message: "Connecting to Steel session",
-        browserWSEndpoint,
-      }));
-      this.browser = await puppeteer.connect({ browserWSEndpoint });
-    } else {
-      // Cloud WebSocket endpoint
-      const browserWSEndpoint = `wss://connect.steel.dev?sessionId=${
-        this.sessionId
-      }${this.steelKey ? `&apiKey=${this.steelKey}` : ""}`;
-      this.browser = await puppeteer.connect({ browserWSEndpoint });
-    }
-
-    // Grab the initial page and set it up
-    const pages = await this.browser.pages();
-    this.page = pages[0];
-    await this.setupPage();
-  }
-
-  /**
-   * Injects the marking script into the current page and applies it.
-   */
-  async injectMarkPageScript(): Promise<void> {
-    if (!this.page) return;
-
-    // Inject the marking script on new documents
-    await this.page.evaluateOnNewDocument(markPageScript);
-    // Execute the script right away on the current DOM
-    await this.page.evaluate(`${markPageScript}; markPage();`);
-  }
-
-  /**
-   * Sets up the Puppeteer Page with viewport, console logging, etc.
-   */
-  private async setupPage(): Promise<void> {
-    if (!this.page) return;
-
-    // Initial script injection
-    await this.injectMarkPageScript();
-
-    // Set a default viewport size
-    await this.page.setViewport({ width: 1280, height: 720 });
-
-    // Listen for console logs from the browser
-    this.page.on("console", (msg) => {
-      const message = msg.text();
-      console.error(`Browser console: ${message}`);
-      consoleLogs.push(message);
-    });
-  }
-
-  /**
-   * Attempts to handle session errors, e.g. if a session is not live anymore.
-   * Returns true if it recreates the session.
-   */
-  async handleError(error: Error): Promise<boolean> {
-    try {
-      if (!this.sessionId) {
-        // If there's no session at all, let the caller handle it
-        return false;
-      }
-      const session = await steel.sessions.retrieve(this.sessionId);
-      if (session.status !== "live") {
-        await this.createNewSession();
-        return true;
-      }
-      return false;
-    } catch (e) {
-      // If we can't retrieve the session, try to create a new one
-      await this.createNewSession();
-      return true;
-    }
-  }
-
-  /**
-   * Cleans up resources including the session on steel.dev if in cloud mode,
-   * and closes the Puppeteer browser.
-   */
-  async cleanup(): Promise<void> {
-    try {
-      if (!this.steelLocal && this.sessionId) {
-        // Release the session in non-local mode
-        await steel.sessions.release(this.sessionId);
-      }
-    } catch (error) {
-      console.error(
-        JSON.stringify({
-          message: "Error releasing session",
-          error: (error as Error).message,
-        })
-      );
-    }
-
-    if (this.browser) {
-      await this.browser.close().catch(console.error);
-    }
-    this.sessionId = null;
-    this.browser = null;
-    this.page = null;
-    this.isInitialized = false;
-  }
-}
-
-// -----------------------------------------------------------------------------
-// Initialize Steel SDK
-// -----------------------------------------------------------------------------
-/**
- * We'll omit the API key if we don't have it (in local mode).
- */
-const steelConfig: { baseURL: string; steelAPIKey?: string } = {
-  baseURL: steelBaseURL,
-};
-if (steelKey) {
-  steelConfig.steelAPIKey = steelKey;
-}
-
-const steel = new Steel(steelConfig);
-
-// -----------------------------------------------------------------------------
-// Create a SessionManager instance
-// -----------------------------------------------------------------------------
-const sessionManager = new SteelSessionManager(
-  steelLocal,
-  steelKey,
-  globalWaitSeconds
 );
 
-// -----------------------------------------------------------------------------
-// Define Tools
-// -----------------------------------------------------------------------------
-const TOOLS: Tool[] = [
-  {
-    name: "navigate",
-    description: "Navigate to a specified URL",
-    inputSchema: {
-      type: "object",
-      properties: {
-        url: { type: "string", description: "The URL to navigate to" },
-      },
-      required: ["url"],
-    },
-  },
-  {
-    name: "search",
-    description:
-      "Perform a Google search by navigating to https://www.google.com/search?q=encodedQuery using the provided query text.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        query: {
-          type: "string",
-          description: "The text to search for on Google",
-        },
-      },
-      required: ["query"],
-    },
-  },
-  {
-    name: "click",
-    description:
-      "Click an element on the page specified by its numbered label from the annotated screenshot",
-    inputSchema: {
-      type: "object",
-      properties: {
-        label: {
-          type: "number",
-          description:
-            "The label of the element to click, as shown in the annotated screenshot",
-        },
-      },
-      required: ["label"],
-    },
-  },
-  {
-    name: "type",
-    description:
-      "Type text into an input field specified by its numbered label from the annotated screenshot. Optionally replace existing text first.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        label: {
-          type: "number",
-          description: "The label of the input field",
-        },
-        text: {
-          type: "string",
-          description: "The text to type into the input field",
-        },
-        replaceText: {
-          type: "boolean",
-          description:
-            "If true, clears any existing text in the input field before typing the new text.",
-        },
-      },
-      required: ["label", "text"],
-    },
-  },
-  {
-    name: "scroll_down",
-    description:
-      "Scroll down the page by a pixel amount - if no pixels are specified, scrolls down one page",
-    inputSchema: {
-      type: "object",
-      properties: {
-        pixels: {
-          type: "integer",
-          description:
-            "The number of pixels to scroll down. If not specified, scrolls down one page.",
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "scroll_up",
-    description:
-      "Scroll up the page by a pixel amount - if no pixels are specified, scrolls up one page",
-    inputSchema: {
-      type: "object",
-      properties: {
-        pixels: {
-          type: "integer",
-          description:
-            "The number of pixels to scroll up. If not specified, scrolls up one page.",
-        },
-      },
-      required: [],
-    },
-  },
-  {
-    name: "go_back",
-    description: "Go back to the previous page in the browser history",
-    inputSchema: {
-      type: "object",
-      properties: {},
-      required: [],
-    },
-  },
-  {
-    name: "wait",
-    description:
-      "Use this tool when a page appears to be loading or not fully rendered. Common scenarios include: when elements are missing from a screenshot that should be there, when a page looks incomplete or broken, when dynamic content is still loading, or when a previous action (like clicking a button) hasn't fully processed yet. Waits for a specified number of seconds (up to 10) to allow the page to finish loading or rendering.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        seconds: {
-          type: "number",
-          description:
-            "Number of seconds to wait (max 10). Start with a smaller value (2-3 seconds) and increase if needed.",
-          minimum: 0,
-          maximum: 10,
-        },
-      },
-      required: ["seconds"],
-    },
-  },
-  {
-    name: "save_unmarked_screenshot",
-    description:
-      "Capture a screenshot without bounding boxes and store it as a resource. Provide a resourceName to identify the screenshot. It's useful for when you want to view a page unobstructed by annotations or the user asks for a screenshot of the page.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        resourceName: {
-          type: "string",
-          description:
-            "The name under which the unmarked screenshot will be saved as a resource (e.g. 'before_login'). If not provided, one will be generated.",
-        },
-      },
-      required: [],
-    },
-  },
-];
+// get_screenshot --------------------------------------------------------------
+server.tool(
+  "get_screenshot",
+  `Take a screenshot of the current page.
 
-// -----------------------------------------------------------------------------
-// Tool Handlers (Examples)
-// -----------------------------------------------------------------------------
-async function handleNavigate(page: Page, args: any): Promise<CallToolResult> {
-  let { url } = args;
-  if (!url) {
-    return {
-      isError: true,
-      content: [
-        { type: "text", text: "URL parameter is required for navigation" },
-      ],
-    };
-  }
-  if (!url.startsWith("http://") && !url.startsWith("https://")) {
-    url = "https://" + url;
-  }
-  await page.goto(url);
-  return {
-    isError: false,
-    content: [{ type: "text", text: `Navigated to ${url}` }],
-  };
-}
+CONTEXT BUDGET — screenshots can be large. Use outputMode: 'file' when you will process or upload the image separately rather than reading it into context. Use 'inline' (default) when you need immediate visual inspection; will auto-downgrade to 'file' if the output exceeds maxInlineBytes.
 
-/**
- * Handle "search" tool call
- */
-async function handleSearch(page: Page, args: any): Promise<CallToolResult> {
-  const { query } = args;
-  if (!query) {
-    return {
-      isError: true,
-      content: [
-        { type: "text", text: "Query parameter is required for search" },
-      ],
-    };
-  }
-  const encodedQuery = encodeURIComponent(query);
-  const url = `https://www.google.com/search?q=${encodedQuery}`;
-  await page.goto(url);
-  return {
-    isError: false,
-    content: [{ type: "text", text: `Searched Google for "${query}"` }],
-  };
-}
+Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, or clip to a region.`,
+  {
+    outputMode: z
+      .enum(["inline", "file"])
+      .default("inline")
+      .optional()
+      .describe(
+        "How to return the screenshot. 'inline' returns base64 data (auto-downgrades to 'file' if too large). 'file' saves to disk and returns only the path."
+      ),
+    outputPath: z
+      .string()
+      .optional()
+      .describe(
+        "File path when outputMode is 'file'. Defaults to OUTPUT_DIR/screenshot_{timestamp}.{format}."
+      ),
+    format: z
+      .enum(["png", "jpeg"])
+      .default("png")
+      .optional()
+      .describe("Image format. JPEG produces smaller files. Default: 'png'."),
+    quality: z
+      .number()
+      .min(1)
+      .max(100)
+      .optional()
+      .describe(
+        "JPEG quality 1–100. Only used when format is 'jpeg'. Default: DEFAULT_SCREENSHOT_QUALITY env var (80)."
+      ),
+    fullPage: z
+      .boolean()
+      .default(false)
+      .optional()
+      .describe(
+        "Capture full scrollable page (true) or visible viewport only (false). Default: false."
+      ),
+    scale: z
+      .number()
+      .min(0.1)
+      .max(3.0)
+      .default(1.0)
+      .optional()
+      .describe(
+        "Viewport scale factor applied before capture. Use 0.5 to halve dimensions and file size. Range: 0.1–3.0. Default: 1.0."
+      ),
+    clip: z
+      .object({
+        x: z.number(),
+        y: z.number(),
+        width: z.number(),
+        height: z.number(),
+      })
+      .optional()
+      .describe("Capture only a rectangular region of the page. Optional."),
+    maxInlineBytes: z
+      .number()
+      .optional()
+      .describe(
+        "Max bytes before auto-switching to file mode. Default: MAX_INLINE_BYTES env var (512000). Set lower to protect context budget."
+      ),
+  },
+  async ({
+    outputMode = "inline",
+    outputPath,
+    format = "png",
+    quality,
+    fullPage = false,
+    scale = 1.0,
+    clip,
+    maxInlineBytes,
+  }) => {
+    try {
+      const page = await mgr.getPage();
+      const effectiveQuality = quality ?? env.DEFAULT_SCREENSHOT_QUALITY;
+      const effectiveMaxInlineBytes = maxInlineBytes ?? env.MAX_INLINE_BYTES;
 
-/**
- * Handle "click" tool call
- */
-async function handleClick(page: Page, args: any): Promise<CallToolResult> {
-  const { label } = args;
-  if (!label) {
-    return {
-      isError: true,
-      content: [
-        {
-          type: "text",
-          text: "Label parameter is required for clicking elements",
-        },
-      ],
-    };
-  }
+      const origVp = page.viewportSize() ?? {
+        width: env.DEFAULT_VIEWPORT_WIDTH,
+        height: env.DEFAULT_VIEWPORT_HEIGHT,
+      };
 
-  const selector = `[data-label="${label}"]`;
-  try {
-    // Wait for the element to be visible
-    await page.waitForSelector(selector, { visible: true });
-
-    // Evaluate if the element has a target="_blank" anchor
-    type ClickResult =
-      | { hasTargetBlank: true; href: string }
-      | { hasTargetBlank: false };
-
-    const result = await page.$eval(selector, (element): ClickResult => {
-      const anchor = element.closest("a");
-      if (anchor && anchor.target === "_blank" && anchor.href) {
-        return { hasTargetBlank: true, href: anchor.href };
+      let buffer: Buffer;
+      try {
+        if (scale !== 1.0) {
+          await page.setViewportSize({
+            width: Math.round(origVp.width * scale),
+            height: Math.round(origVp.height * scale),
+          });
+        }
+        const opts: Parameters<typeof page.screenshot>[0] = {
+          type: format,
+          fullPage,
+        };
+        if (format === "jpeg") opts.quality = effectiveQuality;
+        if (clip) opts.clip = clip;
+        buffer = await page.screenshot(opts);
+      } finally {
+        if (scale !== 1.0) {
+          await page.setViewportSize(origVp).catch(() => {});
+        }
       }
-      return { hasTargetBlank: false };
-    });
 
-    // If the element navigates to a new tab, go to that href instead
-    if (result.hasTargetBlank) {
-      await page.goto(result.href);
-    } else {
-      await page.click(selector);
-    }
+      const effectiveMode =
+        outputMode === "inline" && buffer.length > effectiveMaxInlineBytes
+          ? "file"
+          : outputMode;
 
-    // Success - no error content
-    return {
-      isError: false,
-      content: [{ type: "text", text: `Clicked element with label ${label}.` }],
-    };
-  } catch (e) {
-    return {
-      isError: true,
-      content: [
-        {
-          type: "text",
-          text: `Could not find clickable element with label ${label}. Error: ${
-            (e as Error).message
-          }`,
-        },
-      ],
-    };
-  }
-}
-
-/**
- * Handle "type" tool call
- */
-async function handleType(page: Page, args: any): Promise<CallToolResult> {
-  const { label, text, replaceText = false } = args;
-  if (!label || !text) {
-    return {
-      isError: true,
-      content: [
-        {
-          type: "text",
-          text: "Both label and text parameters are required for typing",
-        },
-      ],
-    };
-  }
-
-  const selector = `[data-label="${label}"]`;
-  try {
-    await page.waitForSelector(selector, { visible: true });
-  } catch {
-    return {
-      isError: true,
-      content: [
-        {
-          type: "text",
-          text: `Could not find input element with label ${label}.`,
-        },
-      ],
-    };
-  }
-
-  // Option A: Directly set the value & dispatch events
-  if (replaceText) {
-    await page.$eval(
-      selector,
-      (el: Element, value: string) => {
-        const input = el as HTMLInputElement;
-        input.value = value;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-      },
-      text
-    );
-  } else {
-    await page.$eval(
-      selector,
-      (el: Element, value: string) => {
-        const input = el as HTMLInputElement;
-        input.value = (input.value ?? "") + value;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-      },
-      text
-    );
-  }
-
-  // Option B (Alternative): Use page.type() to simulate typing
-  // An example if you want to more accurately emulate user typing:
-  //   if (replaceText) {
-  //     await page.click(selector, { clickCount: 3 }); // highlights existing text
-  //     await page.type(selector, text);
-  //   } else {
-  //     await page.type(selector, text);
-  //   }
-
-  return {
-    isError: false,
-    content: [{ type: "text", text: `Typed '${text}' into label ${label}.` }],
-  };
-}
-
-/**
- * Handle "scroll_down" tool call
- */
-async function handleScrollDown(
-  page: Page,
-  args: any
-): Promise<CallToolResult> {
-  const { pixels } = args;
-  if (pixels !== undefined) {
-    await page.evaluate((scrollAmount) => {
-      window.scrollBy(0, scrollAmount);
-    }, pixels);
-  } else {
-    await page.keyboard.press("PageDown");
-  }
-
-  return {
-    isError: false,
-    content: [
-      { type: "text", text: `Scrolled down by ${pixels ?? "one page"}` },
-    ],
-  };
-}
-
-/**
- * Handle "scroll_up" tool call
- */
-async function handleScrollUp(page: Page, args: any): Promise<CallToolResult> {
-  const { pixels } = args;
-  if (pixels !== undefined) {
-    await page.evaluate((scrollAmount) => {
-      window.scrollBy(0, -scrollAmount);
-    }, pixels);
-  } else {
-    await page.keyboard.press("PageUp");
-  }
-
-  return {
-    isError: false,
-    content: [{ type: "text", text: `Scrolled up by ${pixels ?? "one page"}` }],
-  };
-}
-
-/**
- * Handle "go_back" tool call
- */
-async function handleGoBack(page: Page): Promise<CallToolResult> {
-  const response = await page.goBack({ waitUntil: "domcontentloaded" });
-  if (!response) {
-    return {
-      isError: true,
-      content: [
-        {
-          type: "text",
-          text: "Cannot go back. No previous page in the browser history.",
-        },
-      ],
-    };
-  }
-
-  return {
-    isError: false,
-    content: [{ type: "text", text: "Went back to the previous page." }],
-  };
-}
-
-/**
- * Handle "wait" tool call
- */
-async function handleWait(_page: Page, args: any): Promise<CallToolResult> {
-  const { seconds } = args;
-  if (typeof seconds !== "number" || seconds < 0 || seconds > 10) {
-    return {
-      isError: true,
-      content: [
-        {
-          type: "text",
-          text: "Wait time must be a number between 0 and 10 seconds",
-        },
-      ],
-    };
-  }
-
-  await sleep(seconds * 1000); // Reusing your sleep utility
-  return {
-    isError: false,
-    content: [{ type: "text", text: `Waited ${seconds} second(s).` }],
-  };
-}
-
-/**
- * Handle "save_unmarked_screenshot" tool call
- */
-async function handleSaveUnmarkedScreenshot(
-  page: Page,
-  args: any
-): Promise<CallToolResult> {
-  let { resourceName } = args;
-  if (!resourceName) {
-    resourceName = `unmarked_screenshot_${Date.now()}`;
-  }
-
-  // Unmark the page to remove bounding boxes
-  await page.evaluate(() => {
-    if (typeof (window as any).unmarkPage === "function") {
-      (window as any).unmarkPage();
-    }
-  });
-
-  const buffer = await page.screenshot();
-  screenshots.set(resourceName, Buffer.from(buffer));
-
-  return {
-    isError: false,
-    content: [
-      {
-        type: "text",
-        text: `Unmarked screenshot saved as resource screenshot://${resourceName}`,
-      },
-    ],
-  };
-}
-
-/**
- * Main dispatcher for handling tool calls
- */
-async function handleToolCall(
-  name: string,
-  args: any
-): Promise<CallToolResult> {
-  const startTime = Date.now();
-
-  try {
-    // Ensure a valid session
-    const page = await sessionManager.ensureSession();
-    let result: CallToolResult;
-
-    switch (name) {
-      case "navigate":
-        result = await handleNavigate(page, args);
-        break;
-      case "search":
-        result = await handleSearch(page, args);
-        break;
-      case "click":
-        result = await handleClick(page, args);
-        break;
-      case "type":
-        result = await handleType(page, args);
-        break;
-      case "scroll_down":
-        result = await handleScrollDown(page, args);
-        break;
-      case "scroll_up":
-        result = await handleScrollUp(page, args);
-        break;
-      case "go_back":
-        result = await handleGoBack(page);
-        break;
-      case "wait":
-        result = await handleWait(page, args);
-        break;
-      case "save_unmarked_screenshot":
-        result = await handleSaveUnmarkedScreenshot(page, args);
-        break;
-      default:
-        result = {
-          isError: true,
+      if (effectiveMode === "file") {
+        const defaultName = `screenshot_${Date.now()}.${format}`;
+        const filePath = await writeToFile(buffer, defaultName, outputPath);
+        const autoNote =
+          outputMode === "inline"
+            ? `\n(Auto-switched to file mode: output exceeded ${effectiveMaxInlineBytes.toLocaleString()} bytes)`
+            : "";
+        return {
           content: [
             {
               type: "text",
-              text: `Unknown tool: ${name}. Available tools are: ${TOOLS.map(
-                (t) => t.name
-              ).join(", ")}.`,
+              text: `Screenshot saved to: ${filePath}\nSize: ${buffer.length.toLocaleString()} bytes${autoNote}`,
             },
           ],
         };
-        break;
-    }
+      }
 
-    // If tool resulted in an error, just return it
-    if (result.isError) {
-      return result;
-    }
-
-    // Optionally wait a global number of seconds for slow pages
-    if (globalWaitSeconds > 0) {
-      await sleep(globalWaitSeconds * 1000);
-    }
-
-    // Re-inject marking script so bounding boxes are updated
-    await sessionManager.injectMarkPageScript();
-
-    // Capture updated annotated screenshot
-    const screenshotBuffer = await page.screenshot();
-    result.content.push({
-      type: "image",
-      data: Buffer.from(screenshotBuffer).toString("base64"),
-      mimeType: "image/png",
-    });
-
-    console.error(
-      JSON.stringify({
-        message: `Action completed in ${Date.now() - startTime}ms`,
-      })
-    );
-
-    return result;
-  } catch (error) {
-    // Attempt to recover if the session is no longer valid
-    const wasSessionError = await sessionManager.handleError(error as Error);
-    if (wasSessionError) {
-      // We recreated the session, let the user try again
       return {
-        isError: true,
+        content: [
+          { type: "text", text: "Screenshot taken." },
+          {
+            type: "image",
+            data: buffer.toString("base64"),
+            mimeType: `image/${format}`,
+          },
+        ],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// get_page_text ---------------------------------------------------------------
+server.tool(
+  "get_page_text",
+  `Get visible text content from the current page.
+
+CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much is loaded into context. Use a CSS selector to scope to the relevant section. Use outputMode: 'file' to save the full text to disk without loading it into context at all.`,
+  {
+    selector: z
+      .string()
+      .optional()
+      .describe(
+        "CSS selector to scope extraction (e.g. 'article', 'main', '#content'). Defaults to document.body."
+      ),
+    maxChars: z
+      .number()
+      .default(10000)
+      .optional()
+      .describe(
+        "Maximum characters to return inline. Default: 10000. Set to 0 for no limit (use with outputMode: 'file')."
+      ),
+    outputMode: z
+      .enum(["inline", "file"])
+      .default("inline")
+      .optional()
+      .describe(
+        "Return text inline (default) or save to file and return path."
+      ),
+    outputPath: z
+      .string()
+      .optional()
+      .describe(
+        "File path when outputMode is 'file'. Defaults to OUTPUT_DIR/page_text_{timestamp}.txt."
+      ),
+    includeLinks: z
+      .boolean()
+      .default(false)
+      .optional()
+      .describe("Append link URLs in brackets after each anchor's text. Default: false."),
+  },
+  async ({ selector, maxChars = 10000, outputMode = "inline", outputPath, includeLinks = false }) => {
+    try {
+      const page = await mgr.getPage();
+
+      let text: string;
+      if (includeLinks) {
+        text = await page.evaluate((sel: string | null) => {
+          const root = sel ? document.querySelector(sel) : document.body;
+          if (!root) return "";
+          const walk = (node: Element): string => {
+            if (node.tagName === "A") {
+              const href = (node as HTMLAnchorElement).href;
+              return `${node.textContent?.trim()} [${href}]`;
+            }
+            return Array.from(node.childNodes)
+              .map((n) => (n.nodeType === 3 ? n.textContent ?? "" : walk(n as Element)))
+              .join(" ");
+          };
+          return walk(root as Element);
+        }, selector ?? null);
+      } else {
+        text = await page.evaluate((sel: string | null) => {
+          const root = sel ? document.querySelector(sel) : document.body;
+          return (root as HTMLElement)?.innerText ?? "";
+        }, selector ?? null);
+      }
+
+      text = text.replace(/\s+/g, " ").trim();
+
+      if (outputMode === "file") {
+        const filePath = await writeToFile(
+          Buffer.from(text, "utf8"),
+          `page_text_${Date.now()}.txt`,
+          outputPath
+        );
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Page text saved to: ${filePath}\nTotal chars: ${text.length.toLocaleString()}`,
+            },
+          ],
+        };
+      }
+
+      const truncated = maxChars > 0 && text.length > maxChars;
+      const output = truncated ? text.slice(0, maxChars) : text;
+      return {
         content: [
           {
             type: "text",
             text:
-              "Browser session ended unexpectedly. A new session has been created. " +
-              "Please retry your request.",
+              output +
+              (truncated
+                ? `\n\n[TRUNCATED — ${text.length.toLocaleString()} total chars, showing first ${maxChars.toLocaleString()}. Use maxChars: 0 with outputMode: "file" to get full content.]`
+                : ""),
           },
         ],
       };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
-
-    // Return the original error if we didn't recover
-    return {
-      isError: true,
-      content: [
-        {
-          type: "text",
-          text: `Tool ${name} failed: ${
-            (error as Error).message
-          }\nStack trace: ${(error as Error).stack}`,
-        },
-      ],
-    };
   }
-}
+);
 
-// -----------------------------------------------------------------------------
-// Create and Configure MCP Server
-// -----------------------------------------------------------------------------
-const server = new Server(
+// click -----------------------------------------------------------------------
+server.tool(
+  "click",
+  `Click an element on the page identified by a CSS selector.
+
+Use this for buttons, links, checkboxes, or any clickable element. If the selector matches multiple elements, the first visible one is clicked.
+
+After clicking, use wait_for to confirm the expected result before proceeding.`,
   {
-    name: "web-voyager-mcp",
-    version: "0.1.0",
+    selector: z
+      .string()
+      .describe("CSS selector of the element to click (e.g. 'button[type=submit]', '#login', 'a.nav-link')."),
+    timeout: z
+      .number()
+      .min(100)
+      .max(30000)
+      .default(10000)
+      .optional()
+      .describe("Max time in ms to wait for the element to be clickable. Default: 10000."),
   },
-  {
-    capabilities: {
-      resources: {},
-      tools: {},
-    },
+  async ({ selector, timeout = 10000 }) => {
+    try {
+      const page = await mgr.getPage();
+      await page.click(selector, { timeout });
+      await globalWait();
+      return { content: [{ type: "text", text: `Clicked: ${selector}` }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
   }
 );
 
-// -----------------------------------------------------------------------------
-// Server Request Handlers
-// -----------------------------------------------------------------------------
-server.setRequestHandler(ListResourcesRequestSchema, async () => ({
-  resources: [
-    ...Array.from(screenshots.keys()).map((name) => ({
-      uri: `screenshot://${name}`,
-      mimeType: "image/png",
-      name: `Screenshot: ${name}`,
-    })),
-  ],
-}));
+// type ------------------------------------------------------------------------
+server.tool(
+  "type",
+  `Type text into an input field, textarea, or other editable element.
 
-server.setRequestHandler(ReadResourceRequestSchema, async (request) => {
-  const uri = request.params.uri;
-  if (uri.startsWith("screenshot://")) {
-    const name = uri.split("://")[1];
-    const screenshot = screenshots.get(name);
-    if (screenshot) {
+Use clear: true to replace existing content (recommended for form fields). Use submit: true to press Enter after typing (useful for search boxes).
+
+After typing, use wait_for to confirm the expected result or get_screenshot to verify the input.`,
+  {
+    selector: z
+      .string()
+      .describe("CSS selector of the input element (e.g. 'input[name=q]', '#email', 'textarea')."),
+    text: z
+      .string()
+      .describe("Text to type into the element."),
+    clear: z
+      .boolean()
+      .default(true)
+      .optional()
+      .describe("Replace any existing content before typing. Default: true."),
+    submit: z
+      .boolean()
+      .default(false)
+      .optional()
+      .describe("Press Enter after typing (e.g. to submit a search form). Default: false."),
+    timeout: z
+      .number()
+      .min(100)
+      .max(30000)
+      .default(10000)
+      .optional()
+      .describe("Max time in ms to wait for the element. Default: 10000."),
+  },
+  async ({ selector, text, clear = true, submit = false, timeout = 10000 }) => {
+    try {
+      const page = await mgr.getPage();
+      if (clear) {
+        // fill() replaces content atomically — preferred over triple-click + type.
+        await page.fill(selector, text, { timeout });
+      } else {
+        await page.type(selector, text, { timeout });
+      }
+      if (submit) {
+        await page.press(selector, "Enter");
+      }
+      await globalWait();
+      const action = clear ? "Filled" : "Typed into";
+      const suffix = submit ? " and pressed Enter" : "";
       return {
-        contents: [
-          {
-            uri,
-            mimeType: "image/png",
-            blob: screenshot,
-          },
-        ],
+        content: [{ type: "text", text: `${action} ${selector}${suffix}.` }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// select ----------------------------------------------------------------------
+server.tool(
+  "select",
+  "Select an option from a <select> dropdown element by its value, label, or index.",
+  {
+    selector: z
+      .string()
+      .describe("CSS selector of the <select> element (e.g. 'select[name=country]', '#sort-by')."),
+    value: z
+      .string()
+      .optional()
+      .describe("The option value attribute to select (e.g. 'us', 'price-asc')."),
+    label: z
+      .string()
+      .optional()
+      .describe("The visible option text to select (e.g. 'United States', 'Price: Low to High')."),
+    index: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("Zero-based index of the option to select."),
+    timeout: z
+      .number()
+      .min(100)
+      .max(30000)
+      .default(10000)
+      .optional()
+      .describe("Max time in ms to wait for the element. Default: 10000."),
+  },
+  async ({ selector, value, label, index, timeout = 10000 }) => {
+    try {
+      const page = await mgr.getPage();
+
+      if (value === undefined && label === undefined && index === undefined) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "At least one of 'value', 'label', or 'index' must be provided." }],
+        };
+      }
+
+      let selectArg: string | { value: string } | { label: string } | { index: number };
+      if (value !== undefined) {
+        selectArg = { value };
+      } else if (label !== undefined) {
+        selectArg = { label };
+      } else {
+        selectArg = { index: index! };
+      }
+
+      const selected = await page.selectOption(selector, selectArg, { timeout });
+      await globalWait();
+      return {
+        content: [{ type: "text", text: `Selected option(s): ${selected.join(", ")} in ${selector}` }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// evaluate --------------------------------------------------------------------
+server.tool(
+  "evaluate",
+  `Execute JavaScript in the page context and return the result as JSON.
+
+Use this as an escape hatch when no other tool covers your need: reading computed styles, extracting structured data, manipulating the DOM, calling page-level APIs.
+
+CONTEXT BUDGET — results are serialised to JSON; large objects can be very large. Keep expressions targeted. The expression must be a valid JS expression (not a statement); wrap multi-line logic in an IIFE: (() => { ... })()`,
+  {
+    expression: z
+      .string()
+      .describe("JavaScript expression to evaluate in the page context. Must return a JSON-serialisable value."),
+    waitAfter: z
+      .boolean()
+      .default(false)
+      .optional()
+      .describe("Call the global wait after evaluation (useful if the expression triggers async side effects). Default: false."),
+  },
+  async ({ expression, waitAfter = false }) => {
+    try {
+      const page = await mgr.getPage();
+      const result = await page.evaluate(expression);
+      if (waitAfter) await globalWait();
+      const text = result === undefined ? "undefined" : JSON.stringify(result, null, 2);
+      return { content: [{ type: "text", text: text }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// wait_for --------------------------------------------------------------------
+server.tool(
+  "wait_for",
+  `Wait for a condition on the page before proceeding — more reliable than sleeping.
+
+Use after an action that triggers async changes (form submit, click, navigation) when you need to confirm the page has updated before reading or screenshotting.
+
+Conditions (at least one required): selector, text, textGone. Returns elapsed time or error on timeout.`,
+  {
+    selector: z.string().optional().describe("CSS selector to wait for (e.g. '#results', '.loaded')."),
+    text: z.string().optional().describe("Text string to wait for anywhere on the page."),
+    textGone: z.string().optional().describe("Text string to wait for to disappear from the page."),
+    timeout: z
+      .number()
+      .min(100)
+      .max(60000)
+      .default(10000)
+      .optional()
+      .describe("Maximum time to wait in milliseconds. Default: 10000 (10s). Max: 60000 (60s)."),
+  },
+  async ({ selector, text, textGone, timeout = 10000 }) => {
+    try {
+      const page = await mgr.getPage();
+
+      if (!selector && !text && !textGone) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "At least one of 'selector', 'text', or 'textGone' must be provided." }],
+        };
+      }
+
+      const start = Date.now();
+      const conditions: Promise<void>[] = [];
+
+      if (selector) {
+        conditions.push(page.waitForSelector(selector, { timeout }).then(() => undefined));
+      }
+      if (text) {
+        conditions.push(
+          page.waitForFunction(
+            (t: string) => document.body?.innerText?.includes(t),
+            text,
+            { timeout }
+          ).then(() => undefined)
+        );
+      }
+      if (textGone) {
+        conditions.push(
+          page.waitForFunction(
+            (t: string) => !document.body?.innerText?.includes(t),
+            textGone,
+            { timeout }
+          ).then(() => undefined)
+        );
+      }
+
+      await Promise.all(conditions);
+      const elapsed = Date.now() - start;
+
+      const parts: string[] = [];
+      if (selector) parts.push(`selector "${selector}"`);
+      if (text) parts.push(`text "${text}"`);
+      if (textGone) parts.push(`text gone "${textGone}"`);
+
+      return {
+        content: [{ type: "text", text: `Condition met: ${parts.join(", ")} — elapsed ${elapsed}ms.` }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return {
+        isError: true,
+        content: [{ type: "text", text: `wait_for timed out or failed: ${error.message}` }],
       };
     }
   }
-  throw new Error(`Resource not found: ${uri}`);
-});
+);
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS,
-}));
+// console_log -----------------------------------------------------------------
+server.tool(
+  "console_log",
+  `Return browser console messages captured since the browser was started or last cleared.
 
-server.setRequestHandler(CallToolRequestSchema, async (request) =>
-  handleToolCall(request.params.name, request.params.arguments ?? {})
+CONTEXT BUDGET — console output can be large on noisy pages. Use the level filter to limit to errors/warnings. Use clear: true to reset the buffer after reading.`,
+  {
+    level: z
+      .enum(["all", "error", "warning", "info", "log"])
+      .default("all")
+      .optional()
+      .describe("Filter by severity. 'all' returns everything. Default: 'all'."),
+    maxEntries: z
+      .number()
+      .min(1)
+      .max(500)
+      .default(50)
+      .optional()
+      .describe("Maximum number of entries to return (most recent). Default: 50."),
+    clear: z
+      .boolean()
+      .default(false)
+      .optional()
+      .describe("Clear the captured log buffer after returning results. Default: false."),
+  },
+  async ({ level = "all", maxEntries = 50, clear = false }) => {
+    try {
+      await mgr.initialize();
+
+      let logs = mgr.consoleLogs;
+      if (level !== "all") logs = logs.filter((m) => m.level === level);
+      const slice = logs.slice(-maxEntries);
+
+      if (clear) mgr.consoleLogs = [];
+
+      if (slice.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No console messages captured${level !== "all" ? ` at level '${level}'` : ""}.`,
+            },
+          ],
+        };
+      }
+
+      const formatted = slice
+        .map((m) => `[${new Date(m.timestamp).toISOString()}] [${m.level.toUpperCase()}] ${m.text}`)
+        .join("\n");
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${slice.length} console message(s)${level !== "all" ? ` (level: ${level})` : ""}:\n\n${formatted}`,
+          },
+        ],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// scroll_down -----------------------------------------------------------------
+server.tool(
+  "scroll_down",
+  "Scroll down the page by a specified number of pixels (default 500).",
+  {
+    pixels: z.number().default(500).optional().describe("Number of pixels to scroll down. Default: 500."),
+  },
+  async ({ pixels = 500 }) => {
+    try {
+      const page = await mgr.getPage();
+      await page.evaluate(`window.scrollBy(0, ${pixels})`);
+      await globalWait();
+      return { content: [{ type: "text", text: `Scrolled down by ${pixels} pixels.` }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// scroll_up -------------------------------------------------------------------
+server.tool(
+  "scroll_up",
+  "Scroll up the page by a specified number of pixels (default 500).",
+  {
+    pixels: z.number().default(500).optional().describe("Number of pixels to scroll up. Default: 500."),
+  },
+  async ({ pixels = 500 }) => {
+    try {
+      const page = await mgr.getPage();
+      await page.evaluate(`window.scrollBy(0, -${pixels})`);
+      await globalWait();
+      return { content: [{ type: "text", text: `Scrolled up by ${pixels} pixels.` }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// go_back ---------------------------------------------------------------------
+server.tool(
+  "go_back",
+  "Go back to the previous page in the browser history.",
+  {},
+  async () => {
+    try {
+      const page = await mgr.getPage();
+      await page.goBack({ waitUntil: "commit", timeout: 10000 });
+      await globalWait();
+      const url = page.url();
+      return { content: [{ type: "text", text: `Went back.\nCurrent URL: ${url}` }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// go_forward ------------------------------------------------------------------
+server.tool(
+  "go_forward",
+  "Go forward to the next page in the browser history.",
+  {},
+  async () => {
+    try {
+      const page = await mgr.getPage();
+      await page.goForward({ waitUntil: "commit", timeout: 10000 });
+      await globalWait();
+      const url = page.url();
+      return { content: [{ type: "text", text: `Went forward.\nCurrent URL: ${url}` }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// refresh ---------------------------------------------------------------------
+server.tool(
+  "refresh",
+  "Reload the current page.",
+  {},
+  async () => {
+    try {
+      const page = await mgr.getPage();
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
+      await globalWait();
+      const url = page.url();
+      return { content: [{ type: "text", text: `Page reloaded.\nCurrent URL: ${url}` }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// google_search ---------------------------------------------------------------
+server.tool(
+  "google_search",
+  `Perform a Google search for the given query and navigate to the results page.
+
+CONTEXT BUDGET — returns a screenshot of the results page by default. Use outputMode: 'file' to save it to disk instead of loading into context. For interacting with results, follow up with click or go_to_url.`,
+  {
+    query: z.string().describe("The search query to use on Google."),
+    outputMode: z
+      .enum(["inline", "file"])
+      .default("inline")
+      .optional()
+      .describe(
+        "How to return the screenshot. 'inline' returns base64 (auto-downgrades to 'file' if too large). 'file' saves to disk."
+      ),
+    outputPath: z
+      .string()
+      .optional()
+      .describe("File path when outputMode is 'file'. Defaults to OUTPUT_DIR/screenshot_{timestamp}.png."),
+    maxInlineBytes: z
+      .number()
+      .optional()
+      .describe("Max bytes before auto-switching to file mode. Default: MAX_INLINE_BYTES env var (512000)."),
+  },
+  async ({ query, outputMode = "inline", outputPath, maxInlineBytes }) => {
+    try {
+      const page = await mgr.getPage();
+      await page.goto(`https://www.google.com/search?q=${encodeURIComponent(query)}`);
+      await globalWait();
+      const url = page.url();
+      const screenshot = await page.screenshot();
+
+      const effectiveMaxInlineBytes = maxInlineBytes ?? env.MAX_INLINE_BYTES;
+      const effectiveMode =
+        outputMode === "inline" && screenshot.length > effectiveMaxInlineBytes
+          ? "file"
+          : outputMode;
+
+      if (effectiveMode === "file") {
+        const defaultName = `screenshot_${Date.now()}.png`;
+        const filePath = await writeToFile(screenshot, defaultName, outputPath);
+        const autoNote =
+          outputMode === "inline"
+            ? `\n(Auto-switched to file mode: output exceeded ${effectiveMaxInlineBytes.toLocaleString()} bytes)`
+            : "";
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Search results for "${query}"\nURL: ${url}\nScreenshot saved to: ${filePath}${autoNote}`,
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [
+          { type: "text", text: `Search results for "${query}"\nURL: ${url}` },
+          {
+            type: "image",
+            data: screenshot.toString("base64"),
+            mimeType: "image/png",
+          },
+        ],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// go_to_url -------------------------------------------------------------------
+server.tool(
+  "go_to_url",
+  "Navigate the browser to the specified URL.",
+  {
+    url: z.string().describe("The URL to navigate to."),
+  },
+  async ({ url }) => {
+    try {
+      const page = await mgr.getPage();
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+      await globalWait();
+      // Return the final URL in case of redirects.
+      const finalUrl = page.url();
+      const text = finalUrl !== url
+        ? `Navigated to ${url}\nFinal URL: ${finalUrl}`
+        : `Navigated to ${finalUrl}`;
+      return { content: [{ type: "text", text: text }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// start_browser ---------------------------------------------------------------
+server.tool(
+  "start_browser",
+  "Start the browser if it is not already running. Returns a Steel debug URL when running in steel mode.",
+  {},
+  async () => {
+    try {
+      await mgr.initialize();
+      const content: { type: "text"; text: string }[] = [
+        { type: "text", text: "Browser started." },
+      ];
+      if (mgr.debugUrl) {
+        content.push({ type: "text", text: `Steel Debug URL: ${mgr.debugUrl}` });
+      }
+      return { content };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// stop_browser ----------------------------------------------------------------
+server.tool(
+  "stop_browser",
+  "Stop the browser and clean up resources. Releases the Steel session if one is active.",
+  {},
+  async () => {
+    try {
+      await mgr.stop();
+      return { content: [{ type: "text", text: "Browser stopped." }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
 );
 
 // -----------------------------------------------------------------------------
-// Start the Server
+// Server lifecycle
 // -----------------------------------------------------------------------------
 async function runServer() {
-  console.error(
-    JSON.stringify({ message: "Starting Web Voyager MCP server..." })
-  );
   const transport = new StdioServerTransport();
-
-  try {
-    console.error(
-      JSON.stringify({ message: "Attempting to connect transport..." })
-    );
-    await server.connect(transport);
-    console.error(JSON.stringify({ message: "Server successfully connected" }));
-  } catch (error) {
-    console.error(
-      JSON.stringify({
-        message: "Server connection error",
-        error: (error as Error).message,
-        stack: (error as Error).stack,
-      })
-    );
-    process.exit(1);
-  }
+  await server.connect(transport);
+  console.error("Steel MCP Server running on stdio");
 }
 
-// -----------------------------------------------------------------------------
-// Graceful Shutdown
-// -----------------------------------------------------------------------------
+runServer().catch((error) => {
+  console.error("Fatal error running server:", error);
+  process.exit(1);
+});
+
 process.on("SIGINT", async () => {
-  console.error(JSON.stringify({ message: "Received SIGINT, cleaning up..." }));
-  await sessionManager.cleanup();
+  console.error("Received SIGINT, cleaning up...");
+  await mgr.stop();
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
-  console.error(
-    JSON.stringify({ message: "Received SIGTERM, cleaning up..." })
-  );
-  await sessionManager.cleanup();
+  console.error("Received SIGTERM, cleaning up...");
+  await mgr.stop();
   process.exit(0);
-});
-
-// -----------------------------------------------------------------------------
-// Execute
-// -----------------------------------------------------------------------------
-runServer().catch((error) => {
-  console.error("Unhandled error in server:", error);
-  process.exit(1);
 });
