@@ -3,9 +3,10 @@ name: steel-browser
 description: >
   Workflow patterns for driving the Steel MCP browser tools effectively. Use
   this skill whenever you are about to use any steel MCP tool — go_to_url,
-  click, type, get_screenshot, get_page_text, evaluate, wait_for, etc. Also
-  use it when the user asks you to browse a website, fill out a form, scrape
-  data, take a screenshot, or automate anything in a browser.
+  click, type, get_screenshot, get_page_text, evaluate, wait_for, new_tab,
+  switch_tab, etc. Also use it when the user asks you to browse a website,
+  fill out a form, scrape data, take a screenshot, open multiple tabs, or
+  automate anything in a browser.
 ---
 
 # Steel Browser — Workflow Patterns
@@ -114,6 +115,40 @@ get_current_url()   ← confirm we landed on the right page
 
 Never try to handle 2FA or sensitive credential entry yourself — always
 use the Interactive URL to let the user do it directly in their browser.
+
+## Multi-tab workflows
+
+Use tabs to work across multiple sites simultaneously — each tab maintains
+its own URL, cookies, and DOM state within the same Steel session.
+
+```
+# Open a second tab for a different site
+new_tab(url: "https://site-b.com")
+→ "Opened Tab 2"
+
+# Work on tab 2...
+get_page_text(selector: "main", maxChars: 2000)
+
+# Switch back to tab 1
+switch_tab(tabId: 1)
+get_current_url()   ← confirms we're on site-a
+
+# See all open tabs at any time
+list_tabs()
+→ [Tab 1]    https://site-a.com  —  Site A
+→ [Tab 2] *  https://site-b.com  —  Site B
+
+# Close a tab when done with it
+close_tab(tabId: 2)
+```
+
+Key rules:
+- All tools (click, type, get_screenshot, etc.) always operate on the
+  **active tab** — use switch_tab first if you need to act on a different one
+- new_tab() opens via the real CDP context — tabs are visible in the session
+  viewer immediately
+- Never use browser.newPage() or browser.newContext() directly — those create
+  phantom disconnected contexts. Always go through the MCP tools.
 
 ## Debugging failures
 
