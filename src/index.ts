@@ -84,8 +84,16 @@ class BrowserManager {
     this.currentPage =
       pages.length > 0 ? pages[0] : await this.browserContext.newPage();
 
-    // Wire up console log capture.
-    this.currentPage.on("console", (msg) => {
+    this.attachConsoleListener(this.currentPage);
+    this.initialized = true;
+  }
+
+  /** Attach console log capture to a page (idempotent label via WeakSet). */
+  private listenedPages = new WeakSet<Page>();
+  private attachConsoleListener(page: Page) {
+    if (this.listenedPages.has(page)) return;
+    this.listenedPages.add(page);
+    page.on("console", (msg) => {
       this.consoleLogs.push({
         level: msg.type(),
         text: msg.text(),
@@ -96,8 +104,6 @@ class BrowserManager {
         this.consoleLogs.splice(0, this.consoleLogs.length - 500);
       }
     });
-
-    this.initialized = true;
   }
 
   async getPage(): Promise<Page> {
@@ -110,6 +116,8 @@ class BrowserManager {
           ? pages[pages.length - 1]
           : await this.browserContext!.newPage();
     }
+    // Re-attach console listener if the page changed (e.g. after navigation or popup).
+    this.attachConsoleListener(this.currentPage);
     return this.currentPage;
   }
 
@@ -169,6 +177,26 @@ async function writeToFile(
 // -----------------------------------------------------------------------------
 // Tools
 // -----------------------------------------------------------------------------
+
+// get_current_url -------------------------------------------------------------
+server.tool(
+  "get_current_url",
+  "Return the current page URL and title. Use this to confirm navigation succeeded, check for redirects, or orient yourself before deciding next steps.",
+  {},
+  async () => {
+    try {
+      const page = await mgr.getPage();
+      const url = page.url();
+      const title = await page.title();
+      return {
+        content: [{ type: "text", text: `URL: ${url}\nTitle: ${title}` }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
 
 // get_screenshot --------------------------------------------------------------
 server.tool(
@@ -422,6 +450,191 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much i
   }
 );
 
+// click -----------------------------------------------------------------------
+server.tool(
+  "click",
+  `Click an element on the page identified by a CSS selector.
+
+Use this for buttons, links, checkboxes, or any clickable element. If the selector matches multiple elements, the first visible one is clicked.
+
+After clicking, use wait_for to confirm the expected result before proceeding.`,
+  {
+    selector: z
+      .string()
+      .describe("CSS selector of the element to click (e.g. 'button[type=submit]', '#login', 'a.nav-link')."),
+    timeout: z
+      .number()
+      .min(100)
+      .max(30000)
+      .default(10000)
+      .optional()
+      .describe("Max time in ms to wait for the element to be clickable. Default: 10000."),
+  },
+  async ({ selector, timeout = 10000 }) => {
+    try {
+      const page = await mgr.getPage();
+      await page.click(selector, { timeout });
+      await globalWait();
+      return { content: [{ type: "text", text: `Clicked: ${selector}` }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// type ------------------------------------------------------------------------
+server.tool(
+  "type",
+  `Type text into an input field, textarea, or other editable element.
+
+Use clear: true to replace existing content (recommended for form fields). Use submit: true to press Enter after typing (useful for search boxes).
+
+After typing, use wait_for to confirm the expected result or get_screenshot to verify the input.`,
+  {
+    selector: z
+      .string()
+      .describe("CSS selector of the input element (e.g. 'input[name=q]', '#email', 'textarea')."),
+    text: z
+      .string()
+      .describe("Text to type into the element."),
+    clear: z
+      .boolean()
+      .default(true)
+      .optional()
+      .describe("Replace any existing content before typing. Default: true."),
+    submit: z
+      .boolean()
+      .default(false)
+      .optional()
+      .describe("Press Enter after typing (e.g. to submit a search form). Default: false."),
+    timeout: z
+      .number()
+      .min(100)
+      .max(30000)
+      .default(10000)
+      .optional()
+      .describe("Max time in ms to wait for the element. Default: 10000."),
+  },
+  async ({ selector, text, clear = true, submit = false, timeout = 10000 }) => {
+    try {
+      const page = await mgr.getPage();
+      if (clear) {
+        // fill() replaces content atomically — preferred over triple-click + type.
+        await page.fill(selector, text, { timeout });
+      } else {
+        await page.type(selector, text, { timeout });
+      }
+      if (submit) {
+        await page.press(selector, "Enter");
+      }
+      await globalWait();
+      const action = clear ? "Filled" : "Typed into";
+      const suffix = submit ? " and pressed Enter" : "";
+      return {
+        content: [{ type: "text", text: `${action} ${selector}${suffix}.` }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// select ----------------------------------------------------------------------
+server.tool(
+  "select",
+  "Select an option from a <select> dropdown element by its value, label, or index.",
+  {
+    selector: z
+      .string()
+      .describe("CSS selector of the <select> element (e.g. 'select[name=country]', '#sort-by')."),
+    value: z
+      .string()
+      .optional()
+      .describe("The option value attribute to select (e.g. 'us', 'price-asc')."),
+    label: z
+      .string()
+      .optional()
+      .describe("The visible option text to select (e.g. 'United States', 'Price: Low to High')."),
+    index: z
+      .number()
+      .int()
+      .min(0)
+      .optional()
+      .describe("Zero-based index of the option to select."),
+    timeout: z
+      .number()
+      .min(100)
+      .max(30000)
+      .default(10000)
+      .optional()
+      .describe("Max time in ms to wait for the element. Default: 10000."),
+  },
+  async ({ selector, value, label, index, timeout = 10000 }) => {
+    try {
+      const page = await mgr.getPage();
+
+      if (value === undefined && label === undefined && index === undefined) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "At least one of 'value', 'label', or 'index' must be provided." }],
+        };
+      }
+
+      let selectArg: string | { value: string } | { label: string } | { index: number };
+      if (value !== undefined) {
+        selectArg = { value };
+      } else if (label !== undefined) {
+        selectArg = { label };
+      } else {
+        selectArg = { index: index! };
+      }
+
+      const selected = await page.selectOption(selector, selectArg, { timeout });
+      await globalWait();
+      return {
+        content: [{ type: "text", text: `Selected option(s): ${selected.join(", ")} in ${selector}` }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// evaluate --------------------------------------------------------------------
+server.tool(
+  "evaluate",
+  `Execute JavaScript in the page context and return the result as JSON.
+
+Use this as an escape hatch when no other tool covers your need: reading computed styles, extracting structured data, manipulating the DOM, calling page-level APIs.
+
+CONTEXT BUDGET — results are serialised to JSON; large objects can be very large. Keep expressions targeted. The expression must be a valid JS expression (not a statement); wrap multi-line logic in an IIFE: (() => { ... })()`,
+  {
+    expression: z
+      .string()
+      .describe("JavaScript expression to evaluate in the page context. Must return a JSON-serialisable value."),
+    waitAfter: z
+      .boolean()
+      .default(false)
+      .optional()
+      .describe("Call the global wait after evaluation (useful if the expression triggers async side effects). Default: false."),
+  },
+  async ({ expression, waitAfter = false }) => {
+    try {
+      const page = await mgr.getPage();
+      const result = await page.evaluate(expression);
+      if (waitAfter) await globalWait();
+      const text = result === undefined ? "undefined" : JSON.stringify(result, null, 2);
+      return { content: [{ type: "text", text: text }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
 // wait_for --------------------------------------------------------------------
 server.tool(
   "wait_for",
@@ -614,7 +827,8 @@ server.tool(
       const page = await mgr.getPage();
       await page.goBack({ waitUntil: "commit", timeout: 10000 });
       await globalWait();
-      return { content: [{ type: "text", text: "Went back to the previous page." }] };
+      const url = page.url();
+      return { content: [{ type: "text", text: `Went back.\nCurrent URL: ${url}` }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: error.message }] };
@@ -632,7 +846,8 @@ server.tool(
       const page = await mgr.getPage();
       await page.goForward({ waitUntil: "commit", timeout: 10000 });
       await globalWait();
-      return { content: [{ type: "text", text: "Went forward to the next page." }] };
+      const url = page.url();
+      return { content: [{ type: "text", text: `Went forward.\nCurrent URL: ${url}` }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: error.message }] };
@@ -650,7 +865,8 @@ server.tool(
       const page = await mgr.getPage();
       await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
       await globalWait();
-      return { content: [{ type: "text", text: "Page reloaded." }] };
+      const url = page.url();
+      return { content: [{ type: "text", text: `Page reloaded.\nCurrent URL: ${url}` }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: error.message }] };
@@ -663,18 +879,59 @@ server.tool(
   "google_search",
   `Perform a Google search for the given query and navigate to the results page.
 
-CONTEXT BUDGET — returns an inline screenshot of the results page. For searching and then interacting with results, use go_to_url + get_page_text or get_screenshot instead.`,
+CONTEXT BUDGET — returns a screenshot of the results page by default. Use outputMode: 'file' to save it to disk instead of loading into context. For interacting with results, follow up with click or go_to_url.`,
   {
     query: z.string().describe("The search query to use on Google."),
+    outputMode: z
+      .enum(["inline", "file"])
+      .default("inline")
+      .optional()
+      .describe(
+        "How to return the screenshot. 'inline' returns base64 (auto-downgrades to 'file' if too large). 'file' saves to disk."
+      ),
+    outputPath: z
+      .string()
+      .optional()
+      .describe("File path when outputMode is 'file'. Defaults to OUTPUT_DIR/screenshot_{timestamp}.png."),
+    maxInlineBytes: z
+      .number()
+      .optional()
+      .describe("Max bytes before auto-switching to file mode. Default: MAX_INLINE_BYTES env var (512000)."),
   },
-  async ({ query }) => {
+  async ({ query, outputMode = "inline", outputPath, maxInlineBytes }) => {
     try {
       const page = await mgr.getPage();
       await page.goto(`https://www.google.com/search?q=${encodeURIComponent(query)}`);
       await globalWait();
+      const url = page.url();
       const screenshot = await page.screenshot();
+
+      const effectiveMaxInlineBytes = maxInlineBytes ?? env.MAX_INLINE_BYTES;
+      const effectiveMode =
+        outputMode === "inline" && screenshot.length > effectiveMaxInlineBytes
+          ? "file"
+          : outputMode;
+
+      if (effectiveMode === "file") {
+        const defaultName = `screenshot_${Date.now()}.png`;
+        const filePath = await writeToFile(screenshot, defaultName, outputPath);
+        const autoNote =
+          outputMode === "inline"
+            ? `\n(Auto-switched to file mode: output exceeded ${effectiveMaxInlineBytes.toLocaleString()} bytes)`
+            : "";
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Search results for "${query}"\nURL: ${url}\nScreenshot saved to: ${filePath}${autoNote}`,
+            },
+          ],
+        };
+      }
+
       return {
         content: [
+          { type: "text", text: `Search results for "${query}"\nURL: ${url}` },
           {
             type: "image",
             data: screenshot.toString("base64"),
@@ -701,7 +958,12 @@ server.tool(
       const page = await mgr.getPage();
       await page.goto(url, { waitUntil: "domcontentloaded" });
       await globalWait();
-      return { content: [{ type: "text", text: `Navigated to ${url}` }] };
+      // Return the final URL in case of redirects.
+      const finalUrl = page.url();
+      const text = finalUrl !== url
+        ? `Navigated to ${url}\nFinal URL: ${finalUrl}`
+        : `Navigated to ${finalUrl}`;
+      return { content: [{ type: "text", text: text }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: error.message }] };
