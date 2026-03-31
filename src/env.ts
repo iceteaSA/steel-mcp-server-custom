@@ -28,6 +28,20 @@ export const EnvSchema = z
     DEFAULT_VIEWPORT_HEIGHT: z.coerce.number().default(720),
     // Seconds to wait after each action tool (for slow-loading pages).
     GLOBAL_WAIT_SECONDS: z.coerce.number().default(0),
+    // Session auto-release timeout in ms. Safety net if stop_browser is never
+    // called. Default: 5 minutes. Set higher for long-running tasks.
+    SESSION_TIMEOUT_MS: z.coerce.number().default(300000),
+    // When true, blocks images/fonts/CSS in Steel sessions for faster
+    // text-only scraping. Default: false.
+    OPTIMIZE_BANDWIDTH: z
+      .string()
+      .transform((v) => v.toLowerCase() === "true")
+      .default(false),
+    // Public-facing Steel URL (e.g. https://steel.tehan.xyz).
+    // Rewrites debug/interactive/viewer URLs so they are accessible remotely.
+    // Does NOT affect the CDP WebSocket connection — that always uses the
+    // internal STEEL_BASE_URL / session.websocketUrl.
+    STEEL_PUBLIC_URL: z.string().optional(),
   })
   .refine(
     (env) => {

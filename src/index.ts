@@ -33,8 +33,22 @@ class BrowserManager {
   private steelClient: Steel | undefined;
   private sessionId: string | undefined;
   public debugUrl: string | undefined;
+  public sessionViewerUrl: string | undefined;
   public consoleLogs: ConsoleMessage[] = [];
   public initialized = false;
+
+  /**
+   * Rewrite an internal Steel URL to the public-facing URL.
+   * Only applies when STEEL_PUBLIC_URL and STEEL_BASE_URL are both set.
+   * Used exclusively for display URLs (debug, interactive, viewer) — the CDP
+   * WebSocket connection always uses the internal address.
+   */
+  private rewriteUrl(url: string): string {
+    if (!env.STEEL_PUBLIC_URL || !env.STEEL_BASE_URL || !url) return url;
+    const internal = env.STEEL_BASE_URL.replace(/\/$/, "");
+    const pub = env.STEEL_PUBLIC_URL.replace(/\/$/, "");
+    return url.replace(internal, pub);
+  }
 
   async initialize() {
     if (this.initialized) return;
@@ -47,20 +61,35 @@ class BrowserManager {
         ...(env.STEEL_BASE_URL ? { baseURL: env.STEEL_BASE_URL } : {}),
       });
 
-      const session = await this.steelClient.sessions.create();
+      const session = await this.steelClient.sessions.create({
+        timeout: env.SESSION_TIMEOUT_MS,
+        ...(env.OPTIMIZE_BANDWIDTH ? { optimizeBandwidth: true } : {}),
+      });
       this.sessionId = session.id;
-      this.debugUrl = session.debugUrl;
+      // Store display URLs — rewritten to public address so remote agents
+      // and users can open them from outside the LAN.
+      this.debugUrl = this.rewriteUrl(session.debugUrl);
+      this.sessionViewerUrl = this.rewriteUrl(session.sessionViewerUrl);
 
-      // Derive CDP WebSocket URL from STEEL_BASE_URL if set, else use Steel Cloud.
+      // Derive the CDP WebSocket URL:
+      //
+      // Self-hosted (STEEL_BASE_URL set): Steel returns display URLs using the
+      // public domain (e.g. wss://steel.example.com) because the server knows
+      // its own DOMAIN. But the MCP server process connects internally, so we
+      // build the path ourselves using the internal base URL.
+      // The correct path for self-hosted Steel is /v1/sessions/{id}/cdp.
+      //
+      // Steel Cloud (no STEEL_BASE_URL): use session.websocketUrl directly
+      // and append the API key as a query param.
       let wsUrl: string;
       if (env.STEEL_BASE_URL) {
         const base = env.STEEL_BASE_URL.replace(/\/$/, "");
-        wsUrl = base.startsWith("https://")
+        const wsBase = base.startsWith("https://")
           ? base.replace("https://", "wss://")
           : base.replace("http://", "ws://");
-        wsUrl = `${wsUrl}/?sessionId=${session.id}`;
+        wsUrl = `${wsBase}/v1/sessions/${session.id}/cdp`;
       } else {
-        wsUrl = `wss://connect.steel.dev?apiKey=${env.STEEL_API_KEY}&sessionId=${session.id}`;
+        wsUrl = `${session.websocketUrl}&apiKey=${env.STEEL_API_KEY}`;
       }
 
       this.browser = await chromium.connectOverCDP(wsUrl);
@@ -143,6 +172,7 @@ class BrowserManager {
     this.currentPage = undefined;
     this.consoleLogs = [];
     this.debugUrl = undefined;
+    this.sessionViewerUrl = undefined;
     this.initialized = false;
   }
 }
@@ -974,18 +1004,25 @@ server.tool(
 // start_browser ---------------------------------------------------------------
 server.tool(
   "start_browser",
-  "Start the browser if it is not already running. Returns a Steel debug URL when running in steel mode.",
+  `Start the browser if it is not already running. Returns a Steel debug URL when running in steel mode.
+
+When running in steel mode, returns three URLs:
+- Session Viewer: read-only live view of the browser session
+- Interactive URL: lets a human take control (click, type, solve CAPTCHAs, enter credentials)
+
+If you need the user to intervene (CAPTCHA, login, 2FA), give them the Interactive URL and wait for them to confirm they are done before continuing.`,
   {},
   async () => {
     try {
       await mgr.initialize();
-      const content: { type: "text"; text: string }[] = [
-        { type: "text", text: "Browser started." },
-      ];
-      if (mgr.debugUrl) {
-        content.push({ type: "text", text: `Steel Debug URL: ${mgr.debugUrl}` });
+      const lines: string[] = ["Browser started."];
+      if (mgr.sessionViewerUrl) {
+        lines.push(`Session Viewer: ${mgr.sessionViewerUrl}`);
       }
-      return { content };
+      if (mgr.debugUrl) {
+        lines.push(`Interactive URL: ${mgr.debugUrl}?interactive=true&showControls=true`);
+      }
+      return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: error.message }] };

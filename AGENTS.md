@@ -22,7 +22,7 @@ pnpm exec tsc --noEmit
 pnpm watch
 
 # Run the built server directly
-BROWSER_MODE=steel STEEL_BASE_URL=http://10.1.1.1:3000 node dist/index.cjs
+BROWSER_MODE=steel STEEL_BASE_URL=http://your-steel-host:3000 node dist/index.cjs
 
 # Local mode (plain Chromium, no Steel)
 BROWSER_MODE=local node dist/index.cjs
@@ -44,13 +44,16 @@ Invalid values cause the process to exit with a descriptive error.
 |---|---|---|
 | `BROWSER_MODE` | `"steel"` | `"steel"` for Steel Cloud/self-hosted; `"local"` for plain Chromium |
 | `STEEL_API_KEY` | — | Required when `BROWSER_MODE=steel` AND `STEEL_BASE_URL` is not set (Steel Cloud). Optional for self-hosted. |
-| `STEEL_BASE_URL` | Steel Cloud | Override for self-hosted Steel (e.g. `http://10.1.1.1:3000`). When set, `STEEL_API_KEY` is optional. |
+| `STEEL_BASE_URL` | Steel Cloud | Override for self-hosted Steel (e.g. `http://your-steel-host:3000`). When set, `STEEL_API_KEY` is optional. |
 | `MAX_INLINE_BYTES` | `512000` (500 KB) | Threshold above which inline output auto-downgrades to file mode |
 | `OUTPUT_DIR` | `/tmp/steel-mcp` | Directory for file-mode outputs (screenshots, page text) |
 | `DEFAULT_SCREENSHOT_QUALITY` | `80` | Default JPEG quality (1–100); PNG ignores this |
 | `DEFAULT_VIEWPORT_WIDTH` | `1280` | Default viewport width in px |
 | `DEFAULT_VIEWPORT_HEIGHT` | `720` | Default viewport height in px |
 | `GLOBAL_WAIT_SECONDS` | `0` | Seconds to wait after each action tool for slow-loading pages |
+| `SESSION_TIMEOUT_MS` | `300000` (5 min) | Steel session auto-release timeout in ms. Safety net if `stop_browser` is never called. |
+| `OPTIMIZE_BANDWIDTH` | `false` | When `true`, blocks images/fonts/CSS for faster text-only scraping. |
+| `STEEL_PUBLIC_URL` | — | Public-facing Steel URL (e.g. `https://steel.example.com`). Rewrites debug/interactive/viewer URLs in `start_browser` output so they are accessible remotely. Does **not** affect the CDP WebSocket connection. |
 
 ### mcporter config (self-hosted Steel)
 
@@ -61,7 +64,9 @@ Invalid values cause the process to exit with a descriptive error.
   "lifecycle": { "mode": "keep-alive" },
   "env": {
     "BROWSER_MODE": "steel",
-    "STEEL_BASE_URL": "http://10.1.1.1:3000",
+    "STEEL_BASE_URL": "http://your-steel-host:3000",
+    "STEEL_PUBLIC_URL": "https://your-public-steel-url",
+    "SESSION_TIMEOUT_MS": "300000",
     "GLOBAL_WAIT_SECONDS": "2",
     "OUTPUT_DIR": "/home/user/.mcporter/steel-output"
   }

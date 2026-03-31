@@ -91,6 +91,30 @@ evaluate(expression: "Array.from(document.querySelectorAll('tr')).map(r => r.inn
 evaluate(expression: "Array.from(document.querySelectorAll('a.result')).map(a => ({text: a.textContent.trim(), href: a.href}))")
 ```
 
+## Human-in-the-loop
+
+When you hit a CAPTCHA, 2FA prompt, or login wall you cannot handle
+automatically, hand off to the user:
+
+1. Call `start_browser` — it returns a **Session Viewer** and an
+   **Interactive URL**
+2. Send the user the Interactive URL and ask them to complete the action
+3. Wait for them to confirm they are done
+4. Continue automation — the browser state (cookies, auth) is preserved
+
+```
+start_browser()
+→ "Interactive URL: https://steel.example.com/v1/sessions/debug?..."
+
+Tell the user: "Please open this URL and log in, then let me know when done."
+[user confirms]
+wait_for(text: "Dashboard", timeout: 60000)
+get_current_url()   ← confirm we landed on the right page
+```
+
+Never try to handle 2FA or sensitive credential entry yourself — always
+use the Interactive URL to let the user do it directly in their browser.
+
 ## Debugging failures
 
 If a page behaves unexpectedly, check the browser console first:
