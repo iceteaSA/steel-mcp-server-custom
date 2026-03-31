@@ -93,10 +93,11 @@ class BrowserManager {
       }
 
       this.browser = await chromium.connectOverCDP(wsUrl);
-      // Use the existing context created by Steel, or create one.
-      const contexts = this.browser.contexts();
-      this.browserContext =
-        contexts.length > 0 ? contexts[0] : await this.browser.newContext();
+      // browser.contexts() is unreliable on self-hosted Steel — it can return
+      // empty even when the CDP connection is live and valid, due to a timing
+      // race between session readiness and context enumeration. Always create
+      // a fresh context to guarantee a usable, connected context.
+      this.browserContext = await this.browser.newContext();
     } else {
       // Local mode — launch Playwright Chromium directly.
       this.browser = await chromium.launch({ headless: false });
@@ -108,10 +109,9 @@ class BrowserManager {
       });
     }
 
-    // Open initial page.
-    const pages = this.browserContext.pages();
-    this.currentPage =
-      pages.length > 0 ? pages[0] : await this.browserContext.newPage();
+    // Open initial page. After newContext() the page list is always empty, so
+    // always create a fresh page rather than checking pages() first.
+    this.currentPage = await this.browserContext.newPage();
 
     this.attachConsoleListener(this.currentPage);
     this.initialized = true;
@@ -137,13 +137,11 @@ class BrowserManager {
 
   async getPage(): Promise<Page> {
     await this.initialize();
-    // Return current page if still open, otherwise pick the last open page.
+    // If the current page was closed (e.g. after stop/reinit), open a new one.
+    // Do not fall back to pages() — on a CDP-connected context the list may be
+    // empty even when the browser is live.
     if (!this.currentPage || this.currentPage.isClosed()) {
-      const pages = this.browserContext!.pages();
-      this.currentPage =
-        pages.length > 0
-          ? pages[pages.length - 1]
-          : await this.browserContext!.newPage();
+      this.currentPage = await this.browserContext!.newPage();
     }
     // Re-attach console listener if the page changed (e.g. after navigation or popup).
     this.attachConsoleListener(this.currentPage);
