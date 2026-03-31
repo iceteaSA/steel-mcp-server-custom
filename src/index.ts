@@ -132,27 +132,33 @@ class BeamClass {
       // Non-fatal — console capture is best-effort.
     }
 
-    const openAIModelName: OpenAIChatModelId =
-      env.OPENAI_API_KEY && env.MODEL_NAME
-        ? (env.MODEL_NAME as OpenAIChatModelId)
-        : "gpt-4o";
-    const anthropicModelName: AnthropicMessagesModelId =
-      env.ANTHROPIC_API_KEY && env.MODEL_NAME
-        ? (env.MODEL_NAME as AnthropicMessagesModelId)
-        : "claude-3-7-sonnet-20250219";
+    // Only initialise the LLM-backed Beam agent when agent_prompt is enabled.
+    // In pure toolset mode (MCP_MODE=toolset) no LLM is needed — all tools
+    // drive the browser directly via Playwright.
+    if (env.MCP_MODE !== "toolset") {
+      const openAIModelName: OpenAIChatModelId =
+        env.OPENAI_API_KEY && env.MODEL_NAME
+          ? (env.MODEL_NAME as OpenAIChatModelId)
+          : "gpt-4o";
+      const anthropicModelName: AnthropicMessagesModelId =
+        env.ANTHROPIC_API_KEY && env.MODEL_NAME
+          ? (env.MODEL_NAME as AnthropicMessagesModelId)
+          : "claude-3-7-sonnet-20250219";
 
-    const llm = getLLM(env, openAIModelName, anthropicModelName);
+      const llm = getLLM(env, openAIModelName, anthropicModelName);
 
-    this.beam = new Beam({
-      browser: this.browser,
-      context: this.context,
-      llm,
-      useVision: true,
-      keepAlive: true,
-      useSteel: false,
-    });
+      this.beam = new Beam({
+        browser: this.browser,
+        context: this.context,
+        llm,
+        useVision: true,
+        keepAlive: true,
+        useSteel: false,
+      });
 
-    await this.beam.initialize();
+      await this.beam.initialize();
+    }
+
     this.initialized = true;
   }
 

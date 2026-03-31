@@ -170,11 +170,19 @@ export const EnvSchema = z
     // Seconds to wait after each tool action (for slow-loading pages).
     GLOBAL_WAIT_SECONDS: z.coerce.number().default(0),
   })
-  .refine((env) => env.OPENAI_API_KEY || env.ANTHROPIC_API_KEY, {
-    message:
-      "At least one of OPENAI_API_KEY or ANTHROPIC_API_KEY must be set in the environment.",
-    path: ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
-  })
+  .refine(
+    (env) => {
+      // An LLM key is only required when MCP_MODE includes the agent_prompt tool.
+      // In pure toolset mode all tools are direct Playwright — no LLM needed.
+      if (env.MCP_MODE === "toolset") return true;
+      return !!(env.OPENAI_API_KEY || env.ANTHROPIC_API_KEY);
+    },
+    {
+      message:
+        "At least one of OPENAI_API_KEY or ANTHROPIC_API_KEY must be set (required for agent mode). Not needed when MCP_MODE=toolset.",
+      path: ["OPENAI_API_KEY", "ANTHROPIC_API_KEY"],
+    }
+  )
   .refine(
     (env) => {
       if (!env.MODEL_NAME) return true;
