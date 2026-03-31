@@ -3,73 +3,47 @@
 import fs from "fs/promises";
 import path from "path";
 
-import { openai } from "@ai-sdk/openai";
-import { anthropic } from "@ai-sdk/anthropic";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { Browser, BrowserContext, Beam } from "beam";
+import { chromium, Browser, BrowserContext, Page } from "playwright";
 import { Steel } from "steel-sdk";
-import { AnthropicMessagesModelId, EnvSchema, OpenAIChatModelId } from "./env";
+import { EnvSchema } from "./env";
 import { z } from "zod";
-
-// -----------------------------------------------------------------------------
-// LLM helper
-// -----------------------------------------------------------------------------
-function getLLM(
-  env: z.infer<typeof EnvSchema>,
-  openAIModelName?: OpenAIChatModelId,
-  anthropicModelName?: AnthropicMessagesModelId
-) {
-  if (env.OPENAI_API_KEY && openAIModelName) {
-    return openai(openAIModelName);
-  } else if (env.ANTHROPIC_API_KEY && anthropicModelName) {
-    return anthropic(anthropicModelName);
-  } else {
-    throw new Error(
-      "No valid LLM configuration found. Check your API keys and model names."
-    );
-  }
-}
 
 // -----------------------------------------------------------------------------
 // MCP server instance
 // -----------------------------------------------------------------------------
-const server = new McpServer({
-  name: "Steel Browser MCP Server",
-  version: "1.0.0",
-  capabilities: {
-    tools: {},
-  },
-});
+const server = new McpServer(
+  { name: "Steel Browser MCP Server", version: "1.0.0" },
+  { capabilities: { tools: {} } }
+);
 
 const env = EnvSchema.parse(process.env);
 
 // -----------------------------------------------------------------------------
-// BeamClass — wraps browser lifecycle (Steel cloud or local)
+// BrowserManager — wraps Playwright browser lifecycle (Steel or local)
 // -----------------------------------------------------------------------------
 
 type ConsoleMessage = { level: string; text: string; timestamp: number };
 
-class BeamClass {
-  initialized: boolean = false;
-  public beam: Beam | undefined;
-  public context: BrowserContext | undefined;
+class BrowserManager {
   private browser: Browser | undefined;
+  private browserContext: BrowserContext | undefined;
+  private currentPage: Page | undefined;
   private steelClient: Steel | undefined;
   private sessionId: string | undefined;
   public debugUrl: string | undefined;
   public consoleLogs: ConsoleMessage[] = [];
-
-  constructor() {}
+  public initialized = false;
 
   async initialize() {
-    if (this.initialized) {
-      return;
-    }
+    if (this.initialized) return;
 
     if (env.BROWSER_MODE === "steel") {
+      // The Steel SDK requires steelAPIKey at construction time.
+      // For self-hosted instances, pass a placeholder — the server ignores it.
       this.steelClient = new Steel({
-        ...(env.STEEL_API_KEY ? { steelAPIKey: env.STEEL_API_KEY } : {}),
+        steelAPIKey: env.STEEL_API_KEY ?? "local",
         ...(env.STEEL_BASE_URL ? { baseURL: env.STEEL_BASE_URL } : {}),
       });
 
@@ -77,93 +51,69 @@ class BeamClass {
       this.sessionId = session.id;
       this.debugUrl = session.debugUrl;
 
-      // Resolve CDP WebSocket URL. Derive ws(s):// from STEEL_BASE_URL if set,
-      // otherwise fall back to Steel Cloud.
-      let cdpUrl: string;
+      // Derive CDP WebSocket URL from STEEL_BASE_URL if set, else use Steel Cloud.
+      let wsUrl: string;
       if (env.STEEL_BASE_URL) {
         const base = env.STEEL_BASE_URL.replace(/\/$/, "");
-        const wsBase = base.startsWith("https://")
+        wsUrl = base.startsWith("https://")
           ? base.replace("https://", "wss://")
           : base.replace("http://", "ws://");
-        cdpUrl = `${wsBase}/?sessionId=${session.id}`;
+        wsUrl = `${wsUrl}/?sessionId=${session.id}`;
       } else {
-        cdpUrl = `wss://connect.steel.dev?apiKey=${env.STEEL_API_KEY}&sessionId=${session.id}`;
+        wsUrl = `wss://connect.steel.dev?apiKey=${env.STEEL_API_KEY}&sessionId=${session.id}`;
       }
 
-      this.browser = new Browser({
-        cdpUrl,
-        browserClass: "chromium",
-        headless: false,
-      });
+      this.browser = await chromium.connectOverCDP(wsUrl);
+      // Use the existing context created by Steel, or create one.
+      const contexts = this.browser.contexts();
+      this.browserContext =
+        contexts.length > 0 ? contexts[0] : await this.browser.newContext();
     } else {
-      // Local mode — launch a plain browser directly (no Steel session).
-      this.browser = new Browser({
-        headless: false,
-      });
-      this.debugUrl = undefined;
-    }
-
-    this.context = new BrowserContext({
-      browser: this.browser,
-      config: {
+      // Local mode — launch Playwright Chromium directly.
+      this.browser = await chromium.launch({ headless: false });
+      this.browserContext = await this.browser.newContext({
         viewport: {
           width: env.DEFAULT_VIEWPORT_WIDTH,
           height: env.DEFAULT_VIEWPORT_HEIGHT,
         },
-      },
+      });
+    }
+
+    // Open initial page.
+    const pages = this.browserContext.pages();
+    this.currentPage =
+      pages.length > 0 ? pages[0] : await this.browserContext.newPage();
+
+    // Wire up console log capture.
+    this.currentPage.on("console", (msg) => {
+      this.consoleLogs.push({
+        level: msg.type(),
+        text: msg.text(),
+        timestamp: Date.now(),
+      });
+      // Ring buffer — keep at most 500 entries.
+      if (this.consoleLogs.length > 500) {
+        this.consoleLogs.splice(0, this.consoleLogs.length - 500);
+      }
     });
-
-    // Wire up console log capture on the initial page.
-    // New pages opened later will not be captured automatically.
-    try {
-      const page = await this.context.getCurrentPage();
-      page.on("console", (msg) => {
-        this.consoleLogs.push({
-          level: msg.type(),
-          text: msg.text(),
-          timestamp: Date.now(),
-        });
-        // Keep at most 500 entries to avoid unbounded memory growth.
-        if (this.consoleLogs.length > 500) {
-          this.consoleLogs.splice(0, this.consoleLogs.length - 500);
-        }
-      });
-    } catch {
-      // Non-fatal — console capture is best-effort.
-    }
-
-    // Only initialise the LLM-backed Beam agent when agent_prompt is enabled.
-    // In pure toolset mode (MCP_MODE=toolset) no LLM is needed — all tools
-    // drive the browser directly via Playwright.
-    if (env.MCP_MODE !== "toolset") {
-      const openAIModelName: OpenAIChatModelId =
-        env.OPENAI_API_KEY && env.MODEL_NAME
-          ? (env.MODEL_NAME as OpenAIChatModelId)
-          : "gpt-4o";
-      const anthropicModelName: AnthropicMessagesModelId =
-        env.ANTHROPIC_API_KEY && env.MODEL_NAME
-          ? (env.MODEL_NAME as AnthropicMessagesModelId)
-          : "claude-3-7-sonnet-20250219";
-
-      const llm = getLLM(env, openAIModelName, anthropicModelName);
-
-      this.beam = new Beam({
-        browser: this.browser,
-        context: this.context,
-        llm,
-        useVision: true,
-        keepAlive: true,
-        useSteel: false,
-      });
-
-      await this.beam.initialize();
-    }
 
     this.initialized = true;
   }
 
+  async getPage(): Promise<Page> {
+    await this.initialize();
+    // Return current page if still open, otherwise pick the last open page.
+    if (!this.currentPage || this.currentPage.isClosed()) {
+      const pages = this.browserContext!.pages();
+      this.currentPage =
+        pages.length > 0
+          ? pages[pages.length - 1]
+          : await this.browserContext!.newPage();
+    }
+    return this.currentPage;
+  }
+
   async stop() {
-    // Release the Steel session if one was created (cloud or self-hosted).
     if (this.steelClient && this.sessionId) {
       try {
         await this.steelClient.sessions.release(this.sessionId);
@@ -177,40 +127,34 @@ class BeamClass {
     }
 
     if (this.browser) {
-      if (typeof this.browser.close === "function") {
-        await this.browser.close();
-      }
+      await this.browser.close().catch(() => {});
       this.browser = undefined;
     }
-    this.context = undefined;
-    this.beam = undefined;
+
+    this.browserContext = undefined;
+    this.currentPage = undefined;
     this.consoleLogs = [];
+    this.debugUrl = undefined;
     this.initialized = false;
   }
 }
 
-const mcpBeam = new BeamClass();
+const mgr = new BrowserManager();
 
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
 
-/** Sleep for ms milliseconds. */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Wait for GLOBAL_WAIT_SECONDS after an action tool completes (if > 0). */
 async function globalWait() {
   if (env.GLOBAL_WAIT_SECONDS > 0) {
     await sleep(env.GLOBAL_WAIT_SECONDS * 1000);
   }
 }
 
-/**
- * Write data to a file, creating parent directories as needed.
- * Returns the resolved file path.
- */
 async function writeToFile(
   data: Buffer | string,
   defaultName: string,
@@ -226,41 +170,8 @@ async function writeToFile(
 // Tools
 // -----------------------------------------------------------------------------
 
-// agent_prompt ----------------------------------------------------------------
-const agentPromptTool = server.tool(
-  "agent_prompt",
-  `Use this tool for any high-level, multi-step, or vague browser task.
-Examples: 'Go to nytimes.com and click the first article about AI', 'Search for OpenAI on Google and click the first result', 'Log in to my account and take a screenshot'.
-The agent interprets and executes the task using browser automation and LLM reasoning.
-This is the recommended tool for most user actions.`,
-  {
-    task: z
-      .string()
-      .describe(
-        "A detailed description of the task or prompt for the agent to perform. Be as specific as possible for best results."
-      ),
-  },
-  async ({ task }) => {
-    try {
-      await mcpBeam.initialize();
-      if (!mcpBeam.beam) throw new Error("Beam not initialized");
-      await mcpBeam.beam.run({ task });
-      await globalWait();
-      return {
-        content: [{ type: "text", text: `Agent task completed: ${task}` }],
-      };
-    } catch (err) {
-      const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
-    }
-  }
-);
-
 // get_screenshot --------------------------------------------------------------
-const getScreenshotTool = server.tool(
+server.tool(
   "get_screenshot",
   `Take a screenshot of the current page.
 
@@ -337,15 +248,10 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
     maxInlineBytes,
   }) => {
     try {
-      await mcpBeam.initialize();
-      if (!mcpBeam.context) throw new Error("Beam not initialized");
-      const page = await mcpBeam.context.getCurrentPage();
-
+      const page = await mgr.getPage();
       const effectiveQuality = quality ?? env.DEFAULT_SCREENSHOT_QUALITY;
       const effectiveMaxInlineBytes = maxInlineBytes ?? env.MAX_INLINE_BYTES;
 
-      // Apply scale by temporarily resizing the viewport.
-      // Playwright uses setViewportSize({ width, height }) — no deviceScaleFactor.
       const origVp = page.viewportSize() ?? {
         width: env.DEFAULT_VIEWPORT_WIDTH,
         height: env.DEFAULT_VIEWPORT_HEIGHT,
@@ -359,23 +265,19 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
             height: Math.round(origVp.height * scale),
           });
         }
-
-        const screenshotOpts: Parameters<typeof page.screenshot>[0] = {
+        const opts: Parameters<typeof page.screenshot>[0] = {
           type: format,
           fullPage,
         };
-        if (format === "jpeg") screenshotOpts.quality = effectiveQuality;
-        if (clip) screenshotOpts.clip = clip;
-
-        buffer = await page.screenshot(screenshotOpts);
+        if (format === "jpeg") opts.quality = effectiveQuality;
+        if (clip) opts.clip = clip;
+        buffer = await page.screenshot(opts);
       } finally {
-        // Always restore original viewport even if screenshot throws.
         if (scale !== 1.0) {
           await page.setViewportSize(origVp).catch(() => {});
         }
       }
 
-      // Auto-downgrade to file if too large.
       const effectiveMode =
         outputMode === "inline" && buffer.length > effectiveMaxInlineBytes
           ? "file"
@@ -410,16 +312,13 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
       };
     } catch (err) {
       const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
 
 // get_page_text ---------------------------------------------------------------
-const getPageTextTool = server.tool(
+server.tool(
   "get_page_text",
   `Get visible text content from the current page.
 
@@ -436,14 +335,14 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much i
       .default(10000)
       .optional()
       .describe(
-        "Maximum characters to return inline. Truncates with a notice. Default: 10000. Set to 0 for no limit (use with outputMode: 'file')."
+        "Maximum characters to return inline. Default: 10000. Set to 0 for no limit (use with outputMode: 'file')."
       ),
     outputMode: z
       .enum(["inline", "file"])
       .default("inline")
       .optional()
       .describe(
-        "Return text inline (default) or save to file and return path. Use 'file' to avoid loading large text into context."
+        "Return text inline (default) or save to file and return path."
       ),
     outputPath: z
       .string()
@@ -455,24 +354,13 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much i
       .boolean()
       .default(false)
       .optional()
-      .describe(
-        "Append link URLs in brackets after each anchor's text. Default: false."
-      ),
+      .describe("Append link URLs in brackets after each anchor's text. Default: false."),
   },
-  async ({
-    selector,
-    maxChars = 10000,
-    outputMode = "inline",
-    outputPath,
-    includeLinks = false,
-  }) => {
+  async ({ selector, maxChars = 10000, outputMode = "inline", outputPath, includeLinks = false }) => {
     try {
-      await mcpBeam.initialize();
-      if (!mcpBeam.context) throw new Error("Beam not initialized");
-      const page = await mcpBeam.context.getCurrentPage();
+      const page = await mgr.getPage();
 
       let text: string;
-
       if (includeLinks) {
         text = await page.evaluate((sel: string | null) => {
           const root = sel ? document.querySelector(sel) : document.body;
@@ -483,9 +371,7 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much i
               return `${node.textContent?.trim()} [${href}]`;
             }
             return Array.from(node.childNodes)
-              .map((n) =>
-                n.nodeType === 3 ? n.textContent ?? "" : walk(n as Element)
-              )
+              .map((n) => (n.nodeType === 3 ? n.textContent ?? "" : walk(n as Element)))
               .join(" ");
           };
           return walk(root as Element);
@@ -500,10 +386,9 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much i
       text = text.replace(/\s+/g, " ").trim();
 
       if (outputMode === "file") {
-        const defaultName = `page_text_${Date.now()}.txt`;
         const filePath = await writeToFile(
           Buffer.from(text, "utf8"),
-          defaultName,
+          `page_text_${Date.now()}.txt`,
           outputPath
         );
         return {
@@ -518,7 +403,6 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much i
 
       const truncated = maxChars > 0 && text.length > maxChars;
       const output = truncated ? text.slice(0, maxChars) : text;
-
       return {
         content: [
           {
@@ -533,66 +417,39 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much i
       };
     } catch (err) {
       const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
 
 // wait_for --------------------------------------------------------------------
-const waitForTool = server.tool(
+server.tool(
   "wait_for",
   `Wait for a condition on the page before proceeding — more reliable than sleeping.
 
-Use this after an action that triggers async changes (form submit, click, navigation) when you need to confirm the page has updated before reading or screenshotting.
+Use after an action that triggers async changes (form submit, click, navigation) when you need to confirm the page has updated before reading or screenshotting.
 
-Conditions (at least one required):
-- selector: wait for a CSS selector to appear in the DOM
-- text: wait for a string to appear anywhere on the page
-- textGone: wait for a string to disappear from the page
-- timeout: max wait in ms (default 10000)
-
-Returns success with elapsed time, or an error on timeout.`,
+Conditions (at least one required): selector, text, textGone. Returns elapsed time or error on timeout.`,
   {
-    selector: z
-      .string()
-      .optional()
-      .describe("CSS selector to wait for (e.g. '#results', '.loaded')."),
-    text: z
-      .string()
-      .optional()
-      .describe("Text string to wait for anywhere on the page."),
-    textGone: z
-      .string()
-      .optional()
-      .describe("Text string to wait for to disappear from the page."),
+    selector: z.string().optional().describe("CSS selector to wait for (e.g. '#results', '.loaded')."),
+    text: z.string().optional().describe("Text string to wait for anywhere on the page."),
+    textGone: z.string().optional().describe("Text string to wait for to disappear from the page."),
     timeout: z
       .number()
       .min(100)
       .max(60000)
       .default(10000)
       .optional()
-      .describe(
-        "Maximum time to wait in milliseconds. Default: 10000 (10s). Max: 60000 (60s)."
-      ),
+      .describe("Maximum time to wait in milliseconds. Default: 10000 (10s). Max: 60000 (60s)."),
   },
   async ({ selector, text, textGone, timeout = 10000 }) => {
     try {
-      await mcpBeam.initialize();
-      if (!mcpBeam.context) throw new Error("Beam not initialized");
-      const page = await mcpBeam.context.getCurrentPage();
+      const page = await mgr.getPage();
 
       if (!selector && !text && !textGone) {
         return {
           isError: true,
-          content: [
-            {
-              type: "text",
-              text: "At least one of 'selector', 'text', or 'textGone' must be provided.",
-            },
-          ],
+          content: [{ type: "text", text: "At least one of 'selector', 'text', or 'textGone' must be provided." }],
         };
       }
 
@@ -600,34 +457,24 @@ Returns success with elapsed time, or an error on timeout.`,
       const conditions: Promise<void>[] = [];
 
       if (selector) {
-        conditions.push(
-          page
-            .waitForSelector(selector, { timeout })
-            .then(() => undefined)
-        );
+        conditions.push(page.waitForSelector(selector, { timeout }).then(() => undefined));
       }
-
       if (text) {
         conditions.push(
-          page
-            .waitForFunction(
-              (t: string) => document.body?.innerText?.includes(t),
-              text,
-              { timeout }
-            )
-            .then(() => undefined)
+          page.waitForFunction(
+            (t: string) => document.body?.innerText?.includes(t),
+            text,
+            { timeout }
+          ).then(() => undefined)
         );
       }
-
       if (textGone) {
         conditions.push(
-          page
-            .waitForFunction(
-              (t: string) => !document.body?.innerText?.includes(t),
-              textGone,
-              { timeout }
-            )
-            .then(() => undefined)
+          page.waitForFunction(
+            (t: string) => !document.body?.innerText?.includes(t),
+            textGone,
+            { timeout }
+          ).then(() => undefined)
         );
       }
 
@@ -640,75 +487,52 @@ Returns success with elapsed time, or an error on timeout.`,
       if (textGone) parts.push(`text gone "${textGone}"`);
 
       return {
-        content: [
-          {
-            type: "text",
-            text: `Condition met: ${parts.join(", ")} — elapsed ${elapsed}ms.`,
-          },
-        ],
+        content: [{ type: "text", text: `Condition met: ${parts.join(", ")} — elapsed ${elapsed}ms.` }],
       };
     } catch (err) {
       const error = err as Error;
       return {
         isError: true,
-        content: [
-          {
-            type: "text",
-            text: `wait_for timed out or failed: ${error.message}`,
-          },
-        ],
+        content: [{ type: "text", text: `wait_for timed out or failed: ${error.message}` }],
       };
     }
   }
 );
 
 // console_log -----------------------------------------------------------------
-const consoleLogTool = server.tool(
+server.tool(
   "console_log",
   `Return browser console messages captured since the browser was started or last cleared.
 
-CONTEXT BUDGET — console output can be large on noisy pages. Use the level filter to limit to errors/warnings. Use clear: true to reset the buffer after reading.
-
-Useful for debugging JavaScript errors, network failures, or confirming that an action triggered the expected log output.`,
+CONTEXT BUDGET — console output can be large on noisy pages. Use the level filter to limit to errors/warnings. Use clear: true to reset the buffer after reading.`,
   {
     level: z
       .enum(["all", "error", "warning", "info", "log"])
       .default("all")
       .optional()
-      .describe(
-        "Filter by severity. 'all' returns everything. Default: 'all'."
-      ),
+      .describe("Filter by severity. 'all' returns everything. Default: 'all'."),
     maxEntries: z
       .number()
       .min(1)
       .max(500)
       .default(50)
       .optional()
-      .describe(
-        "Maximum number of entries to return (most recent). Default: 50."
-      ),
+      .describe("Maximum number of entries to return (most recent). Default: 50."),
     clear: z
       .boolean()
       .default(false)
       .optional()
-      .describe(
-        "Clear the captured log buffer after returning results. Default: false."
-      ),
+      .describe("Clear the captured log buffer after returning results. Default: false."),
   },
   async ({ level = "all", maxEntries = 50, clear = false }) => {
     try {
-      await mcpBeam.initialize();
+      await mgr.initialize();
 
-      let logs = mcpBeam.consoleLogs;
-      if (level !== "all") {
-        logs = logs.filter((m) => m.level === level);
-      }
-      // Return most recent entries.
+      let logs = mgr.consoleLogs;
+      if (level !== "all") logs = logs.filter((m) => m.level === level);
       const slice = logs.slice(-maxEntries);
 
-      if (clear) {
-        mcpBeam.consoleLogs = [];
-      }
+      if (clear) mgr.consoleLogs = [];
 
       if (slice.length === 0) {
         return {
@@ -722,10 +546,7 @@ Useful for debugging JavaScript errors, network failures, or confirming that an 
       }
 
       const formatted = slice
-        .map((m) => {
-          const ts = new Date(m.timestamp).toISOString();
-          return `[${ts}] [${m.level.toUpperCase()}] ${m.text}`;
-        })
+        .map((m) => `[${new Date(m.timestamp).toISOString()}] [${m.level.toUpperCase()}] ${m.text}`)
         .join("\n");
 
       return {
@@ -738,169 +559,118 @@ Useful for debugging JavaScript errors, network failures, or confirming that an 
       };
     } catch (err) {
       const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
 
 // scroll_down -----------------------------------------------------------------
-const scrollDownTool = server.tool(
+server.tool(
   "scroll_down",
-  "Scroll down the page by a specified number of pixels (default 500). Use this for precise, atomic scrolling. For scrolling as part of a larger task (e.g., 'scroll down and click the blue button'), use agent_prompt instead.",
+  "Scroll down the page by a specified number of pixels (default 500).",
   {
-    pixels: z
-      .number()
-      .describe("Number of pixels to scroll down. Default is 500.")
-      .default(500)
-      .optional(),
+    pixels: z.number().default(500).optional().describe("Number of pixels to scroll down. Default: 500."),
   },
   async ({ pixels = 500 }) => {
     try {
-      await mcpBeam.initialize();
-      if (!mcpBeam.context) throw new Error("Beam not initialized");
-      const page = await mcpBeam.context.getCurrentPage();
+      const page = await mgr.getPage();
       await page.evaluate(`window.scrollBy(0, ${pixels})`);
       await globalWait();
-      return {
-        content: [{ type: "text", text: `Scrolled down by ${pixels} pixels.` }],
-      };
+      return { content: [{ type: "text", text: `Scrolled down by ${pixels} pixels.` }] };
     } catch (err) {
       const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
 
 // scroll_up -------------------------------------------------------------------
-const scrollUpTool = server.tool(
+server.tool(
   "scroll_up",
-  "Scroll up the page by a specified number of pixels (default 500). Use this for precise, atomic scrolling. For scrolling as part of a larger task (e.g., 'scroll up and click the first link'), use agent_prompt instead.",
+  "Scroll up the page by a specified number of pixels (default 500).",
   {
-    pixels: z
-      .number()
-      .describe("Number of pixels to scroll up. Default is 500.")
-      .default(500)
-      .optional(),
+    pixels: z.number().default(500).optional().describe("Number of pixels to scroll up. Default: 500."),
   },
   async ({ pixels = 500 }) => {
     try {
-      await mcpBeam.initialize();
-      if (!mcpBeam.context) throw new Error("Beam not initialized");
-      const page = await mcpBeam.context.getCurrentPage();
+      const page = await mgr.getPage();
       await page.evaluate(`window.scrollBy(0, -${pixels})`);
       await globalWait();
-      return {
-        content: [{ type: "text", text: `Scrolled up by ${pixels} pixels.` }],
-      };
+      return { content: [{ type: "text", text: `Scrolled up by ${pixels} pixels.` }] };
     } catch (err) {
       const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
 
 // go_back ---------------------------------------------------------------------
-const goBackTool = server.tool(
+server.tool(
   "go_back",
-  "Go back to the previous page in the browser history. For multi-step navigation (e.g., 'go back and then click a button'), use agent_prompt instead.",
+  "Go back to the previous page in the browser history.",
   {},
   async () => {
     try {
-      await mcpBeam.initialize();
-      if (!mcpBeam.context) throw new Error("Beam not initialized");
-      const page = await mcpBeam.context.getCurrentPage();
-      await page.goBack();
+      const page = await mgr.getPage();
+      await page.goBack({ waitUntil: "commit", timeout: 10000 });
       await globalWait();
-      return {
-        content: [{ type: "text", text: "Went back to the previous page." }],
-      };
+      return { content: [{ type: "text", text: "Went back to the previous page." }] };
     } catch (err) {
       const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
 
 // go_forward ------------------------------------------------------------------
-const goForwardTool = server.tool(
+server.tool(
   "go_forward",
-  "Go forward to the next page in the browser history. For multi-step navigation (e.g., 'go forward and then fill a form'), use agent_prompt instead.",
+  "Go forward to the next page in the browser history.",
   {},
   async () => {
     try {
-      await mcpBeam.initialize();
-      if (!mcpBeam.context) throw new Error("Beam not initialized");
-      const page = await mcpBeam.context.getCurrentPage();
-      await page.goForward();
+      const page = await mgr.getPage();
+      await page.goForward({ waitUntil: "commit", timeout: 10000 });
       await globalWait();
-      return {
-        content: [{ type: "text", text: "Went forward to the next page." }],
-      };
+      return { content: [{ type: "text", text: "Went forward to the next page." }] };
     } catch (err) {
       const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
 
 // refresh ---------------------------------------------------------------------
-const refreshTool = server.tool(
+server.tool(
   "refresh",
-  "Reload the current page. For refreshing as part of a larger workflow (e.g., 'refresh and then take a screenshot'), use agent_prompt instead.",
+  "Reload the current page.",
   {},
   async () => {
     try {
-      await mcpBeam.initialize();
-      if (!mcpBeam.context) throw new Error("Beam not initialized");
-      const page = await mcpBeam.context.getCurrentPage();
-      await page.reload();
+      const page = await mgr.getPage();
+      await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
       await globalWait();
       return { content: [{ type: "text", text: "Page reloaded." }] };
     } catch (err) {
       const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
 
 // google_search ---------------------------------------------------------------
-const googleSearchTool = server.tool(
+server.tool(
   "google_search",
   `Perform a Google search for the given query and navigate to the results page.
 
-CONTEXT BUDGET — returns an inline screenshot of the results page. For searching and then interacting with results (e.g., clicking a link), use agent_prompt instead.`,
+CONTEXT BUDGET — returns an inline screenshot of the results page. For searching and then interacting with results, use go_to_url + get_page_text or get_screenshot instead.`,
   {
-    query: z
-      .string()
-      .describe(
-        "The search query to use on Google. For searching and clicking/interacting, use agent_prompt instead."
-      ),
+    query: z.string().describe("The search query to use on Google."),
   },
   async ({ query }) => {
     try {
-      await mcpBeam.initialize();
-      if (!mcpBeam.context) throw new Error("Beam not initialized");
-      const page = await mcpBeam.context.getCurrentPage();
-      const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
-      await page.goto(url);
+      const page = await mgr.getPage();
+      await page.goto(`https://www.google.com/search?q=${encodeURIComponent(query)}`);
       await globalWait();
       const screenshot = await page.screenshot();
       return {
@@ -914,122 +684,68 @@ CONTEXT BUDGET — returns an inline screenshot of the results page. For searchi
       };
     } catch (err) {
       const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
 
 // go_to_url -------------------------------------------------------------------
-const goToUrlTool = server.tool(
+server.tool(
   "go_to_url",
-  "Navigate the browser directly to the specified URL. For navigation followed by further actions (e.g., 'go to this URL and click a button'), use agent_prompt instead.",
+  "Navigate the browser to the specified URL.",
   {
-    url: z
-      .string()
-      .describe(
-        "The URL to navigate to. For navigation and further actions, use agent_prompt instead."
-      ),
+    url: z.string().describe("The URL to navigate to."),
   },
   async ({ url }) => {
     try {
-      await mcpBeam.initialize();
-      if (!mcpBeam.context) throw new Error("Beam not initialized");
-      const page = await mcpBeam.context.getCurrentPage();
-      await page.goto(url);
+      const page = await mgr.getPage();
+      await page.goto(url, { waitUntil: "domcontentloaded" });
       await globalWait();
       return { content: [{ type: "text", text: `Navigated to ${url}` }] };
     } catch (err) {
       const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
 
 // start_browser ---------------------------------------------------------------
-const startBrowserTool = server.tool(
+server.tool(
   "start_browser",
   "Start the browser if it is not already running. Returns a Steel debug URL when running in steel mode.",
   {},
   async () => {
     try {
-      await mcpBeam.initialize();
+      await mgr.initialize();
       const content: { type: "text"; text: string }[] = [
         { type: "text", text: "Browser started." },
       ];
-      if (mcpBeam.debugUrl) {
-        content.push({
-          type: "text",
-          text: `Steel Debug URL: ${mcpBeam.debugUrl}`,
-        });
+      if (mgr.debugUrl) {
+        content.push({ type: "text", text: `Steel Debug URL: ${mgr.debugUrl}` });
       }
       return { content };
     } catch (err) {
       const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
 
 // stop_browser ----------------------------------------------------------------
-const stopBrowserTool = server.tool(
+server.tool(
   "stop_browser",
   "Stop the browser and clean up resources. Releases the Steel session if one is active.",
   {},
   async () => {
     try {
-      await mcpBeam.stop();
+      await mgr.stop();
       return { content: [{ type: "text", text: "Browser stopped." }] };
     } catch (err) {
       const error = err as Error;
-      return {
-        isError: true,
-        content: [{ type: "text", text: error.message }],
-      };
+      return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
-
-// -----------------------------------------------------------------------------
-// Tool mode configuration (MCP_MODE env var)
-// -----------------------------------------------------------------------------
-const agentTools = [agentPromptTool];
-
-const browserTools = [
-  getScreenshotTool,
-  getPageTextTool,
-  waitForTool,
-  consoleLogTool,
-  scrollDownTool,
-  scrollUpTool,
-  goBackTool,
-  goForwardTool,
-  refreshTool,
-  googleSearchTool,
-  goToUrlTool,
-  startBrowserTool,
-  stopBrowserTool,
-];
-
-if (env.MCP_MODE === "agent") {
-  agentTools.forEach((tool) => tool.enable());
-  browserTools.forEach((tool) => tool.disable());
-} else if (env.MCP_MODE === "toolset") {
-  agentTools.forEach((tool) => tool.disable());
-  browserTools.forEach((tool) => tool.enable());
-} else {
-  // "both" — all tools enabled (default)
-  agentTools.forEach((tool) => tool.enable());
-  browserTools.forEach((tool) => tool.enable());
-}
 
 // -----------------------------------------------------------------------------
 // Server lifecycle
@@ -1046,13 +762,13 @@ runServer().catch((error) => {
 });
 
 process.on("SIGINT", async () => {
-  console.error("Received SIGINT, cleaning up browser sessions...");
-  await mcpBeam.stop();
+  console.error("Received SIGINT, cleaning up...");
+  await mgr.stop();
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
-  console.error("Received SIGTERM, cleaning up browser sessions...");
-  await mcpBeam.stop();
+  console.error("Received SIGTERM, cleaning up...");
+  await mgr.stop();
   process.exit(0);
 });

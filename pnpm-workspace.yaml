@@ -1,8 +1,2 @@
 onlyBuiltDependencies:
   - esbuild
-  - onnxruntime-node
-  - protobufjs
-  - puppeteer
-
-patchedDependencies:
-  '@mastra/core@0.8.3': patches/@mastra__core@0.8.3.patch
