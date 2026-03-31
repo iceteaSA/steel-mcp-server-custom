@@ -156,6 +156,20 @@ export const EnvSchema = z
       )
       .optional(),
     STEEL_API_KEY: z.string().optional(),
+    // Steel self-hosted endpoint. When BROWSER_MODE is 'steel', defaults to
+    // wss://connect.steel.dev (cloud). Override to point at a local Steel instance.
+    STEEL_BASE_URL: z.string().optional(),
+    // Maximum bytes before auto-switching inline output to file mode (default 500 KB).
+    MAX_INLINE_BYTES: z.coerce.number().default(512000),
+    // Directory for file-mode outputs (screenshots, page text, etc.).
+    OUTPUT_DIR: z.string().default("/tmp/steel-mcp"),
+    // Default JPEG quality for screenshots (1–100).
+    DEFAULT_SCREENSHOT_QUALITY: z.coerce.number().min(1).max(100).default(80),
+    // Default viewport dimensions.
+    DEFAULT_VIEWPORT_WIDTH: z.coerce.number().default(1280),
+    DEFAULT_VIEWPORT_HEIGHT: z.coerce.number().default(720),
+    // Seconds to wait after each tool action (for slow-loading pages).
+    GLOBAL_WAIT_SECONDS: z.coerce.number().default(0),
   })
   .refine((env) => env.OPENAI_API_KEY || env.ANTHROPIC_API_KEY, {
     message:
