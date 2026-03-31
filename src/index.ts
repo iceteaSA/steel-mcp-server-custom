@@ -93,11 +93,11 @@ class BrowserManager {
       }
 
       this.browser = await chromium.connectOverCDP(wsUrl);
-      // browser.contexts() is unreliable on self-hosted Steel — it can return
-      // empty even when the CDP connection is live and valid, due to a timing
-      // race between session readiness and context enumeration. Always create
-      // a fresh context to guarantee a usable, connected context.
-      this.browserContext = await this.browser.newContext();
+      // Use the existing context and page that Steel already created.
+      // DO NOT call newContext() or newPage() — both create phantom objects
+      // that are disconnected from the real Steel session tab.
+      this.browserContext = this.browser.contexts()[0];
+      this.currentPage = this.browserContext.pages()[0];
     } else {
       // Local mode — launch Playwright Chromium directly.
       this.browser = await chromium.launch({ headless: false });
@@ -107,11 +107,8 @@ class BrowserManager {
           height: env.DEFAULT_VIEWPORT_HEIGHT,
         },
       });
+      this.currentPage = await this.browserContext.newPage();
     }
-
-    // Open initial page. After newContext() the page list is always empty, so
-    // always create a fresh page rather than checking pages() first.
-    this.currentPage = await this.browserContext.newPage();
 
     this.attachConsoleListener(this.currentPage);
     this.initialized = true;
