@@ -611,18 +611,20 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
       // --- matchAll: per-element structured output -----------------------
       if (matchAll) {
         const entries = await page.evaluate(
-          (sel: string | null, withLinks: boolean) => {
+          ({ sel, withLinks }: { sel: string | null; withLinks: boolean }) => {
             const roots = sel
               ? Array.from(document.querySelectorAll(sel))
               : [document.body];
             const collect = (root: Element) => {
-              const links: Array<{ text: string; href: string }> = [];
+              const rawLinks: Array<{ text: string; href: string }> = [];
               const walk = (node: Element): string => {
                 if (node.tagName === "A") {
                   const href = (node as HTMLAnchorElement).href;
                   const txt = (node.textContent ?? "").trim();
-                  if (withLinks && href) links.push({ text: txt, href });
-                  return withLinks ? `${txt} [${href}]` : txt;
+                  if (withLinks && href) rawLinks.push({ text: txt, href });
+                  // Return only the anchor text — don't embed [href] in text.
+                  // links array carries href data separately when includeLinks.
+                  return txt;
                 }
                 return Array.from(node.childNodes)
                   .map((n) =>
@@ -633,22 +635,50 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
                   .join(" ");
               };
               const text = walk(root).replace(/\s+/g, " ").trim();
-              const primaryLink = links[0]?.href;
+
               const entry: {
                 text: string;
                 primaryLink?: string;
                 links?: Array<{ text: string; href: string }>;
               } = { text };
+
               if (withLinks) {
-                if (primaryLink) entry.primaryLink = primaryLink;
+                // Dedupe links by href, keep longest non-empty text variant.
+                // Strip anchor fragment (#comments, #section-x) for uniqueness.
+                const byHref = new Map<string, { text: string; href: string }>();
+                for (const l of rawLinks) {
+                  const key = l.href.split("#")[0];
+                  const existing = byHref.get(key);
+                  if (!existing) {
+                    byHref.set(key, { text: l.text, href: l.href });
+                  } else if (l.text.length > existing.text.length) {
+                    byHref.set(key, { text: l.text, href: l.href });
+                  }
+                }
+                const links = Array.from(byHref.values());
                 entry.links = links;
+                // primaryLink = first link whose href is NOT same as document origin root
+                // (filters out nav/category links), else first link.
+                const articleish = links.find((l) => {
+                  try {
+                    const u = new URL(l.href);
+                    // path must be deeper than "/" and not end at a pure category slug like "/world/"
+                    return (
+                      u.pathname.length > 1 &&
+                      u.pathname.split("/").filter(Boolean).length >= 2
+                    );
+                  } catch {
+                    return false;
+                  }
+                });
+                if (articleish) entry.primaryLink = articleish.href;
+                else if (links[0]) entry.primaryLink = links[0].href;
               }
               return entry;
             };
             return roots.map(collect);
           },
-          selector ?? null,
-          includeLinks
+          { sel: selector ?? null, withLinks: includeLinks }
         );
 
         // per-entry maxChars truncation
