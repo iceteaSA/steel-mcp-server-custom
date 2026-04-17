@@ -181,7 +181,23 @@ Example output:
 ]
 ```
 
-### Path 3 — `evaluate` (when shape doesn't fit Path 1 or 2)
+### Path 3 — `get_attrs` (custom attributes per element)
+
+Use when you need specific attributes (data-*, aria-*, src, alt, href) rather than full text or just links:
+
+```
+get_attrs(
+  selector: "article.product-card",
+  attrs: ["data-product-id", "data-price", "aria-label", "text"],
+  limit: 50
+)
+```
+
+Returns compact JSON (one object per line) with ONLY the requested attributes. Special names: `"text"` = textContent (whitespace-collapsed), `"html"` = outerHTML. Missing attributes become `null`.
+
+Use cases: scraping product grids with structured data, extracting widget state, pulling embed IDs from iframes.
+
+### Path 4 — `evaluate` (when shape doesn't fit Paths 1–3)
 
 Use for computed fields (parsed dates, joined rows, filtered subsets, data not on the DOM surface):
 
