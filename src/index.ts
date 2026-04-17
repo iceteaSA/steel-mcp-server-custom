@@ -699,6 +699,7 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
             : entries;
 
         if (outputMode === "file") {
+          // File output: pretty-print for human inspection when saved to disk.
           const json = JSON.stringify(capped, null, 2);
           const filePath = await writeToFile(
             Buffer.from(json, "utf8"),
@@ -715,15 +716,18 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
           };
         }
 
+        // Inline output: compact JSON — one object per line — to avoid \n
+        // pollution from pretty-print in tool response wrappers.
         const truncated = capped.length < totalMatched;
+        const body = "[\n" + capped.map((e) => JSON.stringify(e)).join(",\n") + "\n]";
         return {
           content: [
             {
               type: "text",
               text:
-                JSON.stringify(capped, null, 2) +
+                body +
                 (truncated
-                  ? `\n\n[CAPPED — ${totalMatched} total sections matched, returning first ${capped.length}. Raise maxEntries or use outputMode: "file" for full list.]`
+                  ? `\n[CAPPED — ${totalMatched} total sections matched, returning first ${capped.length}. Raise maxEntries or use outputMode: "file" for full list.]`
                   : ""),
             },
           ],
