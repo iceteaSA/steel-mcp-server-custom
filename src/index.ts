@@ -586,7 +586,7 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
       .default(false)
       .optional()
       .describe(
-        "If true, return a JSON array with one entry per element matching selector (querySelectorAll). Each entry: {text, primaryLink?, links?}. primaryLink = first anchor's href. links = all anchors as [{text, href}] when includeLinks=true. maxChars applied per-entry. Designed for list-page scraping (article cards, product tiles, search results) in a single call. Default: false (returns single first match as string)."
+        "If true, return a JSON array with one entry per element matching selector (querySelectorAll). Each entry: {text, title?, primaryLink?, links?}. title = text of anchor whose href matches primaryLink (use as headline). primaryLink picks the first link whose URL path depth >= 2 (skips nav/category). links = deduped [{text, href}] when includeLinks=true. maxChars applied per-entry. Designed for list-page scraping (article cards, product tiles, search results) in a single call. Default: false (returns single first match as string)."
       ),
     maxEntries: z
       .number()
@@ -594,6 +594,13 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
       .optional()
       .describe(
         "When matchAll=true, cap on number of entries returned. Default: 20. Set to 0 for no cap."
+      ),
+    pretty: z
+      .boolean()
+      .default(false)
+      .optional()
+      .describe(
+        "When matchAll=true, pretty-print the inline JSON (2-space indent). Default: false (compact — one entry per line)."
       ),
   },
   async ({
@@ -604,6 +611,7 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
     includeLinks = false,
     matchAll = false,
     maxEntries = 20,
+    pretty = false,
   }) => {
     try {
       const page = await mgr.getPage();
@@ -640,31 +648,35 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
 
               const entry: {
                 text: string;
+                title?: string;
                 primaryLink?: string;
                 links?: Array<{ text: string; href: string }>;
               } = { text };
 
               if (withLinks) {
-                // Dedupe links by href, keep longest non-empty text variant.
-                // Strip anchor fragment (#comments, #section-x) for uniqueness.
+                // Dedupe links by href. Keep FIRST non-empty text variant
+                // (DOM order — on news pages the first anchor is usually the
+                // headline; excerpt/repeat anchors follow). Strip fragment
+                // (#comments, #section) for uniqueness.
                 const byHref = new Map<string, { text: string; href: string }>();
                 for (const l of rawLinks) {
                   const key = l.href.split("#")[0];
                   const existing = byHref.get(key);
                   if (!existing) {
                     byHref.set(key, { text: l.text, href: l.href });
-                  } else if (l.text.length > existing.text.length) {
+                  } else if (!existing.text && l.text) {
+                    // Upgrade empty placeholder to non-empty text.
                     byHref.set(key, { text: l.text, href: l.href });
                   }
+                  // else: keep existing (first non-empty wins)
                 }
                 const links = Array.from(byHref.values());
-                entry.links = links;
+                (entry as { links?: typeof links }).links = links;
                 // primaryLink = first link whose href is NOT same as document origin root
                 // (filters out nav/category links), else first link.
                 const articleish = links.find((l) => {
                   try {
                     const u = new URL(l.href);
-                    // path must be deeper than "/" and not end at a pure category slug like "/world/"
                     return (
                       u.pathname.length > 1 &&
                       u.pathname.split("/").filter(Boolean).length >= 2
@@ -673,8 +685,21 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
                     return false;
                   }
                 });
-                if (articleish) entry.primaryLink = articleish.href;
-                else if (links[0]) entry.primaryLink = links[0].href;
+                const primary =
+                  articleish?.href ?? (links[0]?.href ?? undefined);
+                if (primary) {
+                  (entry as { primaryLink?: string }).primaryLink = primary;
+                  // title = text of the link whose href matches primaryLink.
+                  // Pick the longest non-empty text among all matches (some
+                  // pages have duplicate anchors with different text lengths).
+                  const primaryKey = primary.split("#")[0];
+                  const matching = links.find(
+                    (l) => l.href.split("#")[0] === primaryKey && l.text
+                  );
+                  if (matching) {
+                    (entry as { title?: string }).title = matching.text;
+                  }
+                }
               }
               return entry;
             };
@@ -716,10 +741,12 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
           };
         }
 
-        // Inline output: compact JSON — one object per line — to avoid \n
-        // pollution from pretty-print in tool response wrappers.
+        // Inline output: compact (one-entry-per-line) by default to avoid \n
+        // pollution in tool response wrappers. `pretty: true` uses 2-space indent.
         const truncated = capped.length < totalMatched;
-        const body = "[\n" + capped.map((e) => JSON.stringify(e)).join(",\n") + "\n]";
+        const body = pretty
+          ? JSON.stringify(capped, null, 2)
+          : "[\n" + capped.map((e) => JSON.stringify(e)).join(",\n") + "\n]";
         return {
           content: [
             {
@@ -786,6 +813,86 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
               output +
               (truncated
                 ? `\n\n[TRUNCATED — ${text.length.toLocaleString()} total chars, showing first ${maxChars.toLocaleString()}. Use maxChars: 0 with outputMode: "file" to get full content.]`
+                : ""),
+          },
+        ],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// get_links ------------------------------------------------------------------
+server.tool(
+  "get_links",
+  `Extract anchor URLs from the current page.
+
+Simpler than get_page_text(matchAll) when you only need URLs — no per-element text tree walking. Returns a JSON array of {text, href} objects. Deduped by href (fragment stripped). Optional urlPattern filters to regex-matching hrefs only.
+
+Use cases: scraping article list URLs, link indexes, sitemap-like extraction.`,
+  {
+    selector: z
+      .string()
+      .optional()
+      .describe(
+        "CSS scope for anchor search (e.g. 'main', 'article', '#results'). Defaults to document.body."
+      ),
+    urlPattern: z
+      .string()
+      .optional()
+      .describe(
+        "Optional JS regex pattern (without slashes) to filter hrefs. Case-insensitive. Examples: '/world/[a-z-]+-\\\\d{8}', 'arstechnica\\\\.com/.+/\\\\d{4}/\\\\d{2}/'."
+      ),
+    limit: z
+      .number()
+      .default(50)
+      .optional()
+      .describe("Max results. Default: 50. Set 0 for no cap."),
+  },
+  async ({ selector, urlPattern, limit = 50 }) => {
+    try {
+      const page = await mgr.getPage();
+      const links = await page.evaluate(
+        ({ sel, pat }: { sel: string | null; pat: string | null }) => {
+          const root = sel ? document.querySelector(sel) : document.body;
+          if (!root) return [];
+          const re = pat ? new RegExp(pat, "i") : null;
+          const anchors = Array.from(root.querySelectorAll("a[href]"));
+          const byHref = new Map<string, { text: string; href: string }>();
+          for (const a of anchors) {
+            const href = (a as HTMLAnchorElement).href;
+            if (!href) continue;
+            if (re && !re.test(href)) continue;
+            const key = href.split("#")[0];
+            const text = (a.textContent ?? "").replace(/\s+/g, " ").trim();
+            const existing = byHref.get(key);
+            if (!existing) {
+              byHref.set(key, { text, href });
+            } else if (!existing.text && text) {
+              // Upgrade empty placeholder to non-empty text.
+              byHref.set(key, { text, href });
+            }
+            // First non-empty variant wins (DOM order).
+          }
+          return Array.from(byHref.values());
+        },
+        { sel: selector ?? null, pat: urlPattern ?? null }
+      );
+
+      const capped = limit > 0 ? links.slice(0, limit) : links;
+      const truncated = capped.length < links.length;
+      const body =
+        "[\n" + capped.map((l) => JSON.stringify(l)).join(",\n") + "\n]";
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              body +
+              (truncated
+                ? `\n[CAPPED — ${links.length} total links matched, returning first ${capped.length}. Raise limit.]`
                 : ""),
           },
         ],
@@ -1296,21 +1403,65 @@ CONTEXT BUDGET — returns a screenshot of the results page by default. Use outp
 // go_to_url -------------------------------------------------------------------
 server.tool(
   "go_to_url",
-  "Navigate the browser to the specified URL.",
+  `Navigate the browser to the specified URL.
+
+Optional waitFor: wait for a CSS selector to appear after navigation (saves a separate wait_for call). Returns isError if the destination page is a bot-check wall (Cloudflare "Just a moment", "Attention Required", or /cdn-cgi/challenge-platform/ redirect).`,
   {
     url: z.string().describe("The URL to navigate to."),
+    waitFor: z
+      .string()
+      .optional()
+      .describe(
+        "Optional CSS selector to wait for after navigation. Replaces a separate wait_for call for list-page scraping. Defaults to no wait."
+      ),
+    waitTimeout: z
+      .number()
+      .default(10000)
+      .optional()
+      .describe("Timeout in ms for waitFor. Default: 10000."),
   },
-  async ({ url }) => {
+  async ({ url, waitFor, waitTimeout = 10000 }) => {
     try {
       const page = await mgr.getPage();
       await page.goto(url, { waitUntil: "domcontentloaded" });
       await globalWait();
-      // Return the final URL in case of redirects.
+
       const finalUrl = page.url();
-      const text = finalUrl !== url
-        ? `Navigated to ${url}\nFinal URL: ${finalUrl}`
-        : `Navigated to ${finalUrl}`;
-      return { content: [{ type: "text", text: text }] };
+
+      // Bot-check / Cloudflare detection
+      const title = await page.title().catch(() => "");
+      const botSignal =
+        /just a moment|attention required|access denied|verify you are human/i.test(
+          title
+        ) || /\/cdn-cgi\/challenge-platform\//i.test(finalUrl);
+      if (botSignal) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `Bot-check wall detected. title="${title}" url=${finalUrl}. Hand off to user via start_browser (Interactive URL).`,
+            },
+          ],
+        };
+      }
+
+      // Optional wait for content selector
+      let waitMsg = "";
+      if (waitFor) {
+        try {
+          await page.waitForSelector(waitFor, { timeout: waitTimeout });
+          waitMsg = `\nwaitFor "${waitFor}" matched.`;
+        } catch {
+          waitMsg = `\nwaitFor "${waitFor}" TIMED OUT after ${waitTimeout}ms (page loaded but selector missing).`;
+        }
+      }
+
+      const navLine =
+        finalUrl !== url
+          ? `Navigated to ${url}\nFinal URL: ${finalUrl}`
+          : `Navigated to ${finalUrl}`;
+      return { content: [{ type: "text", text: navLine + waitMsg }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: error.message }] };
