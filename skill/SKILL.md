@@ -132,12 +132,17 @@ Output:
 
 Flags:
 - `matchAll: true` → querySelectorAll, one entry per match
-- `includeLinks: true` → adds `primaryLink` (first `<a>`) + `links` array
+- `includeLinks: true` → adds `primaryLink` + deduped `links` array
 - `maxChars` — cap text per entry
 - `maxEntries` — cap array length (default 20; 0 = no cap)
 - `outputMode: "file"` — save JSON to disk if huge
 
-Default (`matchAll: false`) → single-match string behavior preserved.
+Sanitization in matchAll:
+- `text` has anchor text only; no embedded `[href]` tokens (links are in the separate `links` array)
+- `links` deduped by href (fragment stripped for uniqueness); longest text variant kept per href
+- `primaryLink` picks first link whose path depth ≥ 2 (filters out nav/category links like `/world/`); falls back to first link if none qualify
+
+Default (`matchAll: false`) → single-match string behavior preserved; `includeLinks` still embeds `[href]` in text for legacy use.
 
 ### Path 2 — `evaluate` (when shape doesn't fit matchAll)
 
