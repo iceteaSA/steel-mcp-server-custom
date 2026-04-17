@@ -8,8 +8,11 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 
 ## Features
 
-- **18 browser tools** — navigate, click, type, select, screenshot, page text, evaluate JS, scroll, history, wait
-- **Context budget aware** — `get_screenshot` and `get_page_text` support `outputMode: "file"` to avoid loading large blobs into agent context; auto-downgrade if output exceeds `MAX_INLINE_BYTES`
+- **20 browser tools** — navigate, click, type, select, screenshot, page text, extract links/attrs, evaluate JS, scroll, history, wait
+- **List-page scraping** — `get_page_text(matchAll: true)` returns one structured entry per matched element with `{text, title, primaryLink, links}`; `get_links` returns URL-only extracts. One call replaces N evaluates.
+- **Nav + wait in one call** — `go_to_url(waitFor: "selector")` merges navigation + content-ready wait. Saves a round trip on JS-rendered pages.
+- **Bot-check detection** — `go_to_url` returns `isError` when destination is a Cloudflare / Access-denied wall; agents hand off via Interactive URL instead of silently reading an empty page.
+- **Context budget aware** — `get_screenshot`, `get_page_text`, `get_links`, and `get_attrs` support `outputMode: "file"` and per-entry / per-array caps; auto-downgrade if output exceeds `MAX_INLINE_BYTES`
 - **No LLM dependency** — works in pure toolset mode; the calling agent is the LLM
 - **Self-hosted Steel** — connect to any Steel instance via `STEEL_BASE_URL`; no API key needed for local installs
 - **Direct Playwright** — uses `chromium.connectOverCDP()` for Steel sessions and `chromium.launch()` for local mode
@@ -79,7 +82,9 @@ BROWSER_MODE=local node dist/index.cjs
 | `close_tab` | Close a tab by ID (default: current); auto-switches to next |
 | `get_current_url` | Current page URL and title |
 | `get_screenshot` | Screenshot — format, quality, scale, clip, fullPage, outputMode |
-| `get_page_text` | Visible page text — selector, maxChars, outputMode, includeLinks |
+| `get_page_text` | Visible page text — selector, maxChars, outputMode, includeLinks. With `matchAll: true`, returns JSON array of per-element `{text, title, primaryLink, links}` — list-page scraping in one call |
+| `get_links` | Extract deduped `[{text, href}]` under selector, optional `urlPattern` regex filter |
+| `get_attrs` | Extract arbitrary element attributes — pass `attrs: ["data-id", "href", …]` and get structured per-element JSON |
 | `click` | Click an element by CSS selector |
 | `type` | Type into an input — clear (default true), submit (press Enter) |
 | `select` | Select a `<select>` dropdown by value, label, or index |
@@ -92,7 +97,7 @@ BROWSER_MODE=local node dist/index.cjs
 | `go_forward` | Browser history forward (returns new URL) |
 | `refresh` | Reload page (returns URL) |
 | `google_search` | Navigate to Google search results with outputMode support |
-| `go_to_url` | Navigate to URL (returns final URL after redirects) |
+| `go_to_url` | Navigate to URL, optional `waitFor` selector + `waitTimeout`. Auto-detects Cloudflare / bot-check walls and returns `isError` |
 | `start_browser` | Start browser; returns Session Viewer and Interactive URL |
 | `stop_browser` | Stop browser and release Steel session |
 

@@ -31,7 +31,9 @@ BROWSER_MODE=local node dist/index.cjs
 pnpm inspector
 ```
 
-**There are no automated tests.** Manual testing is done via mcporter or the MCP inspector.
+**Tests:** `pnpm test` runs vitest (`test/*.test.ts`) — covers the pure helpers shared by
+`get_page_text(matchAll)`, `get_links`, `get_attrs`, and the bot-check detector. Full
+browser flows are still validated manually via mcporter or the MCP inspector.
 
 ---
 
@@ -79,7 +81,7 @@ No LLM API key required — the calling agent provides all reasoning.
 
 ## Architecture
 
-Two source files: `src/index.ts` (~500 lines) + `src/env.ts` (Zod env schema).
+Two source files: `src/index.ts` (tool registrations; shared pure helpers for sanitization, dedup, bot detection live at top of file) + `src/env.ts` (Zod env schema).
 
 **Key class — `BrowserManager`:**
 - `initialize()` — creates a Steel session (or local Chromium launch), connects Playwright
@@ -113,7 +115,9 @@ Every handler calls `await mgr.getPage()` (which auto-initialises) then works wi
 | `close_tab` | Close a tab by ID (default: current); auto-switches to next remaining |
 | `get_current_url` | Returns current page URL and title |
 | `get_screenshot` | Screenshot with outputMode, format, scale, clip, quality |
-| `get_page_text` | Page text with selector, maxChars, outputMode, includeLinks |
+| `get_page_text` | Page text with selector, maxChars, outputMode, includeLinks. `matchAll: true` returns JSON array per-element `{text, title, primaryLink, links}` — preferred for list-page scraping |
+| `get_links` | URL-only extraction from anchors under selector; optional `urlPattern` regex filter |
+| `get_attrs` | Per-element attribute extraction; pass `attrs: [...]` to get structured JSON per match |
 | `click` | Click an element by CSS selector |
 | `type` | Type text into an input (clear, submit options) |
 | `select` | Select a dropdown option by value, label, or index |
@@ -126,9 +130,17 @@ Every handler calls `await mgr.getPage()` (which auto-initialises) then works wi
 | `go_forward` | Browser history forward (returns new URL) |
 | `refresh` | Reload current page (returns URL) |
 | `google_search` | Navigate to Google search results with outputMode |
-| `go_to_url` | Navigate to a URL (returns final URL after redirects) |
+| `go_to_url` | Navigate to a URL. Optional `waitFor` selector + `waitTimeout` — merges nav + wait. Auto-detects Cloudflare/bot walls, returns `isError` on hit |
 | `start_browser` | Start browser, returns Steel debug URL |
 | `stop_browser` | Stop browser and release Steel session |
+
+### Design principles for new tools
+
+- **Budget awareness** — every tool that reads from the page must cap its output. Pick sensible defaults (`maxChars`, `maxEntries`, `limit`). Expose `outputMode: "file"` when size can unbounded-ly grow.
+- **Structured over prose** — prefer returning JSON-shaped data over serialized text when the downstream agent will parse it anyway.
+- **Dedup + sanitize** — collapse whitespace, strip fragments, first-non-empty-wins across duplicate hrefs (DOM-order yields headlines, not excerpts).
+- **One call not N** — if an existing tool takes 3 exec to accomplish a common task, add an option to merge them (`go_to_url` gained `waitFor` for this reason).
+- **Fail safely** — auto-detect Cloudflare/bot walls and return `isError: true`, don't swallow the response and let the agent silently scrape an empty page.
 
 ---
 

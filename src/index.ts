@@ -8,6 +8,14 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { chromium, Browser, BrowserContext, Page } from "playwright";
 import { Steel } from "steel-sdk";
 import { EnvSchema } from "./env";
+import {
+  capText,
+  dedupeLinks,
+  findTitle,
+  isBotWall,
+  pickPrimaryLink,
+  type Link,
+} from "./helpers";
 import { z } from "zod";
 
 // -----------------------------------------------------------------------------
@@ -618,7 +626,10 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
 
       // --- matchAll: per-element structured output -----------------------
       if (matchAll) {
-        const entries = await page.evaluate(
+        // Evaluate returns raw per-element {text, rawLinks}. Dedup + primary
+        // link + title + per-entry maxChars are all pure Node work — lives
+        // in src/helpers.ts so it's unit-testable without a browser.
+        const rawEntries = await page.evaluate(
           ({ sel, withLinks }: { sel: string | null; withLinks: boolean }) => {
             const roots = sel
               ? Array.from(document.querySelectorAll(sel))
@@ -628,8 +639,6 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
               const walk = (node: Element): string => {
                 if (node.tagName === "A") {
                   const href = (node as HTMLAnchorElement).href;
-                  // Collapse internal whitespace (newlines, tabs, indent)
-                  // so link text stays clean in JSON output.
                   const txt = (node.textContent ?? "")
                     .replace(/\s+/g, " ")
                     .trim();
@@ -645,77 +654,33 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
                   .join(" ");
               };
               const text = walk(root).replace(/\s+/g, " ").trim();
-
-              const entry: {
-                text: string;
-                title?: string;
-                primaryLink?: string;
-                links?: Array<{ text: string; href: string }>;
-              } = { text };
-
-              if (withLinks) {
-                // Dedupe links by href. Keep FIRST non-empty text variant
-                // (DOM order — on news pages the first anchor is usually the
-                // headline; excerpt/repeat anchors follow). Strip fragment
-                // (#comments, #section) for uniqueness.
-                const byHref = new Map<string, { text: string; href: string }>();
-                for (const l of rawLinks) {
-                  const key = l.href.split("#")[0];
-                  const existing = byHref.get(key);
-                  if (!existing) {
-                    byHref.set(key, { text: l.text, href: l.href });
-                  } else if (!existing.text && l.text) {
-                    // Upgrade empty placeholder to non-empty text.
-                    byHref.set(key, { text: l.text, href: l.href });
-                  }
-                  // else: keep existing (first non-empty wins)
-                }
-                const links = Array.from(byHref.values());
-                (entry as { links?: typeof links }).links = links;
-                // primaryLink = first link whose href is NOT same as document origin root
-                // (filters out nav/category links), else first link.
-                const articleish = links.find((l) => {
-                  try {
-                    const u = new URL(l.href);
-                    return (
-                      u.pathname.length > 1 &&
-                      u.pathname.split("/").filter(Boolean).length >= 2
-                    );
-                  } catch {
-                    return false;
-                  }
-                });
-                const primary =
-                  articleish?.href ?? (links[0]?.href ?? undefined);
-                if (primary) {
-                  (entry as { primaryLink?: string }).primaryLink = primary;
-                  // title = text of the link whose href matches primaryLink.
-                  // Pick the longest non-empty text among all matches (some
-                  // pages have duplicate anchors with different text lengths).
-                  const primaryKey = primary.split("#")[0];
-                  const matching = links.find(
-                    (l) => l.href.split("#")[0] === primaryKey && l.text
-                  );
-                  if (matching) {
-                    (entry as { title?: string }).title = matching.text;
-                  }
-                }
-              }
-              return entry;
+              return { text, rawLinks };
             };
             return roots.map(collect);
           },
           { sel: selector ?? null, withLinks: includeLinks }
         );
 
-        // per-entry maxChars truncation
-        if (maxChars > 0) {
-          for (const e of entries) {
-            if (e.text.length > maxChars) {
-              e.text = e.text.slice(0, maxChars) + "…";
+        type MatchEntry = {
+          text: string;
+          title?: string;
+          primaryLink?: string;
+          links?: Link[];
+        };
+        const entries: MatchEntry[] = rawEntries.map((r) => {
+          const entry: MatchEntry = { text: capText(r.text, maxChars) };
+          if (includeLinks) {
+            const links = dedupeLinks(r.rawLinks);
+            entry.links = links;
+            const primary = pickPrimaryLink(links);
+            if (primary) {
+              entry.primaryLink = primary;
+              const title = findTitle(primary, links);
+              if (title) entry.title = title;
             }
           }
-        }
+          return entry;
+        });
 
         const totalMatched = entries.length;
         const capped =
@@ -854,33 +819,28 @@ Use cases: scraping article list URLs, link indexes, sitemap-like extraction.`,
   async ({ selector, urlPattern, limit = 50 }) => {
     try {
       const page = await mgr.getPage();
-      const links = await page.evaluate(
+      // Evaluate returns raw anchor list (possibly with dupes). Node-side
+      // dedup via shared helper — testable, matches matchAll semantics.
+      const rawLinks = await page.evaluate(
         ({ sel, pat }: { sel: string | null; pat: string | null }) => {
           const root = sel ? document.querySelector(sel) : document.body;
           if (!root) return [];
           const re = pat ? new RegExp(pat, "i") : null;
           const anchors = Array.from(root.querySelectorAll("a[href]"));
-          const byHref = new Map<string, { text: string; href: string }>();
+          const out: Array<{ text: string; href: string }> = [];
           for (const a of anchors) {
             const href = (a as HTMLAnchorElement).href;
             if (!href) continue;
             if (re && !re.test(href)) continue;
-            const key = href.split("#")[0];
             const text = (a.textContent ?? "").replace(/\s+/g, " ").trim();
-            const existing = byHref.get(key);
-            if (!existing) {
-              byHref.set(key, { text, href });
-            } else if (!existing.text && text) {
-              // Upgrade empty placeholder to non-empty text.
-              byHref.set(key, { text, href });
-            }
-            // First non-empty variant wins (DOM order).
+            out.push({ text, href });
           }
-          return Array.from(byHref.values());
+          return out;
         },
         { sel: selector ?? null, pat: urlPattern ?? null }
       );
 
+      const links: Link[] = dedupeLinks(rawLinks);
       const capped = limit > 0 ? links.slice(0, limit) : links;
       const truncated = capped.length < links.length;
       const body =
@@ -893,6 +853,79 @@ Use cases: scraping article list URLs, link indexes, sitemap-like extraction.`,
               body +
               (truncated
                 ? `\n[CAPPED — ${links.length} total links matched, returning first ${capped.length}. Raise limit.]`
+                : ""),
+          },
+        ],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// get_attrs -------------------------------------------------------------------
+server.tool(
+  "get_attrs",
+  `Extract specific attributes from elements matching a CSS selector.
+
+Returns a JSON array of objects — one per matched element — containing only the attributes you asked for. Special values: "text" returns the element's textContent (whitespace-collapsed), "html" returns outerHTML.
+
+Use when matchAll + links aren't enough — e.g. scraping data-id, data-price, aria-label, src, alt, or structured data from custom markup.`,
+  {
+    selector: z
+      .string()
+      .describe(
+        "CSS selector for elements to extract from (e.g. 'article', '.product-card')."
+      ),
+    attrs: z
+      .array(z.string())
+      .describe(
+        "Attribute names to extract. Special: 'text' = textContent, 'html' = outerHTML. Examples: ['href', 'data-id'], ['src', 'alt', 'text']."
+      ),
+    limit: z
+      .number()
+      .default(50)
+      .optional()
+      .describe("Max elements to return. Default: 50. 0 = no cap."),
+  },
+  async ({ selector, attrs, limit = 50 }) => {
+    try {
+      const page = await mgr.getPage();
+      const results = await page.evaluate(
+        ({ sel, attrNames }: { sel: string; attrNames: string[] }) => {
+          const nodes = Array.from(document.querySelectorAll(sel));
+          return nodes.map((el) => {
+            const out: Record<string, string | null> = {};
+            for (const name of attrNames) {
+              if (name === "text") {
+                out[name] = (el.textContent ?? "")
+                  .replace(/\s+/g, " ")
+                  .trim();
+              } else if (name === "html") {
+                out[name] = (el as HTMLElement).outerHTML ?? null;
+              } else {
+                out[name] = (el as Element).getAttribute(name);
+              }
+            }
+            return out;
+          });
+        },
+        { sel: selector, attrNames: attrs }
+      );
+
+      const capped = limit > 0 ? results.slice(0, limit) : results;
+      const truncated = capped.length < results.length;
+      const body =
+        "[\n" + capped.map((r) => JSON.stringify(r)).join(",\n") + "\n]";
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              body +
+              (truncated
+                ? `\n[CAPPED — ${results.length} total matches, returning first ${capped.length}. Raise limit.]`
                 : ""),
           },
         ],
@@ -1428,13 +1461,9 @@ Optional waitFor: wait for a CSS selector to appear after navigation (saves a se
 
       const finalUrl = page.url();
 
-      // Bot-check / Cloudflare detection
+      // Bot-check / Cloudflare detection (pure helper — tested in helpers.test.ts)
       const title = await page.title().catch(() => "");
-      const botSignal =
-        /just a moment|attention required|access denied|verify you are human/i.test(
-          title
-        ) || /\/cdn-cgi\/challenge-platform\//i.test(finalUrl);
-      if (botSignal) {
+      if (isBotWall(title, finalUrl)) {
         return {
           isError: true,
           content: [

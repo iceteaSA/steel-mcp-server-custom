@@ -1,7 +1,7 @@
 {
     "name": "@steel-dev/mcp-server",
-    "version": "0.0.1",
-    "description": "MCP server for browser automation using Steel and Playwright",
+    "version": "0.2.0",
+    "description": "MCP server for browser automation using Steel and Playwright (custom fork with list-page scraping + bot detection)",
     "license": "MIT",
     "author": "Steel (https://steel.dev)",
     "homepage": "https://steel.dev",
@@ -18,6 +18,8 @@
         "dev": "tsx --watch src/index.ts",
         "watch": "tsup src/index.ts --out-dir dist --watch",
         "start": "node dist/index.cjs",
+        "test": "vitest run",
+        "test:watch": "vitest",
         "inspector": "npx @modelcontextprotocol/inspector fnm exec --using=22 tsx --watch src/index.ts"
     },
     "pnpm": {
@@ -35,6 +37,7 @@
         "shx": "^0.4.0",
         "tsup": "^8.5.1",
         "tsx": "^4.21.0",
-        "typescript": "^6.0.2"
+        "typescript": "^6.0.2",
+        "vitest": "^3.2.4"
     }
 }
