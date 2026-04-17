@@ -843,7 +843,7 @@ Use cases: scraping article list URLs, link indexes, sitemap-like extraction.`,
       .string()
       .optional()
       .describe(
-        "Optional JS regex pattern (without slashes) to filter hrefs. Case-insensitive. Examples: '/world/[a-z-]+-\\\\d{8}', 'arstechnica\\\\.com/.+/\\\\d{4}/\\\\d{2}/'."
+        "Optional JS regex pattern (without slashes) to filter hrefs. Case-insensitive. Examples: '/articles/[a-z-]+-\\\\d{8}', 'example\\\\.com/.+/\\\\d{4}/\\\\d{2}/'."
       ),
     limit: z
       .number()

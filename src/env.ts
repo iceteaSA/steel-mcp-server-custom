@@ -14,7 +14,7 @@ export const EnvSchema = z
       })
       .default("steel"),
     STEEL_API_KEY: z.string().optional(),
-    // Override to point at a self-hosted Steel instance (e.g. http://10.1.1.1:3000).
+    // Override to point at a self-hosted Steel instance (e.g. http://steel.local:3000).
     // When set, STEEL_API_KEY is optional.
     STEEL_BASE_URL: z.string().optional(),
     // Maximum bytes before auto-switching inline output to file mode (default 500 KB).
@@ -37,7 +37,7 @@ export const EnvSchema = z
       .string()
       .transform((v) => v.toLowerCase() === "true")
       .default(false),
-    // Public-facing Steel URL (e.g. https://steel.tehan.xyz).
+    // Public-facing Steel URL (e.g. https://steel.example.com).
     // Rewrites debug/interactive/viewer URLs so they are accessible remotely.
     // Does NOT affect the CDP WebSocket connection — that always uses the
     // internal STEEL_BASE_URL / session.websocketUrl.

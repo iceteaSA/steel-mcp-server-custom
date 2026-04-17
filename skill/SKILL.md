@@ -58,20 +58,37 @@ expression='(() => { const out = []; document.querySelectorAll("article").forEac
 2. **Act** — click, type, navigate.
 3. **Confirm** — `wait_for` before reading. Don't assume page updated.
 
-## `wait_for` Before `evaluate` — Mandatory on JS-Rendered Pages
+## Nav + Wait in One Call (`go_to_url` waitFor)
 
-Common failure: `go_to_url` → `evaluate` → empty array. Page hadn't hydrated.
-
-Rule: for any JS-rendered site (news sites, SPAs, dashboards, most modern
-pages), call `wait_for` on a known content selector FIRST:
+`go_to_url` accepts optional `waitFor` selector + `waitTimeout` (default 10000ms). One call does nav + content-ready wait:
 
 ```
-go_to_url(url: "https://www.news24.com/world")
+go_to_url(url: "https://news.example.com/section", waitFor: "article.item")
+get_page_text(selector: "article.item", matchAll: true, includeLinks: true)
+```
+
+That's 2 exec instead of 3 (`go_to_url` → `wait_for` → `get_page_text`). Saves a round trip per page.
+
+If waitFor times out, `go_to_url` returns success with a `TIMED OUT` note in text — page loaded but selector missing. Not an error, just a signal to diagnose with the selector-diagnostic pattern below.
+
+### Bot-Check Detection (automatic)
+
+`go_to_url` returns `isError: true` when destination is:
+- Title matches `/just a moment|attention required|access denied|verify you are human/i`
+- URL matches `/cdn-cgi/challenge-platform/`
+
+Error message includes final URL + title. Hand off via `start_browser` Interactive URL (HITL section below). Don't retry.
+
+## Legacy Wait Pattern
+
+Still supported for fine-grained control or post-click waits:
+
+```
+go_to_url(url: "...")
 wait_for(selector: "article")      # or text: "Load More", textGone: "Loading..."
-get_page_text(selector: "article.article-item", matchAll: true, includeLinks: true)
 ```
 
-Skip only for pure static pages (plain HTML, e.g. Ars Technica article bodies).
+Skip waits only for pure static pages (plain HTML, e.g. Ars Technica article bodies).
 
 ## State Hygiene
 
@@ -106,8 +123,7 @@ Page text + screenshots can be huge. Constrain:
 
 ### Path 1 — `get_page_text` with `matchAll: true` (preferred for list pages)
 
-One call replaces N evaluates when scraping article cards, product tiles,
-search results. Returns JSON array with per-element `{text, primaryLink, links}`.
+One call replaces N evaluates when scraping article cards, product tiles, search results. Returns JSON array with per-element `{text, title?, primaryLink?, links?}`.
 
 ```
 get_page_text(
@@ -119,35 +135,55 @@ get_page_text(
 )
 ```
 
-Output:
+Output (compact — one entry per line):
 ```json
 [
-  {
-    "text": "LIVE 1h ago Trump rejects NATO offer... [https://news24.com/...]",
-    "primaryLink": "https://news24.com/world/...",
-    "links": [{"text": "Trump rejects...", "href": "https://..."}]
-  }
+{"text":"Section 1h ago Article headline here Excerpt of the article appears next…","title":"Article headline here","primaryLink":"https://news.example.com/section/article-slug-12345","links":[{"text":"Section","href":"https://news.example.com/section"},{"text":"Article headline here","href":"https://news.example.com/section/article-slug-12345"}]}
 ]
 ```
 
 Flags:
 - `matchAll: true` → querySelectorAll, one entry per match
-- `includeLinks: true` → adds `primaryLink` + deduped `links` array
-- `maxChars` — cap text per entry
+- `includeLinks: true` → adds `title`, `primaryLink`, and deduped `links` array
+- `maxChars` — cap text per entry (default 10000)
 - `maxEntries` — cap array length (default 20; 0 = no cap)
-- `outputMode: "file"` — save JSON to disk if huge
+- `pretty: true` — 2-space indent inline JSON (default false = compact one-per-line)
+- `outputMode: "file"` — save JSON to disk if huge (always pretty on file)
 
 Sanitization in matchAll:
 - `text` has anchor text only; no embedded `[href]` tokens (links are in the separate `links` array)
-- `links` deduped by href (fragment stripped for uniqueness); longest text variant kept per href
-- `primaryLink` picks first link whose path depth ≥ 2 (filters out nav/category links like `/world/`); falls back to first link if none qualify
+- Anchor text whitespace collapsed (internal `\n`/tabs stripped)
+- `links` deduped by href (fragment stripped); **first non-empty text wins in DOM order** (headline anchor comes before excerpt anchor on news pages, so this picks the headline)
+- `primaryLink` picks first link whose path depth ≥ 2 (filters nav/category like `/world/`); falls back to first link
+- `title` = text of the link whose href matches `primaryLink` — use directly as article headline
 
 Default (`matchAll: false`) → single-match string behavior preserved; `includeLinks` still embeds `[href]` in text for legacy use.
 
-### Path 2 — `evaluate` (when shape doesn't fit matchAll)
+### Path 2 — `get_links` (URL-only, no text walking)
 
-Use for computed fields (parsed dates, joined rows, filtered subsets, data
-not on the DOM surface):
+Lightest path when you only need URLs from a page:
+
+```
+get_links(
+  selector: "main",                                          # optional, defaults to body
+  urlPattern: "example\\.com/section/[a-z-]+-\\d+",          # optional regex (no slashes)
+  limit: 50                                                  # default 50; 0 = no cap
+)
+```
+
+Returns deduped `[{text, href}]`. Same first-non-empty-text dedup as matchAll. Use when building link indexes, sitemap scrapes, or feeding URLs into follow-up fetches.
+
+Example output:
+```json
+[
+{"text":"First headline","href":"https://news.example.com/section/first-headline-12345"},
+{"text":"Second headline","href":"https://news.example.com/section/second-headline-12346"}
+]
+```
+
+### Path 3 — `evaluate` (when shape doesn't fit Path 1 or 2)
+
+Use for computed fields (parsed dates, joined rows, filtered subsets, data not on the DOM surface):
 
 ```
 evaluate(expression: "Array.from(document.querySelectorAll('tr')).map(r => r.innerText)")
@@ -156,30 +192,26 @@ evaluate(expression: "Array.from(document.querySelectorAll('a.result')).map(a =>
 
 ### Selector Diagnostic — One Call, Not a Retry Loop
 
-When `matchAll` returns `[]`, don't iterate blind. Probe:
+When `matchAll` / `get_links` returns `[]`, don't iterate blind. Probe:
 
 ```
 evaluate(expression: "({n: document.querySelectorAll('article').length, sample: [...document.querySelectorAll('article')].slice(0,1).map(e => e.outerHTML.slice(0,500))})")
 ```
 
-Returns `{n: 21, sample: ["<article class=\"...\" ...>"]}`. Read the classes
-+ nested link structure from the sample, craft the real selector, retry ONCE.
+Returns `{n: 21, sample: ["<article class=\"...\" ...>"]}`. Read the classes + nested link structure from the sample, craft the real selector, retry ONCE.
 
 ## Bot-Check / Cloudflare Detection
 
-After `go_to_url` or `click` that causes navigation:
+`go_to_url` auto-detects and returns `isError: true` (see "Nav + Wait in One Call" above). No manual check needed after nav.
+
+For bot walls that appear **after** a click (rare — usually on form submits):
 
 ```
-get_current_url()   # check for unexpected redirect
+get_current_url()              # check for unexpected redirect
+evaluate(expression: "document.title")
 ```
 
-Cloudflare / anti-bot signals:
-- title contains `"Just a moment"` / `"Attention Required"` / `"Access denied"`
-- URL path includes `/cdn-cgi/challenge-platform/`
-- body empty or shows a spinner with no article content
-
-On detection: stop automation. Hand off to user via HITL pattern (below).
-Don't retry — same IP will fail again.
+If signals match (`Just a moment`, `Attention Required`, `/cdn-cgi/challenge-platform/`): stop automation. Hand off via HITL pattern. Don't retry — same IP fails again.
 
 ## Waiting Correctly
 
@@ -257,21 +289,22 @@ console_log(level: "error")
 Network failures, JS errors, CSP violations all appear here. Check this before
 blaming selectors.
 
-## Output Paths (openclaw agents)
+## Output Paths (sandboxed agents)
 
-Discord can only send files from under `~/.openclaw/`. Set `outputPath` on
-screenshots / saved text:
+Some agent runtimes (e.g. OpenClaw) require attachments to resolve under a
+specific workspace directory. Pass an explicit `outputPath` under that root:
 
 ```
 get_screenshot(
   format: "jpeg", quality: 70,
   outputMode: "file",
-  outputPath: "/home/openclaw/.openclaw/workspace/artifacts/<name>.jpeg"
+  outputPath: "$WORKSPACE/artifacts/<name>.jpeg"
 )
 ```
 
 Same for `get_page_text` with `outputMode: "file"` — use
-`/home/openclaw/.openclaw/workspace/artifacts/<name>.txt`.
+`$WORKSPACE/artifacts/<name>.txt`. Substitute `$WORKSPACE` with your runtime's
+allowed output root (e.g. `~/.openclaw/workspace`, `~/.claude/workspace`, etc.).
 
 ## Call Budget Discipline
 
