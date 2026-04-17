@@ -545,7 +545,10 @@ server.tool(
   "get_page_text",
   `Get visible text content from the current page.
 
-CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much is loaded into context. Use a CSS selector to scope to the relevant section. Use outputMode: 'file' to save the full text to disk without loading it into context at all.`,
+Single match (default): selector picks FIRST element, returns one text blob.
+Multi match (matchAll: true): selector picks ALL elements (querySelectorAll), returns JSON array with per-element text + link data. Ideal for scraping list pages (article cards, product tiles, search results) — one call replaces N evaluate calls.
+
+CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry text, maxEntries to cap array length, outputMode: 'file' to save full output to disk without loading into context. Use a specific CSS selector; avoid dumping document.body.`,
   {
     selector: z
       .string()
@@ -578,11 +581,124 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to limit how much i
       .default(false)
       .optional()
       .describe("Append link URLs in brackets after each anchor's text. Default: false."),
+    matchAll: z
+      .boolean()
+      .default(false)
+      .optional()
+      .describe(
+        "If true, return a JSON array with one entry per element matching selector (querySelectorAll). Each entry: {text, primaryLink?, links?}. primaryLink = first anchor's href. links = all anchors as [{text, href}] when includeLinks=true. maxChars applied per-entry. Designed for list-page scraping (article cards, product tiles, search results) in a single call. Default: false (returns single first match as string)."
+      ),
+    maxEntries: z
+      .number()
+      .default(20)
+      .optional()
+      .describe(
+        "When matchAll=true, cap on number of entries returned. Default: 20. Set to 0 for no cap."
+      ),
   },
-  async ({ selector, maxChars = 10000, outputMode = "inline", outputPath, includeLinks = false }) => {
+  async ({
+    selector,
+    maxChars = 10000,
+    outputMode = "inline",
+    outputPath,
+    includeLinks = false,
+    matchAll = false,
+    maxEntries = 20,
+  }) => {
     try {
       const page = await mgr.getPage();
 
+      // --- matchAll: per-element structured output -----------------------
+      if (matchAll) {
+        const entries = await page.evaluate(
+          (sel: string | null, withLinks: boolean) => {
+            const roots = sel
+              ? Array.from(document.querySelectorAll(sel))
+              : [document.body];
+            const collect = (root: Element) => {
+              const links: Array<{ text: string; href: string }> = [];
+              const walk = (node: Element): string => {
+                if (node.tagName === "A") {
+                  const href = (node as HTMLAnchorElement).href;
+                  const txt = (node.textContent ?? "").trim();
+                  if (withLinks && href) links.push({ text: txt, href });
+                  return withLinks ? `${txt} [${href}]` : txt;
+                }
+                return Array.from(node.childNodes)
+                  .map((n) =>
+                    n.nodeType === 3
+                      ? n.textContent ?? ""
+                      : walk(n as Element)
+                  )
+                  .join(" ");
+              };
+              const text = walk(root).replace(/\s+/g, " ").trim();
+              const primaryLink = links[0]?.href;
+              const entry: {
+                text: string;
+                primaryLink?: string;
+                links?: Array<{ text: string; href: string }>;
+              } = { text };
+              if (withLinks) {
+                if (primaryLink) entry.primaryLink = primaryLink;
+                entry.links = links;
+              }
+              return entry;
+            };
+            return roots.map(collect);
+          },
+          selector ?? null,
+          includeLinks
+        );
+
+        // per-entry maxChars truncation
+        if (maxChars > 0) {
+          for (const e of entries) {
+            if (e.text.length > maxChars) {
+              e.text = e.text.slice(0, maxChars) + "…";
+            }
+          }
+        }
+
+        const totalMatched = entries.length;
+        const capped =
+          maxEntries > 0 && entries.length > maxEntries
+            ? entries.slice(0, maxEntries)
+            : entries;
+
+        if (outputMode === "file") {
+          const json = JSON.stringify(capped, null, 2);
+          const filePath = await writeToFile(
+            Buffer.from(json, "utf8"),
+            `page_sections_${Date.now()}.json`,
+            outputPath
+          );
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Page sections saved to: ${filePath}\nMatched: ${totalMatched}\nReturned: ${capped.length}`,
+              },
+            ],
+          };
+        }
+
+        const truncated = capped.length < totalMatched;
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                JSON.stringify(capped, null, 2) +
+                (truncated
+                  ? `\n\n[CAPPED — ${totalMatched} total sections matched, returning first ${capped.length}. Raise maxEntries or use outputMode: "file" for full list.]`
+                  : ""),
+            },
+          ],
+        };
+      }
+
+      // --- single-match path (original behavior) ------------------------
       let text: string;
       if (includeLinks) {
         text = await page.evaluate((sel: string | null) => {
