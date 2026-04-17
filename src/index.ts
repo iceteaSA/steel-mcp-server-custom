@@ -620,10 +620,12 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
               const walk = (node: Element): string => {
                 if (node.tagName === "A") {
                   const href = (node as HTMLAnchorElement).href;
-                  const txt = (node.textContent ?? "").trim();
+                  // Collapse internal whitespace (newlines, tabs, indent)
+                  // so link text stays clean in JSON output.
+                  const txt = (node.textContent ?? "")
+                    .replace(/\s+/g, " ")
+                    .trim();
                   if (withLinks && href) rawLinks.push({ text: txt, href });
-                  // Return only the anchor text — don't embed [href] in text.
-                  // links array carries href data separately when includeLinks.
                   return txt;
                 }
                 return Array.from(node.childNodes)
