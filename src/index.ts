@@ -13,6 +13,8 @@ import {
   dedupeLinks,
   findTitle,
   isBotWall,
+  isBrowserClosedError,
+  isSteelSessionStuck,
   pickPrimaryLink,
   type Link,
 } from "./helpers";
@@ -45,15 +47,77 @@ class BrowserManager {
   public initialized = false;
 
   // Tab management — integer IDs starting at 1.
+  // Concurrency: multiple agents can share one browser. Tabs carry an
+  // optional `owner` string so agents can clean up only their own tabs
+  // via close_tabs_by_owner, not kill the whole session.
+  // Idle sweeper: tabs untouched for TAB_IDLE_TIMEOUT_MS are auto-closed,
+  // EXCEPT the primary tab (Steel's initial page or local-mode's initial
+  // newPage). Closing the primary makes Steel's session refuse to reuse
+  // with a "Failed to refresh primary page" 500.
   private tabs: Map<number, Page> = new Map();
+  private tabOwners: Map<number, string> = new Map();
+  private tabLastActivity: Map<number, number> = new Map();
+  private primaryTabId: number | undefined;
+  private idleSweeperHandle: NodeJS.Timeout | undefined;
   private nextTabId = 1;
   private currentTabId = 1;
 
-  private allocateTab(page: Page): number {
+  /** Mark a tab as recently used. Called on every page-interacting tool. */
+  touchTab(tabId: number): void {
+    if (this.tabs.has(tabId)) this.tabLastActivity.set(tabId, Date.now());
+  }
+
+  private allocateTab(page: Page, owner?: string): number {
     const id = this.nextTabId++;
     this.tabs.set(id, page);
+    if (owner) this.tabOwners.set(id, owner);
+    this.tabLastActivity.set(id, Date.now());
     this.attachConsoleListener(page);
+    // Auto-cleanup tab bookkeeping if the page closes externally.
+    page.on("close", () => {
+      this.tabs.delete(id);
+      this.tabOwners.delete(id);
+      this.tabLastActivity.delete(id);
+    });
     return id;
+  }
+
+  /** Start the idle sweeper. Idempotent; no-op if TAB_IDLE_TIMEOUT_MS=0. */
+  private startIdleSweeper(): void {
+    if (this.idleSweeperHandle) return;
+    if (env.TAB_IDLE_TIMEOUT_MS <= 0) return;
+    this.idleSweeperHandle = setInterval(() => {
+      this.sweepIdleTabs().catch((err) => {
+        console.error("[steel-mcp] idle sweep error:", (err as Error).message);
+      });
+    }, env.TAB_IDLE_SWEEP_INTERVAL_MS);
+    // Don't block Node process exit waiting for this timer.
+    this.idleSweeperHandle.unref?.();
+  }
+
+  /**
+   * Close any tab whose last activity is older than TAB_IDLE_TIMEOUT_MS.
+   * The primary tab (Steel's initial page or local-mode's initial page) is
+   * NEVER swept — closing it poisons Steel's session reuse and causes a
+   * "Failed to refresh primary page" 500 on subsequent connects.
+   */
+  async sweepIdleTabs(): Promise<number[]> {
+    if (env.TAB_IDLE_TIMEOUT_MS <= 0) return [];
+    const cutoff = Date.now() - env.TAB_IDLE_TIMEOUT_MS;
+    const stale: number[] = [];
+    for (const [id, last] of this.tabLastActivity) {
+      if (id === this.primaryTabId) continue;
+      if (last < cutoff) stale.push(id);
+    }
+    for (const id of stale) {
+      try {
+        await this.closeTab(id);
+        console.error(`[steel-mcp] idle-sweep closed tab ${id} (${env.TAB_IDLE_TIMEOUT_MS}ms idle)`);
+      } catch {
+        /* ignore */
+      }
+    }
+    return stale;
   }
 
   get currentPage(): Page | undefined {
@@ -73,55 +137,116 @@ class BrowserManager {
     return url.replace(internal, pub);
   }
 
+  /**
+   * Create a fresh Steel session, connect Playwright CDP, wire the initial
+   * page + context. Extracted so initialize() can retry it on a detected
+   * stuck-session condition after clearing server-side state.
+   */
+  private async _connectSteel(): Promise<void> {
+    this.steelClient = new Steel({
+      steelAPIKey: env.STEEL_API_KEY ?? "local",
+      ...(env.STEEL_BASE_URL ? { baseURL: env.STEEL_BASE_URL } : {}),
+    });
+
+    const session = await this.steelClient.sessions.create({
+      timeout: env.SESSION_TIMEOUT_MS,
+      ...(env.OPTIMIZE_BANDWIDTH ? { optimizeBandwidth: true } : {}),
+    });
+    this.sessionId = session.id;
+    this.debugUrl = this.rewriteUrl(session.debugUrl);
+    this.sessionViewerUrl = this.rewriteUrl(session.sessionViewerUrl);
+
+    let wsUrl: string;
+    if (env.STEEL_BASE_URL) {
+      const base = env.STEEL_BASE_URL.replace(/\/$/, "");
+      const wsBase = base.startsWith("https://")
+        ? base.replace("https://", "wss://")
+        : base.replace("http://", "ws://");
+      wsUrl = `${wsBase}/v1/sessions/${session.id}/cdp`;
+    } else {
+      wsUrl = `${session.websocketUrl}&apiKey=${env.STEEL_API_KEY}`;
+    }
+
+    this.browser = await chromium.connectOverCDP(wsUrl);
+    this.browserContext = this.browser.contexts()[0];
+    const initialPage = this.browserContext.pages()[0];
+    this.currentTabId = this.allocateTab(initialPage);
+    // Mark as primary — idle sweeper must never close this tab, else Steel's
+    // session refuses to reuse with a "page_refresh" 500.
+    this.primaryTabId = this.currentTabId;
+  }
+
+  /**
+   * Release every `live` session on the Steel server. Called as a recovery
+   * step when we detect a stuck-session condition on connect — we can't
+   * know which session is ours, so we clear them all. Safe for single-tenant
+   * Steel instances; on a shared Steel you'd want to scope this by
+   * `userMetadata` or a labelling convention.
+   *
+   * Uses the Steel REST API directly rather than the SDK so we don't have
+   * to reason about SDK version differences.
+   */
+  private async _releaseAllLiveSessions(): Promise<void> {
+    if (!env.STEEL_BASE_URL) {
+      // Steel Cloud — we don't have blanket delete rights. Let the SDK retry
+      // handle it; bubble the error out to the tool caller.
+      console.error("[steel-mcp] Steel Cloud mode — skipping session sweep (no admin rights).");
+      return;
+    }
+    const base = env.STEEL_BASE_URL.replace(/\/$/, "");
+    const apiKey = env.STEEL_API_KEY;
+    const authHeader: Record<string, string> = apiKey ? { "steel-api-key": apiKey } : {};
+    try {
+      const listRes = await fetch(`${base}/v1/sessions`, { headers: authHeader });
+      if (!listRes.ok) {
+        console.error(`[steel-mcp] sessions list failed: ${listRes.status} ${listRes.statusText}`);
+        return;
+      }
+      const payload = (await listRes.json()) as { sessions?: Array<{ id: string; status: string }> };
+      const live = (payload.sessions ?? []).filter((s) => s.status === "live");
+      console.error(`[steel-mcp] releasing ${live.length} live session(s)`);
+      for (const s of live) {
+        try {
+          const rel = await fetch(`${base}/v1/sessions/${s.id}/release`, {
+            method: "POST",
+            headers: authHeader,
+          });
+          if (rel.ok) {
+            console.error(`[steel-mcp]   released ${s.id}`);
+          } else {
+            console.error(`[steel-mcp]   release failed ${s.id}: ${rel.status}`);
+          }
+        } catch (e) {
+          console.error(`[steel-mcp]   release error ${s.id}:`, (e as Error).message);
+        }
+      }
+    } catch (err) {
+      console.error("[steel-mcp] session sweep failed:", (err as Error).message);
+    }
+  }
+
   async initialize() {
     if (this.initialized) return;
 
     if (env.BROWSER_MODE === "steel") {
-      // The Steel SDK requires steelAPIKey at construction time.
-      // For self-hosted instances, pass a placeholder — the server ignores it.
-      this.steelClient = new Steel({
-        steelAPIKey: env.STEEL_API_KEY ?? "local",
-        ...(env.STEEL_BASE_URL ? { baseURL: env.STEEL_BASE_URL } : {}),
-      });
-
-      const session = await this.steelClient.sessions.create({
-        timeout: env.SESSION_TIMEOUT_MS,
-        ...(env.OPTIMIZE_BANDWIDTH ? { optimizeBandwidth: true } : {}),
-      });
-      this.sessionId = session.id;
-      // Store display URLs — rewritten to public address so remote agents
-      // and users can open them from outside the LAN.
-      this.debugUrl = this.rewriteUrl(session.debugUrl);
-      this.sessionViewerUrl = this.rewriteUrl(session.sessionViewerUrl);
-
-      // Derive the CDP WebSocket URL:
-      //
-      // Self-hosted (STEEL_BASE_URL set): Steel returns display URLs using the
-      // public domain (e.g. wss://steel.example.com) because the server knows
-      // its own DOMAIN. But the MCP server process connects internally, so we
-      // build the path ourselves using the internal base URL.
-      // The correct path for self-hosted Steel is /v1/sessions/{id}/cdp.
-      //
-      // Steel Cloud (no STEEL_BASE_URL): use session.websocketUrl directly
-      // and append the API key as a query param.
-      let wsUrl: string;
-      if (env.STEEL_BASE_URL) {
-        const base = env.STEEL_BASE_URL.replace(/\/$/, "");
-        const wsBase = base.startsWith("https://")
-          ? base.replace("https://", "wss://")
-          : base.replace("http://", "ws://");
-        wsUrl = `${wsBase}/v1/sessions/${session.id}/cdp`;
-      } else {
-        wsUrl = `${session.websocketUrl}&apiKey=${env.STEEL_API_KEY}`;
+      try {
+        await this._connectSteel();
+      } catch (err) {
+        if (!isSteelSessionStuck(err)) throw err;
+        console.error(
+          "[steel-mcp] stuck Steel session detected on connect; releasing all live sessions and retrying. Cause:",
+          (err as Error).message
+        );
+        await this._releaseAllLiveSessions();
+        await sleep(1000);
+        // Drop the previous Steel client and any dangling state, then retry
+        // with a fresh connection.
+        this.steelClient = undefined;
+        this.sessionId = undefined;
+        this.browser = undefined;
+        this.browserContext = undefined;
+        await this._connectSteel();
       }
-
-      this.browser = await chromium.connectOverCDP(wsUrl);
-      // Use the existing context and page that Steel already created.
-      // DO NOT call newContext() or newPage() — both create phantom objects
-      // that are disconnected from the real Steel session tab.
-      this.browserContext = this.browser.contexts()[0];
-      const initialPage = this.browserContext.pages()[0];
-      this.currentTabId = this.allocateTab(initialPage);
     } else {
       // Local mode — launch Playwright Chromium directly.
       this.browser = await chromium.launch({ headless: false });
@@ -133,9 +258,35 @@ class BrowserManager {
       });
       const initialPage = await this.browserContext.newPage();
       this.currentTabId = this.allocateTab(initialPage);
+      // Mark primary — consistency with steel mode, and protects the only
+      // viewport-ready page from being swept.
+      this.primaryTabId = this.currentTabId;
     }
 
     this.initialized = true;
+    this.startIdleSweeper();
+
+    // Health check: prove the context is actually usable before returning.
+    // Race condition guard — on some CDP connects, browserContext is reachable
+    // but pages() throws or returns empty for a brief window. Block here so
+    // the immediate next new_tab / getPage call doesn't race.
+    try {
+      const pages = this.browserContext!.pages();
+      if (!pages || pages.length === 0) {
+        // Context exists but has no pages — create a probe page to confirm.
+        const probe = await this.browserContext!.newPage();
+        await probe.close();
+      }
+    } catch (err) {
+      // If the health check itself fails with a closed-browser error, reset
+      // and let the next call trigger a fresh initialize via the retry path.
+      if (isBrowserClosedError(err)) {
+        await this.softReset();
+        throw err;
+      }
+      // Other errors (timeouts etc) — log but don't fail hard.
+      console.error("[steel-mcp] init health check warning:", (err as Error).message);
+    }
   }
 
   /** Attach console log capture to a page (idempotent label via WeakSet). */
@@ -156,23 +307,68 @@ class BrowserManager {
     });
   }
 
-  async getPage(): Promise<Page> {
+  /**
+   * Return the Page for `tabId` (if given) or the current active tab.
+   * Auto-recovers from transient "browser has been closed" errors with one
+   * soft-reset + retry. Use tabId for concurrent agent workflows where
+   * different agents hold different tabs. Touches the tab's lastActivity
+   * timestamp so the idle sweeper leaves active tabs alone.
+   */
+  async getPage(tabId?: number): Promise<Page> {
     await this.initialize();
+    if (tabId !== undefined) {
+      const page = this.tabs.get(tabId);
+      if (!page) throw new Error(`Tab ${tabId} does not exist.`);
+      if (page.isClosed()) throw new Error(`Tab ${tabId} is closed.`);
+      this.touchTab(tabId);
+      return page;
+    }
     const page = this.currentPage;
-    if (!page || page.isClosed()) {
-      // Current tab was closed externally — open a fresh one and register it.
+    if (page && !page.isClosed()) {
+      this.touchTab(this.currentTabId);
+      return page;
+    }
+    // Current tab missing or closed — open a fresh one with retry guard.
+    return this._openFreshPage();
+  }
+
+  private async _openFreshPage(): Promise<Page> {
+    try {
+      const newPage = await this.browserContext!.newPage();
+      this.currentTabId = this.allocateTab(newPage);
+      return newPage;
+    } catch (err) {
+      if (!isBrowserClosedError(err)) throw err;
+      await this.softReset();
+      await sleep(2000);
+      await this.initialize();
       const newPage = await this.browserContext!.newPage();
       this.currentTabId = this.allocateTab(newPage);
       return newPage;
     }
-    return page;
   }
 
-  /** Open a new tab, register it, switch to it, and return its ID and page. */
-  async newTab(url?: string): Promise<{ tabId: number; page: Page }> {
+  /**
+   * Open a new tab, register it, switch to it, and return its ID and page.
+   * `owner` tag lets concurrent agents clean up only their own tabs later
+   * via close_tabs_by_owner. Auto-retries on transient browser-closed errors.
+   */
+  async newTab(url?: string, owner?: string): Promise<{ tabId: number; page: Page }> {
     await this.initialize();
+    try {
+      return await this._doNewTab(url, owner);
+    } catch (err) {
+      if (!isBrowserClosedError(err)) throw err;
+      await this.softReset();
+      await sleep(2000);
+      await this.initialize();
+      return await this._doNewTab(url, owner);
+    }
+  }
+
+  private async _doNewTab(url?: string, owner?: string): Promise<{ tabId: number; page: Page }> {
     const page = await this.browserContext!.newPage();
-    const tabId = this.allocateTab(page);
+    const tabId = this.allocateTab(page, owner);
     this.currentTabId = tabId;
     if (url) {
       await page.goto(url, { waitUntil: "domcontentloaded" });
@@ -180,13 +376,45 @@ class BrowserManager {
     return { tabId, page };
   }
 
-  /** Switch the active tab. Throws if tabId does not exist or is closed. */
-  switchTab(tabId: number): Page {
-    const page = this.tabs.get(tabId);
-    if (!page) throw new Error(`Tab ${tabId} does not exist.`);
-    if (page.isClosed()) throw new Error(`Tab ${tabId} is closed.`);
-    this.currentTabId = tabId;
-    return page;
+  /**
+   * Close all tabs owned by a given agent tag. Returns the list of closed
+   * tab IDs. Does NOT stop the browser — other agents' tabs remain usable.
+   */
+  async closeTabsByOwner(owner: string): Promise<number[]> {
+    const closed: number[] = [];
+    const ids = Array.from(this.tabOwners.entries())
+      .filter(([, o]) => o === owner)
+      .map(([id]) => id);
+    for (const id of ids) {
+      // Belt-and-braces: even if the primary tab somehow got an owner tag,
+      // never close it via this bulk path.
+      if (id === this.primaryTabId) continue;
+      try {
+        await this.closeTab(id);
+        closed.push(id);
+      } catch {
+        /* ignore individual failures */
+      }
+    }
+    return closed;
+  }
+
+  /** Drop all state without trying to close a browser that may already be gone. */
+  private async softReset(): Promise<void> {
+    if (this.idleSweeperHandle) {
+      clearInterval(this.idleSweeperHandle);
+      this.idleSweeperHandle = undefined;
+    }
+    this.tabs.clear();
+    this.tabOwners.clear();
+    this.tabLastActivity.clear();
+    this.primaryTabId = undefined;
+    this.nextTabId = 1;
+    this.currentTabId = 1;
+    this.browserContext = undefined;
+    this.browser = undefined;
+    this.consoleLogs = [];
+    this.initialized = false;
   }
 
   /** Close a tab by ID (default: current). Switches to nearest remaining tab. */
@@ -194,6 +422,11 @@ class BrowserManager {
     const id = tabId ?? this.currentTabId;
     const page = this.tabs.get(id);
     if (!page) throw new Error(`Tab ${id} does not exist.`);
+    if (id === this.primaryTabId) {
+      throw new Error(
+        `Tab ${id} is the primary tab and cannot be closed. Closing it would poison Steel's session (page_refresh failure). Use stop_browser to end the session instead.`
+      );
+    }
     await page.close().catch(() => {});
     this.tabs.delete(id);
 
@@ -207,18 +440,21 @@ class BrowserManager {
     }
   }
 
-  /** Return a snapshot of all open tabs. */
-  async listTabs(): Promise<{ tabId: number; url: string; title: string; active: boolean }[]> {
+  /** Return a snapshot of all open tabs, including owner tags. */
+  async listTabs(): Promise<{ tabId: number; url: string; title: string; active: boolean; owner?: string }[]> {
     await this.initialize();
-    const result = [];
+    const result: { tabId: number; url: string; title: string; active: boolean; owner?: string }[] = [];
     for (const [id, page] of this.tabs) {
       if (page.isClosed()) continue;
-      result.push({
+      const row: { tabId: number; url: string; title: string; active: boolean; owner?: string } = {
         tabId: id,
         url: page.url(),
         title: await page.title(),
         active: id === this.currentTabId,
-      });
+      };
+      const o = this.tabOwners.get(id);
+      if (o) row.owner = o;
+      result.push(row);
     }
     return result;
   }
@@ -241,8 +477,15 @@ class BrowserManager {
       this.browser = undefined;
     }
 
+    if (this.idleSweeperHandle) {
+      clearInterval(this.idleSweeperHandle);
+      this.idleSweeperHandle = undefined;
+    }
     this.browserContext = undefined;
     this.tabs.clear();
+    this.tabOwners.clear();
+    this.tabLastActivity.clear();
+    this.primaryTabId = undefined;
     this.nextTabId = 1;
     this.currentTabId = 1;
     this.consoleLogs = [];
@@ -286,7 +529,7 @@ async function writeToFile(
 // list_tabs -------------------------------------------------------------------
 server.tool(
   "list_tabs",
-  "List all open browser tabs with their tab ID, URL, title, and which is currently active.",
+  "List all open browser tabs with their tab ID, URL, title, active state, and owner tag (if set via new_tab). Owners let concurrent agents clean up only their own tabs via close_tabs_by_owner.",
   {},
   async () => {
     try {
@@ -295,7 +538,8 @@ server.tool(
         return { content: [{ type: "text", text: "No open tabs." }] };
       }
       const lines = tabs.map(
-        (t) => `[Tab ${t.tabId}]${t.active ? " *" : ""}  ${t.url}  —  ${t.title}`
+        (t) =>
+          `[Tab ${t.tabId}]${t.active ? " *" : ""}${t.owner ? ` (owner=${t.owner})` : ""}  ${t.url}  —  ${t.title}`
       );
       return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (err) {
@@ -308,21 +552,25 @@ server.tool(
 // new_tab ---------------------------------------------------------------------
 server.tool(
   "new_tab",
-  "Open a new browser tab and switch to it. Optionally navigate to a URL immediately. Returns the new tab ID.",
+  `Open a new browser tab and switch to it. Optionally navigate to a URL immediately. Returns the new tab ID.
+
+Concurrent agents: pass an \`owner\` tag (e.g. your agent/session label) so you can clean up only your own tabs later via close_tabs_by_owner. Tabs idle for longer than TAB_IDLE_TIMEOUT_MS (default 5min) are auto-closed.`,
   {
     url: z.string().optional().describe("URL to navigate to immediately after opening. Optional — omit to open a blank tab."),
+    owner: z.string().optional().describe("Optional ownership tag (e.g. 'agent:my-scraper-1'). Lets you clean up only your own tabs later via close_tabs_by_owner."),
   },
-  async ({ url }) => {
+  async ({ url, owner }) => {
     try {
-      const { tabId, page } = await mgr.newTab(url);
+      const { tabId, page } = await mgr.newTab(url, owner);
       await globalWait();
       const finalUrl = page.url();
       const title = await page.title();
+      const ownerSuffix = owner ? ` (owner=${owner})` : "";
       return {
         content: [
           {
             type: "text",
-            text: `Opened Tab ${tabId}${url ? `\nURL: ${finalUrl}\nTitle: ${title}` : " (blank)"}`,
+            text: `Opened Tab ${tabId}${ownerSuffix}${url ? `\nURL: ${finalUrl}\nTitle: ${title}` : " (blank)"}`,
           },
         ],
       };
@@ -333,27 +581,32 @@ server.tool(
   }
 );
 
-// switch_tab ------------------------------------------------------------------
+// close_tabs_by_owner ---------------------------------------------------------
 server.tool(
-  "switch_tab",
-  "Switch the active tab. All subsequent tool calls (get_screenshot, click, type, etc.) will operate on this tab.",
+  "close_tabs_by_owner",
+  `Close all tabs owned by a given agent tag. Use this at end-of-task instead of stop_browser, so other agents sharing the browser keep their tabs. Returns the list of closed tab IDs.
+
+If no tabs match the owner tag, returns an empty list silently (not an error).`,
   {
-    tabId: z.number().int().min(1).describe("Tab ID to switch to (as returned by list_tabs or new_tab)."),
+    owner: z.string().describe("The owner tag to match (set via new_tab's `owner` parameter)."),
   },
-  async ({ tabId }) => {
+  async ({ owner }) => {
     try {
-      const page = mgr.switchTab(tabId);
-      const url = page.url();
-      const title = await page.title();
-      return {
-        content: [{ type: "text", text: `Switched to Tab ${tabId}\nURL: ${url}\nTitle: ${title}` }],
-      };
+      const closed = await mgr.closeTabsByOwner(owner);
+      const text =
+        closed.length === 0
+          ? `No tabs found with owner=${owner}.`
+          : `Closed ${closed.length} tab(s) owned by ${owner}: ${closed.join(", ")}`;
+      return { content: [{ type: "text", text }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: error.message }] };
     }
   }
 );
+
+// (switch_tab removed in 0.5.0 — use `tabId` parameter on every tool instead.
+// Mutating a global "active tab" is not safe under concurrent agent use.)
 
 // close_tab -------------------------------------------------------------------
 server.tool(
@@ -384,11 +637,13 @@ server.tool(
 // get_current_url -------------------------------------------------------------
 server.tool(
   "get_current_url",
-  "Return the current page URL and title. Use this to confirm navigation succeeded, check for redirects, or orient yourself before deciding next steps.",
-  {},
-  async () => {
+  "Return the URL and title of a tab. Defaults to the current active tab; pass tabId to target a specific tab (required for concurrent agents).",
+  {
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
+  },
+  async ({ tabId }) => {
     try {
-      const page = await mgr.getPage();
+      const page = await mgr.getPage(tabId);
       const url = page.url();
       const title = await page.title();
       return {
@@ -424,17 +679,19 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
         "File path when outputMode is 'file'. Defaults to OUTPUT_DIR/screenshot_{timestamp}.{format}."
       ),
     format: z
-      .enum(["png", "jpeg"])
+      .enum(["png", "jpeg", "webp"])
       .default("png")
       .optional()
-      .describe("Image format. JPEG produces smaller files. Default: 'png'."),
+      .describe(
+        "Image format. 'webp' = smallest files, requires Chromium ≥ 88 (uses CDP directly). 'jpeg' = smaller than PNG, widely supported. Default: 'png'."
+      ),
     quality: z
       .number()
       .min(1)
       .max(100)
       .optional()
       .describe(
-        "JPEG quality 1–100. Only used when format is 'jpeg'. Default: DEFAULT_SCREENSHOT_QUALITY env var (80)."
+        "Quality 1–100. Used for 'jpeg' and 'webp'. Default: DEFAULT_SCREENSHOT_QUALITY env var (80). Ignored for 'png'."
       ),
     fullPage: z
       .boolean()
@@ -460,13 +717,20 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
         height: z.number(),
       })
       .optional()
-      .describe("Capture only a rectangular region of the page. Optional."),
+      .describe("Capture only a rectangular region of the page. Optional. Mutually exclusive with `selector`."),
+    selector: z
+      .string()
+      .optional()
+      .describe(
+        "CSS selector for a single element to screenshot. If set, captures just that element's bounding box — tighter output than fullPage + clip math. Mutually exclusive with `clip`."
+      ),
     maxInlineBytes: z
       .number()
       .optional()
       .describe(
         "Max bytes before auto-switching to file mode. Default: MAX_INLINE_BYTES env var (512000). Set lower to protect context budget."
       ),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
   async ({
     outputMode = "inline",
@@ -476,10 +740,18 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
     fullPage = false,
     scale = 1.0,
     clip,
+    selector,
     maxInlineBytes,
+    tabId,
   }) => {
     try {
-      const page = await mgr.getPage();
+      if (clip && selector) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: "Pass either `clip` or `selector`, not both." }],
+        };
+      }
+      const page = await mgr.getPage(tabId);
       const effectiveQuality = quality ?? env.DEFAULT_SCREENSHOT_QUALITY;
       const effectiveMaxInlineBytes = maxInlineBytes ?? env.MAX_INLINE_BYTES;
 
@@ -496,13 +768,57 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
             height: Math.round(origVp.height * scale),
           });
         }
-        const opts: Parameters<typeof page.screenshot>[0] = {
-          type: format,
-          fullPage,
-        };
-        if (format === "jpeg") opts.quality = effectiveQuality;
-        if (clip) opts.clip = clip;
-        buffer = await page.screenshot(opts);
+        if (format === "webp") {
+          // Playwright screenshot API doesn't expose webp; go through CDP.
+          const client = await page.context().newCDPSession(page);
+          const cdpArgs: {
+            format: string;
+            quality: number;
+            captureBeyondViewport?: boolean;
+            clip?: { x: number; y: number; width: number; height: number; scale: number };
+          } = { format: "webp", quality: effectiveQuality };
+          if (fullPage) cdpArgs.captureBeyondViewport = true;
+          if (selector) {
+            const locator = page.locator(selector).first();
+            const count = await locator.count();
+            if (count === 0) {
+              return {
+                isError: true,
+                content: [{ type: "text", text: `selector "${selector}" matched no elements.` }],
+              };
+            }
+            const box = await locator.boundingBox();
+            if (!box) {
+              return {
+                isError: true,
+                content: [{ type: "text", text: `selector "${selector}" has no layout box (display:none?).` }],
+              };
+            }
+            cdpArgs.clip = { ...box, scale: 1 };
+          } else if (clip) {
+            cdpArgs.clip = { ...clip, scale: 1 };
+          }
+          const { data } = await client.send("Page.captureScreenshot", cdpArgs);
+          buffer = Buffer.from(data, "base64");
+          await client.detach().catch(() => {});
+        } else if (selector) {
+          const locator = page.locator(selector).first();
+          const count = await locator.count();
+          if (count === 0) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: `selector "${selector}" matched no elements.` }],
+            };
+          }
+          const elOpts: Parameters<typeof locator.screenshot>[0] = { type: format };
+          if (format === "jpeg") elOpts.quality = effectiveQuality;
+          buffer = await locator.screenshot(elOpts);
+        } else {
+          const opts: Parameters<typeof page.screenshot>[0] = { type: format, fullPage };
+          if (format === "jpeg") opts.quality = effectiveQuality;
+          if (clip) opts.clip = clip;
+          buffer = await page.screenshot(opts);
+        }
       } finally {
         if (scale !== 1.0) {
           await page.setViewportSize(origVp).catch(() => {});
@@ -610,6 +926,7 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
       .describe(
         "When matchAll=true, pretty-print the inline JSON (2-space indent). Default: false (compact — one entry per line)."
       ),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
   async ({
     selector,
@@ -620,9 +937,10 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
     matchAll = false,
     maxEntries = 20,
     pretty = false,
+    tabId,
   }) => {
     try {
-      const page = await mgr.getPage();
+      const page = await mgr.getPage(tabId);
 
       // --- matchAll: per-element structured output -----------------------
       if (matchAll) {
@@ -815,10 +1133,11 @@ Use cases: scraping article list URLs, link indexes, sitemap-like extraction.`,
       .default(50)
       .optional()
       .describe("Max results. Default: 50. Set 0 for no cap."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
-  async ({ selector, urlPattern, limit = 50 }) => {
+  async ({ selector, urlPattern, limit = 50, tabId }) => {
     try {
-      const page = await mgr.getPage();
+      const page = await mgr.getPage(tabId);
       // Evaluate returns raw anchor list (possibly with dupes). Node-side
       // dedup via shared helper — testable, matches matchAll semantics.
       const rawLinks = await page.evaluate(
@@ -888,10 +1207,11 @@ Use when matchAll + links aren't enough — e.g. scraping data-id, data-price, a
       .default(50)
       .optional()
       .describe("Max elements to return. Default: 50. 0 = no cap."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
-  async ({ selector, attrs, limit = 50 }) => {
+  async ({ selector, attrs, limit = 50, tabId }) => {
     try {
-      const page = await mgr.getPage();
+      const page = await mgr.getPage(tabId);
       const results = await page.evaluate(
         ({ sel, attrNames }: { sel: string; attrNames: string[] }) => {
           const nodes = Array.from(document.querySelectorAll(sel));
@@ -956,10 +1276,11 @@ After clicking, use wait_for to confirm the expected result before proceeding.`,
       .default(10000)
       .optional()
       .describe("Max time in ms to wait for the element to be clickable. Default: 10000."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
-  async ({ selector, timeout = 10000 }) => {
+  async ({ selector, timeout = 10000, tabId }) => {
     try {
-      const page = await mgr.getPage();
+      const page = await mgr.getPage(tabId);
       await page.click(selector, { timeout });
       await globalWait();
       return { content: [{ type: "text", text: `Clicked: ${selector}` }] };
@@ -1002,10 +1323,11 @@ After typing, use wait_for to confirm the expected result or get_screenshot to v
       .default(10000)
       .optional()
       .describe("Max time in ms to wait for the element. Default: 10000."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
-  async ({ selector, text, clear = true, submit = false, timeout = 10000 }) => {
+  async ({ selector, text, clear = true, submit = false, timeout = 10000, tabId }) => {
     try {
-      const page = await mgr.getPage();
+      const page = await mgr.getPage(tabId);
       if (clear) {
         // fill() replaces content atomically — preferred over triple-click + type.
         await page.fill(selector, text, { timeout });
@@ -1057,10 +1379,11 @@ server.tool(
       .default(10000)
       .optional()
       .describe("Max time in ms to wait for the element. Default: 10000."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
-  async ({ selector, value, label, index, timeout = 10000 }) => {
+  async ({ selector, value, label, index, timeout = 10000, tabId }) => {
     try {
-      const page = await mgr.getPage();
+      const page = await mgr.getPage(tabId);
 
       if (value === undefined && label === undefined && index === undefined) {
         return {
@@ -1090,6 +1413,213 @@ server.tool(
   }
 );
 
+// fill_form -------------------------------------------------------------------
+server.tool(
+  "fill_form",
+  `Fill multiple form fields in one call. Replaces N separate \`type\` calls for sign-in / sign-up / search forms.
+
+Each field is filled with \`page.fill(selector, value)\` (atomic replace — equivalent to \`type(clear: true)\`). Processes fields sequentially; fails fast on the first missing selector unless \`skipMissing\` is set.
+
+Pass \`submitSelector\` to click a submit button after all fields are filled (or use per-field \`submit: true\` on the last field to press Enter there instead).`,
+  {
+    fields: z
+      .array(
+        z.object({
+          selector: z.string().describe("CSS selector for the input/textarea."),
+          value: z.string().describe("Value to set (empty string clears)."),
+          submit: z.boolean().optional().describe("Press Enter after this field. Default: false."),
+        })
+      )
+      .min(1)
+      .describe("Ordered list of {selector, value, submit?} fields to fill."),
+    submitSelector: z
+      .string()
+      .optional()
+      .describe("CSS selector of a submit button to click after all fields are filled. Optional."),
+    skipMissing: z
+      .boolean()
+      .default(false)
+      .optional()
+      .describe("If true, fields whose selector doesn't match are silently skipped. Default: false (first miss = isError)."),
+    timeout: z
+      .number()
+      .min(100)
+      .max(30000)
+      .default(10000)
+      .optional()
+      .describe("Per-field wait timeout in ms. Default: 10000."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
+  },
+  async ({ fields, submitSelector, skipMissing = false, timeout = 10000, tabId }) => {
+    try {
+      const page = await mgr.getPage(tabId);
+      const filled: string[] = [];
+      const skipped: string[] = [];
+      for (const f of fields) {
+        try {
+          await page.fill(f.selector, f.value, { timeout });
+          filled.push(f.selector);
+          if (f.submit) await page.press(f.selector, "Enter");
+        } catch (err) {
+          if (skipMissing) {
+            skipped.push(f.selector);
+            continue;
+          }
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `Failed on field "${f.selector}": ${(err as Error).message}\nFilled before failure: ${filled.join(", ") || "(none)"}`,
+              },
+            ],
+          };
+        }
+      }
+      if (submitSelector) {
+        await page.click(submitSelector, { timeout });
+      }
+      await globalWait();
+      const lines = [`Filled ${filled.length}/${fields.length} field(s).`];
+      if (filled.length) lines.push(`  ok: ${filled.join(", ")}`);
+      if (skipped.length) lines.push(`  skipped: ${skipped.join(", ")}`);
+      if (submitSelector) lines.push(`Clicked submit: ${submitSelector}`);
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// get_cookies -----------------------------------------------------------------
+server.tool(
+  "get_cookies",
+  `Return browser cookies for the shared context. Optionally filter by one or more URLs.
+
+Use for debugging auth flows or persisting a session to re-inject later via \`set_cookies\`.`,
+  {
+    urls: z
+      .array(z.string())
+      .optional()
+      .describe("Optional list of URLs to filter by. If omitted, returns all cookies in the context."),
+  },
+  async ({ urls }) => {
+    try {
+      await mgr.initialize();
+      const cookies = await mgr.browserContext!.cookies(urls);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              cookies.length === 0
+                ? "No cookies in the browser context."
+                : JSON.stringify(cookies, null, 2),
+          },
+        ],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// set_cookies -----------------------------------------------------------------
+server.tool(
+  "set_cookies",
+  `Inject cookies into the shared browser context. Each cookie must have \`name\` + \`value\` and either \`url\` or (\`domain\` + \`path\`).
+
+Use to restore a logged-in session from a saved dump without running the login flow in-browser.`,
+  {
+    cookies: z
+      .array(
+        z
+          .object({
+            name: z.string(),
+            value: z.string(),
+            url: z.string().optional(),
+            domain: z.string().optional(),
+            path: z.string().optional(),
+            expires: z.number().optional().describe("Unix epoch seconds. Omit for a session cookie."),
+            httpOnly: z.boolean().optional(),
+            secure: z.boolean().optional(),
+            sameSite: z.enum(["Strict", "Lax", "None"]).optional(),
+          })
+          .passthrough()
+      )
+      .min(1)
+      .describe("Array of Playwright-shaped cookie objects."),
+  },
+  async ({ cookies }) => {
+    try {
+      await mgr.initialize();
+      await mgr.browserContext!.addCookies(cookies as Parameters<BrowserContext["addCookies"]>[0]);
+      return {
+        content: [{ type: "text", text: `Set ${cookies.length} cookie(s) on the shared browser context.` }],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// download_file ---------------------------------------------------------------
+server.tool(
+  "download_file",
+  `Navigate to a URL that triggers a download, capture it, save to disk. Returns the saved path + byte size.
+
+Use when a URL serves a binary (PDF, CSV, etc.) that the browser would normally open in a viewer or save via the download bar. \`page.goto\` on such a URL usually raises \`ERR_ABORTED\` — this tool uses Playwright's \`waitForEvent('download')\` pattern so the download completes cleanly regardless.
+
+Output path defaults to \`OUTPUT_DIR/<suggestedFilename>\`. Pass \`outputPath\` to override.`,
+  {
+    url: z.string().describe("The download URL to navigate to."),
+    outputPath: z
+      .string()
+      .optional()
+      .describe("Absolute path to save the download under. Defaults to OUTPUT_DIR/<suggestedFilename>."),
+    timeout: z
+      .number()
+      .min(1000)
+      .max(120000)
+      .default(30000)
+      .optional()
+      .describe("Timeout in ms for the download event. Default: 30000."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
+  },
+  async ({ url, outputPath, timeout = 30000, tabId }) => {
+    try {
+      const page = await mgr.getPage(tabId);
+      const [download] = await Promise.all([
+        page.waitForEvent("download", { timeout }),
+        // `page.goto` on a direct download URL raises ERR_ABORTED; suppress.
+        page.goto(url).catch((err) => {
+          const msg = (err as Error).message;
+          if (!/ERR_ABORTED|net::ERR_ABORTED/.test(msg)) throw err;
+        }),
+      ]);
+      const suggested = download.suggestedFilename() || `download_${Date.now()}`;
+      const savePath = outputPath ?? path.join(env.OUTPUT_DIR, suggested);
+      await fs.mkdir(path.dirname(savePath), { recursive: true });
+      await download.saveAs(savePath);
+      const stat = await fs.stat(savePath);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Downloaded ${suggested}\nSaved to: ${savePath}\nSize: ${stat.size.toLocaleString()} bytes`,
+          },
+        ],
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
 // evaluate --------------------------------------------------------------------
 server.tool(
   "evaluate",
@@ -1097,21 +1627,42 @@ server.tool(
 
 Use this as an escape hatch when no other tool covers your need: reading computed styles, extracting structured data, manipulating the DOM, calling page-level APIs.
 
+When \`selector\` is set, the expression runs with a local \`el\` bound to \`document.querySelector(selector)\`. Use \`el.textContent\`, \`el.getAttribute(...)\`, etc. Returns null if the selector matches nothing.
+
 CONTEXT BUDGET — results are serialised to JSON; large objects can be very large. Keep expressions targeted. The expression must be a valid JS expression (not a statement); wrap multi-line logic in an IIFE: (() => { ... })()`,
   {
     expression: z
       .string()
-      .describe("JavaScript expression to evaluate in the page context. Must return a JSON-serialisable value."),
+      .describe(
+        "JavaScript expression to evaluate in the page context. Must return a JSON-serialisable value. If `selector` is set, reference the matched element as `el`."
+      ),
+    selector: z
+      .string()
+      .optional()
+      .describe(
+        "Optional CSS selector. When set, the expression runs with `el` bound to the first matching element (null if none)."
+      ),
     waitAfter: z
       .boolean()
       .default(false)
       .optional()
       .describe("Call the global wait after evaluation (useful if the expression triggers async side effects). Default: false."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
-  async ({ expression, waitAfter = false }) => {
+  async ({ expression, selector, waitAfter = false, tabId }) => {
     try {
-      const page = await mgr.getPage();
-      const result = await page.evaluate(expression);
+      const page = await mgr.getPage(tabId);
+      let result: unknown;
+      if (selector) {
+        // Wrap expression so `el` is bound to the matched element.
+        // JSON.stringify the selector defends against injection.
+        const wrapped = `(function(){ const el = document.querySelector(${JSON.stringify(
+          selector
+        )}); if (!el) return null; return (${expression}); })()`;
+        result = await page.evaluate(wrapped);
+      } else {
+        result = await page.evaluate(expression);
+      }
       if (waitAfter) await globalWait();
       const text = result === undefined ? "undefined" : JSON.stringify(result, null, 2);
       return { content: [{ type: "text", text: text }] };
@@ -1141,10 +1692,11 @@ Conditions (at least one required): selector, text, textGone. Returns elapsed ti
       .default(10000)
       .optional()
       .describe("Maximum time to wait in milliseconds. Default: 10000 (10s). Max: 60000 (60s)."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
-  async ({ selector, text, textGone, timeout = 10000 }) => {
+  async ({ selector, text, textGone, timeout = 10000, tabId }) => {
     try {
-      const page = await mgr.getPage();
+      const page = await mgr.getPage(tabId);
 
       if (!selector && !text && !textGone) {
         return {
@@ -1264,166 +1816,32 @@ CONTEXT BUDGET — console output can be large on noisy pages. Use the level fil
   }
 );
 
-// scroll_down -----------------------------------------------------------------
+// scroll ----------------------------------------------------------------------
 server.tool(
-  "scroll_down",
-  "Scroll down the page by a specified number of pixels (default 500).",
+  "scroll",
+  `Scroll the page by a number of pixels in either direction.
+
+Merges the old scroll_up / scroll_down tools (0.4.0+). Pass direction="up" or "down".`,
   {
-    pixels: z.number().default(500).optional().describe("Number of pixels to scroll down. Default: 500."),
-  },
-  async ({ pixels = 500 }) => {
-    try {
-      const page = await mgr.getPage();
-      await page.evaluate(`window.scrollBy(0, ${pixels})`);
-      await globalWait();
-      return { content: [{ type: "text", text: `Scrolled down by ${pixels} pixels.` }] };
-    } catch (err) {
-      const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
-    }
-  }
-);
-
-// scroll_up -------------------------------------------------------------------
-server.tool(
-  "scroll_up",
-  "Scroll up the page by a specified number of pixels (default 500).",
-  {
-    pixels: z.number().default(500).optional().describe("Number of pixels to scroll up. Default: 500."),
-  },
-  async ({ pixels = 500 }) => {
-    try {
-      const page = await mgr.getPage();
-      await page.evaluate(`window.scrollBy(0, -${pixels})`);
-      await globalWait();
-      return { content: [{ type: "text", text: `Scrolled up by ${pixels} pixels.` }] };
-    } catch (err) {
-      const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
-    }
-  }
-);
-
-// go_back ---------------------------------------------------------------------
-server.tool(
-  "go_back",
-  "Go back to the previous page in the browser history.",
-  {},
-  async () => {
-    try {
-      const page = await mgr.getPage();
-      await page.goBack({ waitUntil: "commit", timeout: 10000 });
-      await globalWait();
-      const url = page.url();
-      return { content: [{ type: "text", text: `Went back.\nCurrent URL: ${url}` }] };
-    } catch (err) {
-      const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
-    }
-  }
-);
-
-// go_forward ------------------------------------------------------------------
-server.tool(
-  "go_forward",
-  "Go forward to the next page in the browser history.",
-  {},
-  async () => {
-    try {
-      const page = await mgr.getPage();
-      await page.goForward({ waitUntil: "commit", timeout: 10000 });
-      await globalWait();
-      const url = page.url();
-      return { content: [{ type: "text", text: `Went forward.\nCurrent URL: ${url}` }] };
-    } catch (err) {
-      const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
-    }
-  }
-);
-
-// refresh ---------------------------------------------------------------------
-server.tool(
-  "refresh",
-  "Reload the current page.",
-  {},
-  async () => {
-    try {
-      const page = await mgr.getPage();
-      await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
-      await globalWait();
-      const url = page.url();
-      return { content: [{ type: "text", text: `Page reloaded.\nCurrent URL: ${url}` }] };
-    } catch (err) {
-      const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
-    }
-  }
-);
-
-// google_search ---------------------------------------------------------------
-server.tool(
-  "google_search",
-  `Perform a Google search for the given query and navigate to the results page.
-
-CONTEXT BUDGET — returns a screenshot of the results page by default. Use outputMode: 'file' to save it to disk instead of loading into context. For interacting with results, follow up with click or go_to_url.`,
-  {
-    query: z.string().describe("The search query to use on Google."),
-    outputMode: z
-      .enum(["inline", "file"])
-      .default("inline")
-      .optional()
-      .describe(
-        "How to return the screenshot. 'inline' returns base64 (auto-downgrades to 'file' if too large). 'file' saves to disk."
-      ),
-    outputPath: z
-      .string()
-      .optional()
-      .describe("File path when outputMode is 'file'. Defaults to OUTPUT_DIR/screenshot_{timestamp}.png."),
-    maxInlineBytes: z
+    direction: z
+      .enum(["up", "down"])
+      .describe("Scroll direction: 'up' or 'down'."),
+    pixels: z
       .number()
+      .default(500)
       .optional()
-      .describe("Max bytes before auto-switching to file mode. Default: MAX_INLINE_BYTES env var (512000)."),
+      .describe("Number of pixels to scroll. Default: 500."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
-  async ({ query, outputMode = "inline", outputPath, maxInlineBytes }) => {
+  async ({ direction, pixels = 500, tabId }) => {
     try {
-      const page = await mgr.getPage();
-      await page.goto(`https://www.google.com/search?q=${encodeURIComponent(query)}`);
+      const page = await mgr.getPage(tabId);
+      const dy = direction === "up" ? -pixels : pixels;
+      await page.evaluate(`window.scrollBy(0, ${dy})`);
       await globalWait();
-      const url = page.url();
-      const screenshot = await page.screenshot();
-
-      const effectiveMaxInlineBytes = maxInlineBytes ?? env.MAX_INLINE_BYTES;
-      const effectiveMode =
-        outputMode === "inline" && screenshot.length > effectiveMaxInlineBytes
-          ? "file"
-          : outputMode;
-
-      if (effectiveMode === "file") {
-        const defaultName = `screenshot_${Date.now()}.png`;
-        const filePath = await writeToFile(screenshot, defaultName, outputPath);
-        const autoNote =
-          outputMode === "inline"
-            ? `\n(Auto-switched to file mode: output exceeded ${effectiveMaxInlineBytes.toLocaleString()} bytes)`
-            : "";
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Search results for "${query}"\nURL: ${url}\nScreenshot saved to: ${filePath}${autoNote}`,
-            },
-          ],
-        };
-      }
-
       return {
         content: [
-          { type: "text", text: `Search results for "${query}"\nURL: ${url}` },
-          {
-            type: "image",
-            data: screenshot.toString("base64"),
-            mimeType: "image/png",
-          },
+          { type: "text", text: `Scrolled ${direction} by ${pixels} pixels.` },
         ],
       };
     } catch (err) {
@@ -1432,6 +1850,44 @@ CONTEXT BUDGET — returns a screenshot of the results page by default. Use outp
     }
   }
 );
+
+// history ---------------------------------------------------------------------
+server.tool(
+  "history",
+  `Navigate the current (or specified) tab through its browser history.
+
+Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back", "forward", or "reload".`,
+  {
+    action: z
+      .enum(["back", "forward", "reload"])
+      .describe("History action: 'back' (previous page), 'forward' (next page), 'reload' (refresh current page)."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
+  },
+  async ({ action, tabId }) => {
+    try {
+      const page = await mgr.getPage(tabId);
+      if (action === "back") {
+        await page.goBack({ waitUntil: "commit", timeout: 10000 });
+      } else if (action === "forward") {
+        await page.goForward({ waitUntil: "commit", timeout: 10000 });
+      } else {
+        await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
+      }
+      await globalWait();
+      const url = page.url();
+      const verb =
+        action === "back" ? "Went back" : action === "forward" ? "Went forward" : "Reloaded";
+      return { content: [{ type: "text", text: `${verb}.\nCurrent URL: ${url}` }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: error.message }] };
+    }
+  }
+);
+
+// (google_search removed in 0.4.0 — prefer OpenClaw's `web_search` built-in,
+// or use `go_to_url` with "https://www.google.com/search?q=..." when you
+// specifically need to interact with the SERP in the browser.)
 
 // go_to_url -------------------------------------------------------------------
 server.tool(
@@ -1452,10 +1908,11 @@ Optional waitFor: wait for a CSS selector to appear after navigation (saves a se
       .default(10000)
       .optional()
       .describe("Timeout in ms for waitFor. Default: 10000."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
-  async ({ url, waitFor, waitTimeout = 10000 }) => {
+  async ({ url, waitFor, waitTimeout = 10000, tabId }) => {
     try {
-      const page = await mgr.getPage();
+      const page = await mgr.getPage(tabId);
       await page.goto(url, { waitUntil: "domcontentloaded" });
       await globalWait();
 

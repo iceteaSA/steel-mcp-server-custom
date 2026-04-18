@@ -42,6 +42,12 @@ export const EnvSchema = z
     // Does NOT affect the CDP WebSocket connection — that always uses the
     // internal STEEL_BASE_URL / session.websocketUrl.
     STEEL_PUBLIC_URL: z.string().optional(),
+    // Auto-close tabs that have had no tool activity for this many ms.
+    // Keeps concurrent-agent sessions from leaking tabs. Default: 5 min.
+    // Set 0 to disable the idle sweeper entirely.
+    TAB_IDLE_TIMEOUT_MS: z.coerce.number().default(300000),
+    // How often the idle sweeper runs (ms). Default: 60s.
+    TAB_IDLE_SWEEP_INTERVAL_MS: z.coerce.number().default(60000),
   })
   .refine(
     (env) => {

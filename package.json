@@ -1,6 +1,6 @@
 {
     "name": "@steel-dev/mcp-server",
-    "version": "0.2.0",
+    "version": "0.5.2",
     "description": "MCP server for browser automation using Steel and Playwright (custom fork with list-page scraping + bot detection)",
     "license": "MIT",
     "author": "Steel (https://steel.dev)",

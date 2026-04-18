@@ -14,11 +14,55 @@ common failures.
 
 - **You are the brain.** The MCP is a dumb Playwright driver. Every decision
   is yours.
-- **Never `stop_browser` mid-task.** Destroys session + state. Only at very end.
+- **Never `stop_browser` mid-task.** Destroys the shared session + other agents'
+  tabs. For your own cleanup use `close_tabs_by_owner` (see Concurrent Agents).
 - **Auto-init.** No need to call `start_browser` unless you want the Steel
   debug URL to watch live.
-- **Shared session.** Other agents may be using this browser. Join via
-  `new_tab`; never reset.
+- **Shared session.** Other agents may be using this browser. Open your own
+  tab with an `owner` tag, operate with `tabId`, clean up with
+  `close_tabs_by_owner` at the end.
+
+## Concurrent Agents — Tab Ownership
+
+Multiple agents share one browser session. To avoid stepping on each other:
+
+1. **Open your own tab with an owner tag.** Pick a unique string per agent
+   (e.g. `"agent:my-scraper-<timestamp>"`):
+   ```
+   new_tab(url: "https://example.com", owner: "agent:my-scraper-12345")
+   → Opened Tab 7 (owner=agent:my-scraper-12345)
+   ```
+
+2. **Pin operations to your tab via `tabId`.** All page-interacting tools
+   (`go_to_url`, `get_page_text`, `get_links`, `get_attrs`, `click`, `type`,
+   `evaluate`, `wait_for`, `scroll`, `history`, `get_screenshot`, etc.) accept
+   an optional `tabId`. Without it, the tool uses the global current-active-tab,
+   which another agent may have moved. Always pass your `tabId`:
+   ```
+   get_page_text(selector: "article", matchAll: true, tabId: 7)
+   go_to_url(url: "https://other-site.com", tabId: 7)
+   ```
+
+3. **Clean up only your own tabs** at end of task:
+   ```
+   close_tabs_by_owner(owner: "agent:my-scraper-12345")
+   → Closed 3 tab(s) owned by agent:my-scraper-12345: 7, 9, 11
+   ```
+   Do NOT call `stop_browser` — that kills everyone's tabs.
+
+### Idle-tab sweeper (automatic)
+
+Tabs with no tool activity for `TAB_IDLE_TIMEOUT_MS` (default 5 min) are
+auto-closed. Any `tabId`-targeted tool call refreshes the activity timestamp.
+Don't rely on it as your primary cleanup — call `close_tabs_by_owner` when
+you're done. The sweeper is a safety net for abandoned tabs.
+
+### Browser-closed auto-retry (automatic)
+
+If you see `browserContext.newPage: Target page, context or browser has been
+closed` on a very recent `start_browser` / `new_tab`, the server now soft-resets
++ retries internally. You don't need retry loops around `new_tab`. If the
+retried call still fails, treat it as a real browser outage.
 
 ## Calling Routes
 
@@ -206,6 +250,17 @@ evaluate(expression: "Array.from(document.querySelectorAll('tr')).map(r => r.inn
 evaluate(expression: "Array.from(document.querySelectorAll('a.result')).map(a => ({text: a.textContent.trim(), href: a.href}))")
 ```
 
+**Element-scoped evaluate** — pass `selector` and reference the element as `el`:
+
+```
+evaluate(selector: "h1.headline", expression: "el.textContent.trim()")
+evaluate(selector: "article[data-id]", expression: "el.getAttribute('data-id')")
+evaluate(selector: ".price", expression: "parseFloat(el.textContent.replace(/[^0-9.]/g, ''))")
+```
+
+Returns `null` if the selector matches nothing. The selector is JSON-stringified
+so you don't have to escape it yourself.
+
 ### Selector Diagnostic — One Call, Not a Retry Loop
 
 When `matchAll` / `get_links` returns `[]`, don't iterate blind. Probe:
@@ -246,9 +301,9 @@ wait_for(textGone: "Loading...", timeout: 15000)
 
 ## Multi-Step Form Pattern
 
-Type into each field separately. `clear: true` (default) replaces. `submit:
-true` on last field only:
+Two ways — pick by field count:
 
+**Small (1-2 fields):** `type` + `click` is fine.
 ```
 type(selector: "input[name=email]", text: "user@example.com")
 type(selector: "input[name=password]", text: "secret")
@@ -256,6 +311,23 @@ click(selector: "button[type=submit]")
 wait_for(text: "Dashboard")
 get_current_url()   # confirm landing, not error
 ```
+
+**Many fields (sign-up / checkout / multi-input):** `fill_form` in one call.
+```
+fill_form(
+  fields: [
+    {selector: "input[name=email]", value: "user@example.com"},
+    {selector: "input[name=password]", value: "secret"},
+    {selector: "input[name=confirm]", value: "secret"},
+  ],
+  submitSelector: "button[type=submit]"
+)
+wait_for(text: "Welcome")
+```
+
+`fill_form` replaces N `type` calls with one; still atomic `page.fill`
+semantics (clears + types). Pass `skipMissing: true` if some fields are
+conditionally rendered.
 
 ## Human-in-the-Loop (HITL)
 
@@ -276,23 +348,45 @@ get_current_url()
 
 Never handle 2FA / credentials yourself.
 
-## Multi-Tab Workflows
+### Persist / restore an auth session
 
-Tabs are per-session, each with own URL/cookies/DOM.
+After a successful HITL login, dump the cookies so the next run can skip
+the login entirely:
 
 ```
-new_tab(url: "https://site-b.com")     # opens Tab 2
-get_page_text(selector: "main", maxChars: 2000)
-switch_tab(tabId: 1)                   # back to Tab 1
-list_tabs()
-close_tab(tabId: 2)                    # done with Tab 2
+get_cookies(urls: ["https://target.example.com"])
+→ [{name, value, domain, expires, ...}, ...]
+# Save the JSON to disk.
+
+# Next run:
+set_cookies(cookies: [...])   # paste the saved array
+go_to_url(url: "https://target.example.com/dashboard")
+```
+
+`get_cookies` / `set_cookies` operate on the shared context, so cookies
+survive until `stop_browser` or until they expire naturally.
+
+## Multi-Tab Workflows
+
+Tabs are per-session, each with own URL/cookies/DOM. For concurrent-safe use,
+always address tabs by their `tabId` — never rely on a shared "active tab".
+
+```
+a = new_tab(url: "https://site-a.com", owner: "agent:my-job-42")  # → Tab 7
+b = new_tab(url: "https://site-b.com", owner: "agent:my-job-42")  # → Tab 8
+get_page_text(selector: "main", maxChars: 2000, tabId: 7)
+go_to_url(url: "https://site-c.com", tabId: 8)
+get_page_text(selector: "article", matchAll: true, tabId: 8)
+close_tabs_by_owner(owner: "agent:my-job-42")                      # clean up both
 ```
 
 Rules:
-- All tools act on the **active tab** — `switch_tab` first if needed.
+- Always pass `tabId` so concurrent agents don't race on a global active-tab
+  pointer.
 - `new_tab` uses real CDP context; visible in session viewer.
 - Never `browser.newPage()` / `browser.newContext()` directly — phantom
   contexts. Always use MCP tools.
+- Prefer `close_tabs_by_owner` over `stop_browser` for end-of-task cleanup.
 
 ## Debugging Failures
 
@@ -305,22 +399,68 @@ console_log(level: "error")
 Network failures, JS errors, CSP violations all appear here. Check this before
 blaming selectors.
 
-## Output Paths (sandboxed agents)
+## Screenshots — format, scope, output path
+
+Format choices (smallest → largest):
+- `"webp"` — smallest. Uses CDP directly (requires Chromium ≥ 88).
+- `"jpeg"` — widely compatible. Good for photos/screenshots with gradients.
+- `"png"` — lossless. Good for UI shots. Default.
+
+Scope:
+- `selector: "article.hero"` — capture just that element's bounding box.
+  Tighter output than `fullPage + clip` math. Matched-count error if 0.
+- `clip: {x,y,width,height}` — manual rectangle. Mutually exclusive with `selector`.
+- `fullPage: true` — full scrollable page (no scope args).
+- None of the above — current viewport.
+
+```
+get_screenshot(
+  selector: "article.hero",
+  format: "webp", quality: 75,
+  outputMode: "file",
+  outputPath: "$WORKSPACE/artifacts/hero.webp",
+  tabId: 7
+)
+```
+
+### Sandboxed agents (output path)
 
 Some agent runtimes (e.g. OpenClaw) require attachments to resolve under a
 specific workspace directory. Pass an explicit `outputPath` under that root:
 
 ```
 get_screenshot(
-  format: "jpeg", quality: 70,
+  format: "webp", quality: 70,
   outputMode: "file",
-  outputPath: "$WORKSPACE/artifacts/<name>.jpeg"
+  outputPath: "$WORKSPACE/artifacts/<name>.webp"
 )
 ```
 
 Same for `get_page_text` with `outputMode: "file"` — use
 `$WORKSPACE/artifacts/<name>.txt`. Substitute `$WORKSPACE` with your runtime's
-allowed output root (e.g. `~/.openclaw/workspace`, `~/.claude/workspace`, etc.).
+allowed output root.
+
+## Downloading Binaries
+
+Use `download_file` for direct-download URLs (PDF, CSV, ZIP). A plain
+`go_to_url` on a binary URL raises `ERR_ABORTED`; `download_file` handles
+that cleanly via `waitForEvent('download')`:
+
+```
+download_file(
+  url: "https://example.com/report.pdf",
+  outputPath: "$WORKSPACE/artifacts/downloads/report.pdf",
+  tabId: 7
+)
+→ "Downloaded report.pdf\nSaved to: ...\nSize: 184,329 bytes"
+```
+
+If the download is triggered by a click (not a direct URL), use the
+standard Playwright pattern manually:
+```
+click(selector: "a.download-link", tabId: 7)
+# then wait for file to appear under your output dir, extract via kreuzberg, etc.
+```
 
 ## Call Budget Discipline
 

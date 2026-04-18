@@ -5,6 +5,8 @@ import {
   dedupeLinks,
   findTitle,
   isBotWall,
+  isBrowserClosedError,
+  isSteelSessionStuck,
   pickPrimaryLink,
   type Link,
 } from "../src/helpers";
@@ -177,5 +179,52 @@ describe("findTitle", () => {
       { text: "Headline", href: "https://ex.com/a" },
     ];
     expect(findTitle("https://ex.com/a", links)).toBe("Headline");
+  });
+});
+
+describe("isSteelSessionStuck", () => {
+  it.each([
+    ["500 Failed after 3 attempts. Last error: Browser process error (page_refresh): Failed to refresh primary page when reusing browser", true],
+    ["Failed to refresh primary page", true],
+    ["page_refresh failure", true],
+    ["Failed after 5 attempts. Browser process error: timeout", true],
+    ["Some unrelated error", false],
+    ["Target closed", false],
+    ["Failed after 3 attempts: upstream timeout", false],
+    ["", false],
+  ])("msg=%s => %s", (msg, expected) => {
+    expect(isSteelSessionStuck(new Error(msg))).toBe(expected);
+  });
+  it("handles null/undefined", () => {
+    expect(isSteelSessionStuck(null)).toBe(false);
+    expect(isSteelSessionStuck(undefined)).toBe(false);
+  });
+});
+
+describe("isBrowserClosedError", () => {
+  it.each([
+    ["browserContext.newPage: Target page, context or browser has been closed", true],
+    ["Target page, context or browser has been closed", true],
+    ["Target closed", true],
+    ["Browser has been closed", true],
+    ["Browser has disconnected unexpectedly", true],
+    ["Error: browserContext.newPage: call failed", true],
+    ["connect ECONNREFUSED 127.0.0.1:9222", true],
+    ["WebSocket closed before response", true],
+    ["CDP session closed", true],
+    ["Some unrelated error", false],
+    ["Timeout 30000ms exceeded", false],
+    ["", false],
+  ])("msg=%s => %s", (msg, expected) => {
+    expect(isBrowserClosedError(new Error(msg))).toBe(expected);
+  });
+  it("handles string inputs (not just Error)", () => {
+    expect(isBrowserClosedError("Target closed")).toBe(true);
+    expect(isBrowserClosedError("nope")).toBe(false);
+  });
+  it("handles null/undefined/empty", () => {
+    expect(isBrowserClosedError(null)).toBe(false);
+    expect(isBrowserClosedError(undefined)).toBe(false);
+    expect(isBrowserClosedError(new Error(""))).toBe(false);
   });
 });

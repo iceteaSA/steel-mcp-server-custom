@@ -56,6 +56,30 @@ Invalid values cause the process to exit with a descriptive error.
 | `SESSION_TIMEOUT_MS` | `300000` (5 min) | Steel session auto-release timeout in ms. Safety net if `stop_browser` is never called. |
 | `OPTIMIZE_BANDWIDTH` | `false` | When `true`, blocks images/fonts/CSS for faster text-only scraping. |
 | `STEEL_PUBLIC_URL` | — | Public-facing Steel URL (e.g. `https://steel.example.com`). Rewrites debug/interactive/viewer URLs in `start_browser` output so they are accessible remotely. Does **not** affect the CDP WebSocket connection. |
+| `TAB_IDLE_TIMEOUT_MS` | `300000` (5 min) | Auto-close tabs with no tool activity for this long. `0` disables the sweeper. |
+| `TAB_IDLE_SWEEP_INTERVAL_MS` | `60000` (60 s) | How often the idle sweeper checks for stale tabs. |
+
+### Concurrency — multi-agent sessions
+
+This server is safe for multiple concurrent agents sharing one browser session.
+The design principles:
+
+- **Owner-tagged tabs.** `new_tab(url, owner)` records an owner string on the
+  tab. Agents use their own unique owner (e.g. `agent:<id>-<timestamp>`).
+- **Tab-scoped operations.** All page-interacting tools accept an optional
+  `tabId`. Agents pass their own tab ID on every call so another agent's
+  `switch_tab` doesn't pull the active-tab pointer out from under them.
+- **Scoped cleanup.** `close_tabs_by_owner(owner)` closes only that agent's
+  tabs. `stop_browser` destroys the whole session — do not use for per-agent
+  cleanup.
+- **Idle sweeper.** Every page-targeted call refreshes the tab's
+  `lastActivity` timestamp. Tabs untouched for `TAB_IDLE_TIMEOUT_MS` are
+  auto-closed. Safety net for abandoned tabs — not a substitute for
+  `close_tabs_by_owner`.
+- **Browser-closed retry.** `newTab` / `getPage` catch Playwright
+  "Target/context/browser has been closed" errors, soft-reset, wait 2 s,
+  retry once. Fixes the race between `start_browser` returning and the
+  context becoming ready.
 
 ### mcporter config (self-hosted Steel)
 
@@ -107,12 +131,16 @@ Every handler calls `await mgr.getPage()` (which auto-initialises) then works wi
 
 **Available tools:**
 
+All page-interacting tools accept an optional `tabId` parameter (omit for
+current-active-tab behaviour; pass for concurrent-agent safety).
+
 | Tool | Description |
 |---|---|
-| `list_tabs` | List all open tabs with ID, URL, title, active state |
-| `new_tab` | Open a new tab (optionally navigate to URL immediately), returns tab ID |
-| `switch_tab` | Switch active tab by ID — all tools then operate on that tab |
+| `list_tabs` | List all open tabs with ID, URL, title, active state, and owner tag |
+| `new_tab` | Open a new tab (optional URL + `owner` tag), returns tab ID |
+| `switch_tab` | Switch active tab by ID — **discouraged** for concurrent workflows; pass `tabId` to each tool instead |
 | `close_tab` | Close a tab by ID (default: current); auto-switches to next remaining |
+| `close_tabs_by_owner` | Close all tabs matching an owner tag — scoped cleanup for one agent without affecting others |
 | `get_current_url` | Returns current page URL and title |
 | `get_screenshot` | Screenshot with outputMode, format, scale, clip, quality |
 | `get_page_text` | Page text with selector, maxChars, outputMode, includeLinks. `matchAll: true` returns JSON array per-element `{text, title, primaryLink, links}` — preferred for list-page scraping |
@@ -124,15 +152,11 @@ Every handler calls `await mgr.getPage()` (which auto-initialises) then works wi
 | `evaluate` | Run JavaScript in the page context, return JSON result |
 | `wait_for` | Async condition polling (selector/text appear or disappear) |
 | `console_log` | Browser console messages, filterable by level |
-| `scroll_down` | Scroll down by pixels |
-| `scroll_up` | Scroll up by pixels |
-| `go_back` | Browser history back (returns new URL) |
-| `go_forward` | Browser history forward (returns new URL) |
-| `refresh` | Reload current page (returns URL) |
-| `google_search` | Navigate to Google search results with outputMode |
+| `scroll` | Scroll the page — `direction: "up"`\|`"down"`, `pixels?` (default 500) |
+| `history` | Browser history op — `action: "back"`\|`"forward"`\|`"reload"` |
 | `go_to_url` | Navigate to a URL. Optional `waitFor` selector + `waitTimeout` — merges nav + wait. Auto-detects Cloudflare/bot walls, returns `isError` on hit |
 | `start_browser` | Start browser, returns Steel debug URL |
-| `stop_browser` | Stop browser and release Steel session |
+| `stop_browser` | Stop browser and release Steel session (shared state — prefer `close_tabs_by_owner` for per-agent cleanup) |
 
 ### Design principles for new tools
 

@@ -99,3 +99,37 @@ export function capText(s: string, maxChars: number): string {
   if (maxChars <= 0 || s.length <= maxChars) return s;
   return s.slice(0, maxChars) + "…";
 }
+
+/**
+ * Detect Playwright "browser/context has been closed" errors. These arise when
+ * the browser process died, the Steel session expired, or a context got
+ * disposed while we still held a reference. Callers soft-reset and retry once.
+ */
+const BROWSER_CLOSED_RE =
+  /Target page, context or browser has been closed|Target closed|Browser has been closed|Browser has disconnected|browserContext\.newPage|ECONNREFUSED|WebSocket closed|CDP (session|browser) closed/i;
+
+export function isBrowserClosedError(err: unknown): boolean {
+  if (!err) return false;
+  const msg = (err as Error).message || String(err);
+  return BROWSER_CLOSED_RE.test(msg);
+}
+
+/**
+ * Detect Steel's "stuck live session" pattern: when the server fails to
+ * refresh the primary page on session reuse after N internal retries.
+ * Typical message:
+ *   "500 Failed after 3 attempts. Last error: Browser process error
+ *    (page_refresh): Failed to refresh primary page when reusing browser"
+ *
+ * Recovery: release all live sessions on the Steel server, then retry the
+ * MCP's own connect logic. Happens when a previous MCP child died without
+ * releasing its session and the server's background retry gives up.
+ */
+const STEEL_STUCK_SESSION_RE =
+  /page_refresh|Failed to refresh primary page|Failed after \d+ attempts.*Browser process error/i;
+
+export function isSteelSessionStuck(err: unknown): boolean {
+  if (!err) return false;
+  const msg = (err as Error).message || String(err);
+  return STEEL_STUCK_SESSION_RE.test(msg);
+}
