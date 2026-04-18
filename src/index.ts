@@ -781,6 +781,29 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
           content: [{ type: "text", text: "Pass either `clip` or `selector`, not both." }],
         };
       }
+      if (clip) {
+        // Validate clip dimensions up front — CDP returns a cryptic
+        // "Protocol error (Page.captureScreenshot): Unable to capture
+        // screenshot" for negative coords, zero/negative width or height,
+        // and oversized regions (>16384 in any dimension per Chromium limit).
+        const MAX_DIM = 16384;
+        const issues: string[] = [];
+        if (clip.width <= 0 || clip.height <= 0) {
+          issues.push(`width/height must be > 0 (got ${clip.width}×${clip.height})`);
+        }
+        if (clip.width > MAX_DIM || clip.height > MAX_DIM) {
+          issues.push(`width/height must be ≤ ${MAX_DIM} (got ${clip.width}×${clip.height})`);
+        }
+        if (clip.x < 0 || clip.y < 0) {
+          issues.push(`x/y must be ≥ 0 (got ${clip.x},${clip.y})`);
+        }
+        if (issues.length > 0) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: `Invalid clip region: ${issues.join("; ")}` }],
+          };
+        }
+      }
       const page = await mgr.getPage(tabId);
       const effectiveQuality = quality ?? env.DEFAULT_SCREENSHOT_QUALITY;
       const effectiveMaxInlineBytes = maxInlineBytes ?? env.MAX_INLINE_BYTES;
@@ -1234,8 +1257,11 @@ Use cases: scraping article list URLs, link indexes, sitemap-like extraction.`,
       const links: Link[] = dedupeLinks(rawLinks);
       const capped = limit > 0 ? links.slice(0, limit) : links;
       const truncated = capped.length < links.length;
+      // Empty → clean `[]` + note instead of `[\n\n]` malformed array.
       const body =
-        "[\n" + capped.map((l) => JSON.stringify(l)).join(",\n") + "\n]";
+        capped.length === 0
+          ? `[]${selector ? `\n(no anchors found in elements matching "${selector}"${urlPattern ? ` for pattern /${urlPattern}/i` : ""})` : urlPattern ? `\n(no anchors matched pattern /${urlPattern}/i)` : ""}`
+          : "[\n" + capped.map((l) => JSON.stringify(l)).join(",\n") + "\n]";
       return {
         content: [
           {
@@ -1312,7 +1338,9 @@ Use when matchAll + links aren't enough — e.g. scraping data-id, data-price, a
       const capped = limit > 0 ? results.slice(0, limit) : results;
       const truncated = capped.length < results.length;
       const body =
-        "[\n" + capped.map((r) => JSON.stringify(r)).join(",\n") + "\n]";
+        capped.length === 0
+          ? `[]\n(selector "${selector}" matched no elements)`
+          : "[\n" + capped.map((r) => JSON.stringify(r)).join(",\n") + "\n]";
       return {
         content: [
           {
@@ -2119,11 +2147,33 @@ Merges the old scroll_up / scroll_down tools (0.4.0+). Pass direction="up" or "d
     try {
       const page = await mgr.getPage(tabId);
       const dy = direction === "up" ? -pixels : pixels;
-      await page.evaluate(`window.scrollBy(0, ${dy})`);
+      // Capture actual scroll position before/after so we can report the
+      // real delta — agents get misled when a fixed-viewport page silently
+      // refuses to scroll. page.scrollBy returns undefined so we measure
+      // window.scrollY ourselves + report "(no-op — page not scrollable …)"
+      // if nothing moved.
+      const result = await page.evaluate(
+        ({ yDelta }: { yDelta: number }) => {
+          const before = window.scrollY;
+          window.scrollBy(0, yDelta);
+          return { before, after: window.scrollY };
+        },
+        { yDelta: dy }
+      );
       await globalWait();
+      const actual = Math.abs(result.after - result.before);
+      const noOp = actual === 0;
+      const suffix = noOp
+        ? ` (no-op — page not scrollable in that direction, or already at edge)`
+        : actual !== pixels
+          ? ` (actual: ${actual}px — reached document edge)`
+          : "";
       return {
         content: [
-          { type: "text", text: `Scrolled ${direction} by ${pixels} pixels.` },
+          {
+            type: "text",
+            text: `Scrolled ${direction} by ${pixels} pixels${suffix}.`,
+          },
         ],
       };
     } catch (err) {
