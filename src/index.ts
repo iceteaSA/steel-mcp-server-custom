@@ -15,9 +15,9 @@ import {
   deriveDownloadFilename,
   detectFieldKind,
   findTitle,
+  interpretCheckboxValue,
   isBotWall,
   isBrowserClosedError,
-  isCheckboxTruthy,
   isSteelSessionStuck,
   matchesCookieHost,
   mimeToExt,
@@ -1459,9 +1459,12 @@ server.tool(
 
 Auto-detects field type and dispatches correctly:
 - \`<input type=text/email/tel/password/search/url/number/hidden>\` / \`<textarea>\` → page.fill
-- \`<input type=checkbox>\` → page.check or page.uncheck (value treated as truthy: "true"/"1"/"on"/"yes"/"checked" check, empty/"false"/"0" uncheck)
+- \`<input type=checkbox>\` — three value shapes:
+    - truthy token ("true"/"1"/"on"/"yes"/"checked"/"y") → page.check
+    - falsy token ("false"/"0"/"off"/"no"/"unchecked"/"n"/"") → page.uncheck
+    - other → targets the checkbox whose \`value\` attribute matches that string (same shape as radio); useful for groups like \`{selector: "input[name=topping]", value: "cheese"}\`
 - \`<input type=radio>\` → click the radio whose \`value\` attribute matches the given value (selector + value disambiguation)
-- \`<select>\` → page.selectOption (value by default; override per-field with \`kind: "label"\` or \`kind: "index"\`)
+- \`<select>\` → page.selectOption (value by default; override per-field with \`kind: "selectLabel"\` or \`kind: "selectIndex"\`)
 - \`<input type=date/time/datetime-local/month/week>\` → page.fill (ISO format, e.g. "2026-04-18")
 
 Per-field \`kind\` override forces a specific dispatch if auto-detect is wrong.
@@ -1536,12 +1539,22 @@ Processes fields sequentially; fails fast on the first missing selector unless \
             }
             filled.push({ selector: f.selector, kind });
           } else if (kind === "check") {
-            if (isCheckboxTruthy(f.value)) {
+            const intent = interpretCheckboxValue(f.value);
+            if (intent === "check") {
               await page.check(f.selector, { timeout });
-            } else {
+              filled.push({ selector: f.selector, kind });
+            } else if (intent === "uncheck") {
               await page.uncheck(f.selector, { timeout });
+              filled.push({ selector: f.selector, kind });
+            } else {
+              // selectByValue — value is neither truthy nor falsy token, so
+              // treat like radio and target the checkbox whose value attr matches.
+              // Mirrors user intuition for checkbox groups like
+              // `{selector: "input[name=topping]", value: "cheese"}`.
+              const fullSel = buildRadioSelector(f.selector, f.value);
+              await page.check(fullSel, { timeout });
+              filled.push({ selector: fullSel, kind: "check-by-value" });
             }
-            filled.push({ selector: f.selector, kind });
           } else if (kind === "radio") {
             const fullSel = buildRadioSelector(f.selector, f.value);
             await page.click(fullSel, { timeout });
@@ -1784,16 +1797,41 @@ Output path defaults to \`OUTPUT_DIR/<suggestedFilename>\`. Pass \`outputPath\` 
       try {
         const [download] = await Promise.all([
           page.waitForEvent("download", { timeout }),
-          // `page.goto` on a direct download URL raises ERR_ABORTED; suppress.
+          // `page.goto` on a direct download URL raises various messages
+          // depending on how Chromium decides to handle the response:
+          //   - ERR_ABORTED               (typical for attachment disposition)
+          //   - "Download is starting"    (newer Playwright/Chromium)
+          //   - "Cannot load download URL" (older Chromium)
+          // All three are expected — the download-event listener catches them.
           page.goto(url).catch((err) => {
             const msg = (err as Error).message;
-            if (!/ERR_ABORTED|net::ERR_ABORTED/.test(msg)) throw err;
+            if (
+              !/ERR_ABORTED|net::ERR_ABORTED|Download is starting|Cannot load download URL/i.test(
+                msg
+              )
+            ) {
+              throw err;
+            }
           }),
         ]);
         const suggested = download.suggestedFilename() || deriveDownloadFilename(url);
         const savePath = outputPath ?? path.join(env.OUTPUT_DIR, suggested);
         await fs.mkdir(path.dirname(savePath), { recursive: true });
-        await download.saveAs(savePath);
+        try {
+          await download.saveAs(savePath);
+        } catch (saveErr) {
+          // Steel's remote browser writes the download to its own container's
+          // /tmp. saveAs() then tries to copyfile from that path, which only
+          // exists on the remote host — ENOENT. Fall through to fetch path
+          // using the same session's cookies so auth-scoped downloads work.
+          const sMsg = (saveErr as Error).message;
+          if (/ENOENT|no such file or directory|copyfile/i.test(sMsg)) {
+            return {
+              content: [{ type: "text", text: await saveViaFetch("fetch-fallback-after-saveAs-ENOENT") }],
+            };
+          }
+          throw saveErr;
+        }
         const stat = await fs.stat(savePath);
         return {
           content: [
@@ -2088,9 +2126,13 @@ Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back"
       const verb =
         action === "back" ? "Went back" : action === "forward" ? "Went forward" : "Reloaded";
       // back/forward returns null when history entry missing — Chromium stays put.
+      // Require BOTH signals (null response AND URL unchanged) to flag a no-op,
+      // because Playwright sometimes returns null even on successful nav to
+      // about:blank or a data-URL (known edge case; URL comparison is the truth).
       const noOp =
         (action === "back" || action === "forward") &&
-        (navResult === null || beforeUrl === afterUrl);
+        navResult === null &&
+        beforeUrl === afterUrl;
       const suffix = noOp
         ? ` (no-op — no ${action === "back" ? "previous" : "next"} entry in tab history; URL unchanged)`
         : "";

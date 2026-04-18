@@ -158,14 +158,39 @@ export function detectFieldKind(
 }
 
 /**
- * Checkbox truthy-value test. fill_form accepts a string value for every
- * field; for checkboxes we need to decide check vs uncheck. Common truthy
- * tokens → true; anything else → false. Comparison is case-insensitive.
+ * Checkbox truthy/falsy token sets. fill_form accepts a string `value` for
+ * every field; for checkboxes the value has two possible meanings:
+ *
+ *   1. Boolean intent — check ("true"/"1"/"yes"/...) or uncheck ("false"/"0"/...)
+ *      the checkbox(es) matched by `selector`.
+ *   2. Option-value intent — when `value` is neither truthy nor falsy token,
+ *      treat it like a radio: click the specific checkbox in the group whose
+ *      `value` attribute equals the given string. This matches user intuition
+ *      for HTML checkbox groups like `name=topping value=cheese`.
  */
 const CHECKBOX_TRUTHY = new Set(["true", "1", "on", "yes", "checked", "y"]);
+const CHECKBOX_FALSY = new Set([
+  "false",
+  "0",
+  "off",
+  "no",
+  "unchecked",
+  "n",
+  "",
+]);
 
+export type CheckboxIntent = "check" | "uncheck" | "selectByValue";
+
+export function interpretCheckboxValue(value: string): CheckboxIntent {
+  const v = value.toLowerCase();
+  if (CHECKBOX_TRUTHY.has(v)) return "check";
+  if (CHECKBOX_FALSY.has(v)) return "uncheck";
+  return "selectByValue";
+}
+
+/** Back-compat shim — delegates to interpretCheckboxValue for existing callers. */
 export function isCheckboxTruthy(value: string): boolean {
-  return CHECKBOX_TRUTHY.has(value.toLowerCase());
+  return interpretCheckboxValue(value) === "check";
 }
 
 /**

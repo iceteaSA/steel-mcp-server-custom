@@ -7,6 +7,7 @@ import {
   deriveDownloadFilename,
   detectFieldKind,
   findTitle,
+  interpretCheckboxValue,
   isBotWall,
   isBrowserClosedError,
   isCheckboxTruthy,
@@ -271,17 +272,33 @@ describe("detectFieldKind", () => {
   });
 });
 
-describe("isCheckboxTruthy", () => {
-  it("recognizes common truthy tokens case-insensitively", () => {
+describe("interpretCheckboxValue", () => {
+  it("returns 'check' for truthy tokens", () => {
     for (const v of ["true", "1", "on", "yes", "checked", "y"]) {
-      expect(isCheckboxTruthy(v)).toBe(true);
-      expect(isCheckboxTruthy(v.toUpperCase())).toBe(true);
+      expect(interpretCheckboxValue(v)).toBe("check");
+      expect(interpretCheckboxValue(v.toUpperCase())).toBe("check");
     }
   });
-  it("rejects falsy tokens", () => {
-    for (const v of ["", "false", "0", "off", "no", "unchecked", "n", "null", "random"]) {
-      expect(isCheckboxTruthy(v)).toBe(false);
+  it("returns 'uncheck' for falsy tokens", () => {
+    for (const v of ["", "false", "0", "off", "no", "unchecked", "n"]) {
+      expect(interpretCheckboxValue(v)).toBe("uncheck");
+      expect(interpretCheckboxValue(v.toUpperCase())).toBe("uncheck");
     }
+  });
+  it("returns 'selectByValue' for option-like strings", () => {
+    // Real-world checkbox group values — user intent is "pick this option".
+    for (const v of ["cheese", "bacon", "red", "option-1", "premium", "null"]) {
+      expect(interpretCheckboxValue(v)).toBe("selectByValue");
+    }
+  });
+});
+
+describe("isCheckboxTruthy (back-compat)", () => {
+  it("returns true only for truthy tokens", () => {
+    expect(isCheckboxTruthy("true")).toBe(true);
+    expect(isCheckboxTruthy("1")).toBe(true);
+    expect(isCheckboxTruthy("cheese")).toBe(false); // selectByValue ≠ true
+    expect(isCheckboxTruthy("false")).toBe(false);
   });
 });
 

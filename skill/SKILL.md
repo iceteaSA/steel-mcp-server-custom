@@ -327,7 +327,10 @@ get_current_url()   # confirm landing, not error
 Auto-detects each field's type and dispatches correctly (0.6.0+):
 - text/email/tel/password/url/number/textarea/date/time → `page.fill`
 - `<select>` → `page.selectOption` (value by default; use `kind: "selectLabel"` for label or `kind: "selectIndex"` for index)
-- checkboxes → `page.check`/`page.uncheck` based on truthy/falsy string value
+- checkboxes — three value shapes:
+  - truthy token (`"true"`, `"1"`, `"on"`, `"yes"`, `"checked"`, `"y"`) → `page.check`
+  - falsy token (`"false"`, `"0"`, `"off"`, `"no"`, `"unchecked"`, `"n"`, `""`) → `page.uncheck`
+  - anything else → treats value as the option-value; targets the specific checkbox whose `value` attribute matches and checks it (same shape as radio)
 - radios → click the radio whose `value` attribute matches the given value
 
 ```
@@ -335,7 +338,9 @@ fill_form(
   fields: [
     {selector: "input[name=email]", value: "user@example.com"},
     {selector: "input[name=password]", value: "secret"},
-    {selector: "input[name=newsletter]", value: "yes"},          # checkbox
+    {selector: "input[name=newsletter]", value: "yes"},          # checkbox truthy → check
+    {selector: "input[name=topping]", value: "cheese"},          # checkbox group → check the cheese option
+    {selector: "input[name=topping]", value: "bacon"},           # same group → also check bacon
     {selector: "input[name=plan]", value: "pro"},                # radio group
     {selector: "select[name=country]", value: "za"},             # select by value
     {selector: "select[name=size]", value: "Medium", kind: "selectLabel"},
