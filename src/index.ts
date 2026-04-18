@@ -2149,13 +2149,14 @@ Merges the old scroll_up / scroll_down tools (0.4.0+). Pass direction="up" or "d
       const dy = direction === "up" ? -pixels : pixels;
       // Capture actual scroll position before/after so we can report the
       // real delta — agents get misled when a fixed-viewport page silently
-      // refuses to scroll. page.scrollBy returns undefined so we measure
-      // window.scrollY ourselves + report "(no-op — page not scrollable …)"
-      // if nothing moved.
+      // refuses to scroll. Force `behavior: "instant"` so CSS
+      // `scroll-behavior: smooth` doesn't make scrollBy async (without this
+      // the after-value would still be the before-value and we'd mis-report
+      // every scroll on smooth-scrolling sites as a no-op).
       const result = await page.evaluate(
         ({ yDelta }: { yDelta: number }) => {
           const before = window.scrollY;
-          window.scrollBy(0, yDelta);
+          window.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
           return { before, after: window.scrollY };
         },
         { yDelta: dy }
