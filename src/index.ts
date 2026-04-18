@@ -9,12 +9,18 @@ import { chromium, Browser, BrowserContext, Page } from "playwright";
 import { Steel } from "steel-sdk";
 import { EnvSchema } from "./env";
 import {
+  buildRadioSelector,
   capText,
   dedupeLinks,
+  deriveDownloadFilename,
+  detectFieldKind,
   findTitle,
   isBotWall,
   isBrowserClosedError,
+  isCheckboxTruthy,
   isSteelSessionStuck,
+  matchesCookieHost,
+  mimeToExt,
   pickPrimaryLink,
   type Link,
 } from "./helpers";
@@ -34,7 +40,12 @@ const env = EnvSchema.parse(process.env);
 // BrowserManager — wraps Playwright browser lifecycle (Steel or local)
 // -----------------------------------------------------------------------------
 
-type ConsoleMessage = { level: string; text: string; timestamp: number };
+type ConsoleMessage = {
+  level: string;
+  text: string;
+  timestamp: number;
+  location?: { url: string; lineNumber: number; columnNumber: number };
+};
 
 class BrowserManager {
   private browser: Browser | undefined;
@@ -295,12 +306,30 @@ class BrowserManager {
     if (this.listenedPages.has(page)) return;
     this.listenedPages.add(page);
     page.on("console", (msg) => {
+      const loc = msg.location();
       this.consoleLogs.push({
         level: msg.type(),
         text: msg.text(),
         timestamp: Date.now(),
+        location:
+          loc && loc.url
+            ? { url: loc.url, lineNumber: loc.lineNumber, columnNumber: loc.columnNumber }
+            : undefined,
       });
       // Ring buffer — keep at most 500 entries.
+      if (this.consoleLogs.length > 500) {
+        this.consoleLogs.splice(0, this.consoleLogs.length - 500);
+      }
+    });
+    // Also capture unhandled pageerror (thrown exceptions, promise rejections
+    // not caught by page code). These don't appear on `console` — they surface
+    // as `pageerror` events. Treat as level=error for user-facing filter.
+    page.on("pageerror", (err) => {
+      this.consoleLogs.push({
+        level: "error",
+        text: `[pageerror] ${err.name}: ${err.message}`,
+        timestamp: Date.now(),
+      });
       if (this.consoleLogs.length > 500) {
         this.consoleLogs.splice(0, this.consoleLogs.length - 500);
       }
@@ -680,10 +709,10 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
       ),
     format: z
       .enum(["png", "jpeg", "webp"])
-      .default("png")
+      .default("webp")
       .optional()
       .describe(
-        "Image format. 'webp' = smallest files, requires Chromium ≥ 88 (uses CDP directly). 'jpeg' = smaller than PNG, widely supported. Default: 'png'."
+        "Image format. 'webp' (default) = smallest files, requires Chromium ≥ 88 (uses CDP directly). 'jpeg' = smaller than PNG, widely supported. 'png' = lossless, largest."
       ),
     quality: z
       .number()
@@ -735,7 +764,7 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
   async ({
     outputMode = "inline",
     outputPath,
-    format = "png",
+    format = "webp",
     quality,
     fullPage = false,
     scale = 1.0,
@@ -1142,17 +1171,24 @@ Use cases: scraping article list URLs, link indexes, sitemap-like extraction.`,
       // dedup via shared helper — testable, matches matchAll semantics.
       const rawLinks = await page.evaluate(
         ({ sel, pat }: { sel: string | null; pat: string | null }) => {
-          const root = sel ? document.querySelector(sel) : document.body;
-          if (!root) return [];
+          // When selector set, scope to querySelectorAll — any element matching
+          // the selector contributes its descendant anchors. This mirrors the
+          // expected "scope by list item" semantics used elsewhere in the MCP.
+          const roots: Element[] = sel
+            ? Array.from(document.querySelectorAll(sel))
+            : [document.body];
+          if (roots.length === 0) return [];
           const re = pat ? new RegExp(pat, "i") : null;
-          const anchors = Array.from(root.querySelectorAll("a[href]"));
           const out: Array<{ text: string; href: string }> = [];
-          for (const a of anchors) {
-            const href = (a as HTMLAnchorElement).href;
-            if (!href) continue;
-            if (re && !re.test(href)) continue;
-            const text = (a.textContent ?? "").replace(/\s+/g, " ").trim();
-            out.push({ text, href });
+          for (const root of roots) {
+            const anchors = Array.from(root.querySelectorAll("a[href]"));
+            for (const a of anchors) {
+              const href = (a as HTMLAnchorElement).href;
+              if (!href) continue;
+              if (re && !re.test(href)) continue;
+              const text = (a.textContent ?? "").replace(/\s+/g, " ").trim();
+              out.push({ text, href });
+            }
           }
           return out;
         },
@@ -1188,7 +1224,7 @@ server.tool(
   "get_attrs",
   `Extract specific attributes from elements matching a CSS selector.
 
-Returns a JSON array of objects — one per matched element — containing only the attributes you asked for. Special values: "text" returns the element's textContent (whitespace-collapsed), "html" returns outerHTML.
+Returns a JSON array of objects — one per matched element — containing only the attributes you asked for. Special values: "text" returns the element's innerText (preserves whitespace between block-level children, same as what users see), "html" returns outerHTML.
 
 Use when matchAll + links aren't enough — e.g. scraping data-id, data-price, aria-label, src, alt, or structured data from custom markup.`,
   {
@@ -1200,7 +1236,7 @@ Use when matchAll + links aren't enough — e.g. scraping data-id, data-price, a
     attrs: z
       .array(z.string())
       .describe(
-        "Attribute names to extract. Special: 'text' = textContent, 'html' = outerHTML. Examples: ['href', 'data-id'], ['src', 'alt', 'text']."
+        "Attribute names to extract. Special: 'text' = innerText (visible text with proper whitespace), 'html' = outerHTML. Examples: ['href', 'data-id'], ['src', 'alt', 'text']."
       ),
     limit: z
       .number()
@@ -1219,9 +1255,12 @@ Use when matchAll + links aren't enough — e.g. scraping data-id, data-price, a
             const out: Record<string, string | null> = {};
             for (const name of attrNames) {
               if (name === "text") {
-                out[name] = (el.textContent ?? "")
-                  .replace(/\s+/g, " ")
-                  .trim();
+                // Use innerText (layout-aware, inserts whitespace between
+                // block-level children) then collapse runs. textContent drops
+                // all visual whitespace → "Header1h agoTitle" style jams.
+                const raw =
+                  (el as HTMLElement).innerText ?? el.textContent ?? "";
+                out[name] = raw.replace(/\s+/g, " ").trim();
               } else if (name === "html") {
                 out[name] = (el as HTMLElement).outerHTML ?? null;
               } else {
@@ -1416,22 +1455,33 @@ server.tool(
 // fill_form -------------------------------------------------------------------
 server.tool(
   "fill_form",
-  `Fill multiple form fields in one call. Replaces N separate \`type\` calls for sign-in / sign-up / search forms.
+  `Fill multiple form fields in one call. Replaces N separate tool calls for sign-in, sign-up, checkout, and search forms.
 
-Each field is filled with \`page.fill(selector, value)\` (atomic replace — equivalent to \`type(clear: true)\`). Processes fields sequentially; fails fast on the first missing selector unless \`skipMissing\` is set.
+Auto-detects field type and dispatches correctly:
+- \`<input type=text/email/tel/password/search/url/number/hidden>\` / \`<textarea>\` → page.fill
+- \`<input type=checkbox>\` → page.check or page.uncheck (value treated as truthy: "true"/"1"/"on"/"yes"/"checked" check, empty/"false"/"0" uncheck)
+- \`<input type=radio>\` → click the radio whose \`value\` attribute matches the given value (selector + value disambiguation)
+- \`<select>\` → page.selectOption (value by default; override per-field with \`kind: "label"\` or \`kind: "index"\`)
+- \`<input type=date/time/datetime-local/month/week>\` → page.fill (ISO format, e.g. "2026-04-18")
 
-Pass \`submitSelector\` to click a submit button after all fields are filled (or use per-field \`submit: true\` on the last field to press Enter there instead).`,
+Per-field \`kind\` override forces a specific dispatch if auto-detect is wrong.
+
+Processes fields sequentially; fails fast on the first missing selector unless \`skipMissing\` is set. Pass \`submitSelector\` to click a submit button after all fields are filled.`,
   {
     fields: z
       .array(
         z.object({
-          selector: z.string().describe("CSS selector for the input/textarea."),
-          value: z.string().describe("Value to set (empty string clears)."),
+          selector: z.string().describe("CSS selector. For radios: match the group (e.g. 'input[name=size]') — value param picks which option."),
+          value: z.string().describe("Value to set. For radios/selects: the option value. For checkboxes: truthy/falsy string."),
           submit: z.boolean().optional().describe("Press Enter after this field. Default: false."),
+          kind: z
+            .enum(["text", "check", "radio", "select", "selectLabel", "selectIndex"])
+            .optional()
+            .describe("Force a specific dispatch. Omit for auto-detect."),
         })
       )
       .min(1)
-      .describe("Ordered list of {selector, value, submit?} fields to fill."),
+      .describe("Ordered list of fields to fill."),
     submitSelector: z
       .string()
       .optional()
@@ -1451,14 +1501,56 @@ Pass \`submitSelector\` to click a submit button after all fields are filled (or
     tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
   async ({ fields, submitSelector, skipMissing = false, timeout = 10000, tabId }) => {
+    const detectKind = async (
+      page: Page,
+      selector: string
+    ): Promise<"text" | "check" | "radio" | "select"> => {
+      const info = await page.evaluate((sel: string) => {
+        const el = document.querySelector(sel) as HTMLElement | null;
+        if (!el) return null;
+        const tag = el.tagName;
+        const type = (el as HTMLInputElement).type ?? "";
+        return { tag, type };
+      }, selector);
+      if (!info) return "text";
+      return detectFieldKind(info.tag, info.type);
+    };
+
     try {
       const page = await mgr.getPage(tabId);
-      const filled: string[] = [];
+      const filled: Array<{ selector: string; kind: string }> = [];
       const skipped: string[] = [];
+
       for (const f of fields) {
         try {
-          await page.fill(f.selector, f.value, { timeout });
-          filled.push(f.selector);
+          const kind = f.kind ?? (await detectKind(page, f.selector));
+          if (kind === "select" || kind === "selectLabel" || kind === "selectIndex") {
+            if (kind === "selectLabel") {
+              await page.selectOption(f.selector, { label: f.value }, { timeout });
+            } else if (kind === "selectIndex") {
+              const idx = parseInt(f.value, 10);
+              if (Number.isNaN(idx)) throw new Error(`selectIndex expects numeric value, got "${f.value}"`);
+              await page.selectOption(f.selector, { index: idx }, { timeout });
+            } else {
+              await page.selectOption(f.selector, f.value, { timeout });
+            }
+            filled.push({ selector: f.selector, kind });
+          } else if (kind === "check") {
+            if (isCheckboxTruthy(f.value)) {
+              await page.check(f.selector, { timeout });
+            } else {
+              await page.uncheck(f.selector, { timeout });
+            }
+            filled.push({ selector: f.selector, kind });
+          } else if (kind === "radio") {
+            const fullSel = buildRadioSelector(f.selector, f.value);
+            await page.click(fullSel, { timeout });
+            filled.push({ selector: fullSel, kind });
+          } else {
+            // text / date / time / textarea / password / email / etc. — page.fill handles all
+            await page.fill(f.selector, f.value, { timeout });
+            filled.push({ selector: f.selector, kind });
+          }
           if (f.submit) await page.press(f.selector, "Enter");
         } catch (err) {
           if (skipMissing) {
@@ -1470,7 +1562,7 @@ Pass \`submitSelector\` to click a submit button after all fields are filled (or
             content: [
               {
                 type: "text",
-                text: `Failed on field "${f.selector}": ${(err as Error).message}\nFilled before failure: ${filled.join(", ") || "(none)"}`,
+                text: `Failed on field "${f.selector}": ${(err as Error).message}\nFilled before failure: ${filled.map((x) => x.selector).join(", ") || "(none)"}`,
               },
             ],
           };
@@ -1481,7 +1573,10 @@ Pass \`submitSelector\` to click a submit button after all fields are filled (or
       }
       await globalWait();
       const lines = [`Filled ${filled.length}/${fields.length} field(s).`];
-      if (filled.length) lines.push(`  ok: ${filled.join(", ")}`);
+      if (filled.length) {
+        const byKind = filled.map((x) => `${x.selector} [${x.kind}]`).join(", ");
+        lines.push(`  ok: ${byKind}`);
+      }
       if (skipped.length) lines.push(`  skipped: ${skipped.join(", ")}`);
       if (submitSelector) lines.push(`Clicked submit: ${submitSelector}`);
       return { content: [{ type: "text", text: lines.join("\n") }] };
@@ -1495,29 +1590,87 @@ Pass \`submitSelector\` to click a submit button after all fields are filled (or
 // get_cookies -----------------------------------------------------------------
 server.tool(
   "get_cookies",
-  `Return browser cookies for the shared context. Optionally filter by one or more URLs.
+  `Return browser cookies for the shared context. Filter by URL(s) or domain(s).
 
-Use for debugging auth flows or persisting a session to re-inject later via \`set_cookies\`.`,
+Use for debugging auth flows or persisting a session to re-inject later via \`set_cookies\`.
+
+CONTEXT BUDGET — shared browser contexts can hold hundreds of cookies across many sites. Unfiltered calls are capped by \`limit\` (default 50). Prefer \`domain\` for site-scoped queries — simpler and more reliable than \`urls\` which must exactly match host + path + scheme.`,
   {
     urls: z
       .array(z.string())
       .optional()
-      .describe("Optional list of URLs to filter by. If omitted, returns all cookies in the context."),
+      .describe(
+        "Optional list of full URLs to filter by (Playwright-style match: host + path + scheme). If Playwright's exact-match returns nothing, falls back to host-contains match."
+      ),
+    domain: z
+      .union([z.string(), z.array(z.string())])
+      .optional()
+      .describe(
+        "Optional domain substring(s) to filter by (e.g. 'github.com' matches '.github.com' + 'www.github.com'). Preferred over `urls` for site-scoped queries."
+      ),
+    limit: z
+      .number()
+      .optional()
+      .describe("Max cookies returned. Default 50. Set 0 for no cap."),
   },
-  async ({ urls }) => {
+  async ({ urls, domain, limit }) => {
     try {
       await mgr.initialize();
-      const cookies = await mgr.browserContext!.cookies(urls);
+      const cap = limit === undefined ? 50 : limit;
+      let cookies = await mgr.browserContext!.cookies(urls);
+
+      // Fallback: if urls filter returned nothing, some sites store cookies
+      // with domain shapes Playwright's matcher rejects (trailing dot, case).
+      // Retry with full-context scan + host-contains match.
+      if (urls && urls.length > 0 && cookies.length === 0) {
+        const all = await mgr.browserContext!.cookies();
+        const hosts = urls
+          .map((u) => {
+            try {
+              return new URL(u).hostname;
+            } catch {
+              return u;
+            }
+          })
+          .filter(Boolean);
+        cookies = all.filter((c) =>
+          hosts.some((h) => matchesCookieHost(c.domain, h))
+        );
+      }
+
+      // Domain filter (substring match — handles leading-dot + subdomain quirks)
+      if (domain) {
+        const domains = (Array.isArray(domain) ? domain : [domain]).map((d) => d.toLowerCase());
+        cookies = cookies.filter((c) => {
+          const cd = (c.domain || "").toLowerCase();
+          return domains.some((d) => cd.includes(d));
+        });
+      }
+
+      const total = cookies.length;
+      const truncated = cap > 0 && total > cap;
+      if (truncated) {
+        cookies = cookies.slice(0, cap);
+      }
+
+      if (total === 0) {
+        const hint = urls
+          ? " (no match for urls; try the `domain` param instead)"
+          : domain
+            ? " (no match for domain)"
+            : "";
+        return {
+          content: [{ type: "text", text: `No cookies in the browser context.${hint}` }],
+        };
+      }
+
+      const body = JSON.stringify(cookies, null, 2);
+      const footer = truncated
+        ? `\n\n[CAPPED — ${total} total cookies in context, returning first ${cap}. Set limit=0 or use domain/urls filter for full list.]`
+        : "";
+
       return {
-        content: [
-          {
-            type: "text",
-            text:
-              cookies.length === 0
-                ? "No cookies in the browser context."
-                : JSON.stringify(cookies, null, 2),
-          },
-        ],
+        content: [{ type: "text", text: body + footer }],
       };
     } catch (err) {
       const error = err as Error;
@@ -1569,13 +1722,20 @@ Use to restore a logged-in session from a saved dump without running the login f
 // download_file ---------------------------------------------------------------
 server.tool(
   "download_file",
-  `Navigate to a URL that triggers a download, capture it, save to disk. Returns the saved path + byte size.
+  `Fetch a URL and save its body to disk. Handles two delivery shapes:
 
-Use when a URL serves a binary (PDF, CSV, etc.) that the browser would normally open in a viewer or save via the download bar. \`page.goto\` on such a URL usually raises \`ERR_ABORTED\` — this tool uses Playwright's \`waitForEvent('download')\` pattern so the download completes cleanly regardless.
+1) **Attachment downloads** — URLs that serve \`Content-Disposition: attachment\`
+   (or a MIME that Chromium saves by default). Uses Playwright's
+   \`waitForEvent('download')\` — works even when \`page.goto\` raises \`ERR_ABORTED\`.
+2) **Inline binaries** — URLs that serve \`application/octet-stream\`, PDFs, CSVs,
+   or API-served bytes WITHOUT a Content-Disposition header. Chromium views
+   these inline, so no download event fires. When the download event times out,
+   this tool falls back to \`context.request.fetch(url)\` — reuses the browser
+   session's cookies/auth headers — and writes the body directly to disk.
 
 Output path defaults to \`OUTPUT_DIR/<suggestedFilename>\`. Pass \`outputPath\` to override.`,
   {
-    url: z.string().describe("The download URL to navigate to."),
+    url: z.string().describe("The download URL to fetch."),
     outputPath: z
       .string()
       .optional()
@@ -1586,33 +1746,74 @@ Output path defaults to \`OUTPUT_DIR/<suggestedFilename>\`. Pass \`outputPath\` 
       .max(120000)
       .default(30000)
       .optional()
-      .describe("Timeout in ms for the download event. Default: 30000."),
+      .describe("Timeout in ms for the download event (before falling back to fetch). Default: 30000."),
+    forceFetch: z
+      .boolean()
+      .default(false)
+      .optional()
+      .describe("Skip the download-event path and go straight to context.request.fetch. Useful when you know the URL has no Content-Disposition."),
     tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
-  async ({ url, outputPath, timeout = 30000, tabId }) => {
-    try {
-      const page = await mgr.getPage(tabId);
-      const [download] = await Promise.all([
-        page.waitForEvent("download", { timeout }),
-        // `page.goto` on a direct download URL raises ERR_ABORTED; suppress.
-        page.goto(url).catch((err) => {
-          const msg = (err as Error).message;
-          if (!/ERR_ABORTED|net::ERR_ABORTED/.test(msg)) throw err;
-        }),
-      ]);
-      const suggested = download.suggestedFilename() || `download_${Date.now()}`;
+  async ({ url, outputPath, timeout = 30000, forceFetch = false, tabId }) => {
+    const saveViaFetch = async (via: string): Promise<string> => {
+      const resp = await mgr.browserContext!.request.fetch(url, { timeout: timeout + 5000 });
+      if (!resp.ok()) {
+        throw new Error(`fetch fallback HTTP ${resp.status()} ${resp.statusText()}`);
+      }
+      const body = await resp.body();
+      let suggested = deriveDownloadFilename(url);
+      if (!path.extname(suggested)) {
+        const ext = mimeToExt(resp.headers()["content-type"] ?? null);
+        if (ext) suggested += ext;
+      }
       const savePath = outputPath ?? path.join(env.OUTPUT_DIR, suggested);
       await fs.mkdir(path.dirname(savePath), { recursive: true });
-      await download.saveAs(savePath);
+      await fs.writeFile(savePath, body);
       const stat = await fs.stat(savePath);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Downloaded ${suggested}\nSaved to: ${savePath}\nSize: ${stat.size.toLocaleString()} bytes`,
-          },
-        ],
-      };
+      return `Downloaded ${suggested} [via ${via}]\nSaved to: ${savePath}\nSize: ${stat.size.toLocaleString()} bytes`;
+    };
+
+    try {
+      if (forceFetch) {
+        return {
+          content: [{ type: "text", text: await saveViaFetch("forceFetch") }],
+        };
+      }
+
+      const page = await mgr.getPage(tabId);
+      try {
+        const [download] = await Promise.all([
+          page.waitForEvent("download", { timeout }),
+          // `page.goto` on a direct download URL raises ERR_ABORTED; suppress.
+          page.goto(url).catch((err) => {
+            const msg = (err as Error).message;
+            if (!/ERR_ABORTED|net::ERR_ABORTED/.test(msg)) throw err;
+          }),
+        ]);
+        const suggested = download.suggestedFilename() || deriveDownloadFilename(url);
+        const savePath = outputPath ?? path.join(env.OUTPUT_DIR, suggested);
+        await fs.mkdir(path.dirname(savePath), { recursive: true });
+        await download.saveAs(savePath);
+        const stat = await fs.stat(savePath);
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Downloaded ${suggested} [via download-event]\nSaved to: ${savePath}\nSize: ${stat.size.toLocaleString()} bytes`,
+            },
+          ],
+        };
+      } catch (err) {
+        const msg = (err as Error).message;
+        // Timeout is the expected failure mode for inline-served binaries.
+        // Fall through to the HTTP fetch fallback. Re-throw for other errors.
+        if (!/waitForEvent.*[Tt]imeout|Timeout.*waitForEvent|Timeout.*download/.test(msg)) {
+          throw err;
+        }
+        return {
+          content: [{ type: "text", text: await saveViaFetch("fetch-fallback") }],
+        };
+      }
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: error.message }] };
@@ -1798,7 +1999,14 @@ CONTEXT BUDGET — console output can be large on noisy pages. Use the level fil
       }
 
       const formatted = slice
-        .map((m) => `[${new Date(m.timestamp).toISOString()}] [${m.level.toUpperCase()}] ${m.text}`)
+        .map((m) => {
+          const base = `[${new Date(m.timestamp).toISOString()}] [${m.level.toUpperCase()}] ${m.text}`;
+          if (!m.location || !m.location.url) return base;
+          const { url, lineNumber, columnNumber } = m.location;
+          const locStr =
+            lineNumber || columnNumber ? `${url}:${lineNumber}:${columnNumber}` : url;
+          return `${base}\n    at ${locStr}`;
+        })
         .join("\n");
 
       return {
@@ -1866,18 +2074,27 @@ Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back"
   async ({ action, tabId }) => {
     try {
       const page = await mgr.getPage(tabId);
+      const beforeUrl = page.url();
+      let navResult: Awaited<ReturnType<typeof page.goBack>> | null = null;
       if (action === "back") {
-        await page.goBack({ waitUntil: "commit", timeout: 10000 });
+        navResult = await page.goBack({ waitUntil: "commit", timeout: 10000 });
       } else if (action === "forward") {
-        await page.goForward({ waitUntil: "commit", timeout: 10000 });
+        navResult = await page.goForward({ waitUntil: "commit", timeout: 10000 });
       } else {
         await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
       }
       await globalWait();
-      const url = page.url();
+      const afterUrl = page.url();
       const verb =
         action === "back" ? "Went back" : action === "forward" ? "Went forward" : "Reloaded";
-      return { content: [{ type: "text", text: `${verb}.\nCurrent URL: ${url}` }] };
+      // back/forward returns null when history entry missing — Chromium stays put.
+      const noOp =
+        (action === "back" || action === "forward") &&
+        (navResult === null || beforeUrl === afterUrl);
+      const suffix = noOp
+        ? ` (no-op — no ${action === "back" ? "previous" : "next"} entry in tab history; URL unchanged)`
+        : "";
+      return { content: [{ type: "text", text: `${verb}${suffix}.\nCurrent URL: ${afterUrl}` }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: error.message }] };

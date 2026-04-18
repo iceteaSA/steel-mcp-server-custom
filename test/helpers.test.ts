@@ -1,12 +1,18 @@
 import { describe, it, expect } from "vitest";
 import {
+  buildRadioSelector,
   capText,
   collapseWhitespace,
   dedupeLinks,
+  deriveDownloadFilename,
+  detectFieldKind,
   findTitle,
   isBotWall,
   isBrowserClosedError,
+  isCheckboxTruthy,
   isSteelSessionStuck,
+  matchesCookieHost,
+  mimeToExt,
   pickPrimaryLink,
   type Link,
 } from "../src/helpers";
@@ -226,5 +232,173 @@ describe("isBrowserClosedError", () => {
     expect(isBrowserClosedError(null)).toBe(false);
     expect(isBrowserClosedError(undefined)).toBe(false);
     expect(isBrowserClosedError(new Error(""))).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// fill_form helpers (0.6.0 rewrite)
+// ---------------------------------------------------------------------------
+
+describe("detectFieldKind", () => {
+  it("maps SELECT to select", () => {
+    expect(detectFieldKind("SELECT", "")).toBe("select");
+    expect(detectFieldKind("select", "")).toBe("select"); // case-insensitive tag
+  });
+  it("maps input[type=checkbox] to check", () => {
+    expect(detectFieldKind("INPUT", "checkbox")).toBe("check");
+    expect(detectFieldKind("INPUT", "CHECKBOX")).toBe("check"); // case-insensitive type
+  });
+  it("maps input[type=radio] to radio", () => {
+    expect(detectFieldKind("INPUT", "radio")).toBe("radio");
+  });
+  it("maps text/email/tel/password/search/url/number to text", () => {
+    for (const t of ["text", "email", "tel", "password", "search", "url", "number"]) {
+      expect(detectFieldKind("INPUT", t)).toBe("text");
+    }
+  });
+  it("maps date/time/datetime-local to text (page.fill handles ISO format)", () => {
+    for (const t of ["date", "time", "datetime-local", "month", "week"]) {
+      expect(detectFieldKind("INPUT", t)).toBe("text");
+    }
+  });
+  it("maps TEXTAREA to text", () => {
+    expect(detectFieldKind("TEXTAREA", "")).toBe("text");
+  });
+  it("falls back to text for unknown tags/null/undefined", () => {
+    expect(detectFieldKind(null, null)).toBe("text");
+    expect(detectFieldKind(undefined, undefined)).toBe("text");
+    expect(detectFieldKind("DIV", "")).toBe("text");
+  });
+});
+
+describe("isCheckboxTruthy", () => {
+  it("recognizes common truthy tokens case-insensitively", () => {
+    for (const v of ["true", "1", "on", "yes", "checked", "y"]) {
+      expect(isCheckboxTruthy(v)).toBe(true);
+      expect(isCheckboxTruthy(v.toUpperCase())).toBe(true);
+    }
+  });
+  it("rejects falsy tokens", () => {
+    for (const v of ["", "false", "0", "off", "no", "unchecked", "n", "null", "random"]) {
+      expect(isCheckboxTruthy(v)).toBe(false);
+    }
+  });
+});
+
+describe("buildRadioSelector", () => {
+  it("appends [value=X] when selector has no value filter", () => {
+    expect(buildRadioSelector("input[name=size]", "medium")).toBe(
+      'input[name=size][value="medium"]'
+    );
+  });
+  it("preserves selector unchanged when value filter already present", () => {
+    expect(buildRadioSelector("input[name=size][value=xl]", "xl")).toBe(
+      "input[name=size][value=xl]"
+    );
+    expect(buildRadioSelector('input[name=size][value~="big"]', "big")).toBe(
+      'input[name=size][value~="big"]'
+    );
+  });
+  it("escapes double quotes in value", () => {
+    expect(buildRadioSelector("input[name=x]", 'a"b')).toBe(
+      'input[name=x][value="a\\"b"]'
+    );
+  });
+  it("escapes backslashes in value", () => {
+    expect(buildRadioSelector("input[name=x]", "a\\b")).toBe(
+      'input[name=x][value="a\\\\b"]'
+    );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// get_cookies host-match fallback (0.6.0)
+// ---------------------------------------------------------------------------
+
+describe("matchesCookieHost", () => {
+  it("matches exact host", () => {
+    expect(matchesCookieHost("github.com", "github.com")).toBe(true);
+  });
+  it("matches cookie leading-dot domain against subdomain host", () => {
+    expect(matchesCookieHost(".github.com", "api.github.com")).toBe(true);
+    expect(matchesCookieHost(".github.com", "github.com")).toBe(true);
+  });
+  it("matches bare domain against subdomain host", () => {
+    expect(matchesCookieHost("github.com", "api.github.com")).toBe(true);
+  });
+  it("matches subdomain cookie against parent host (bare hostname filter)", () => {
+    expect(matchesCookieHost("api.github.com", "github.com")).toBe(true);
+  });
+  it("is case-insensitive", () => {
+    expect(matchesCookieHost("GitHub.com", "api.GITHUB.com")).toBe(true);
+  });
+  it("does not match unrelated hosts", () => {
+    expect(matchesCookieHost("github.com", "gitlab.com")).toBe(false);
+    expect(matchesCookieHost("example.com", "attacker-example.com")).toBe(false);
+  });
+  it("handles null/undefined/empty", () => {
+    expect(matchesCookieHost(null, "github.com")).toBe(false);
+    expect(matchesCookieHost("github.com", null)).toBe(false);
+    expect(matchesCookieHost("", "")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// download_file filename derivation (0.6.0)
+// ---------------------------------------------------------------------------
+
+describe("deriveDownloadFilename", () => {
+  it("uses last path segment when reasonable", () => {
+    expect(deriveDownloadFilename("https://example.com/files/report.pdf")).toBe(
+      "report.pdf"
+    );
+    expect(deriveDownloadFilename("https://example.com/docs/2026/04/data.csv")).toBe(
+      "data.csv"
+    );
+  });
+  it("falls back to timestamped name for root URLs", () => {
+    const result = deriveDownloadFilename("https://example.com/");
+    expect(result).toMatch(/^download_\d+$/);
+  });
+  it("falls back to timestamped name for empty path", () => {
+    const result = deriveDownloadFilename("https://example.com");
+    expect(result).toMatch(/^download_\d+$/);
+  });
+  it("strips trailing slash when deriving", () => {
+    expect(deriveDownloadFilename("https://example.com/files/doc/")).toBe("doc");
+  });
+  it("falls back on malformed URLs", () => {
+    const result = deriveDownloadFilename("not a url");
+    expect(result).toMatch(/^download_\d+$/);
+  });
+  it("rejects pathologically long segments", () => {
+    const longSeg = "a".repeat(250);
+    const result = deriveDownloadFilename(`https://example.com/${longSeg}`);
+    expect(result).toMatch(/^download_\d+$/);
+  });
+});
+
+describe("mimeToExt", () => {
+  it("maps common MIME types", () => {
+    expect(mimeToExt("application/pdf")).toBe(".pdf");
+    expect(mimeToExt("text/csv")).toBe(".csv");
+    expect(mimeToExt("application/json")).toBe(".json");
+    expect(mimeToExt("image/jpeg")).toBe(".jpg");
+    expect(mimeToExt("image/webp")).toBe(".webp");
+    expect(mimeToExt("application/octet-stream")).toBe(".bin");
+  });
+  it("strips charset parameters", () => {
+    expect(mimeToExt("application/json; charset=utf-8")).toBe(".json");
+    expect(mimeToExt("text/csv;charset=UTF-8")).toBe(".csv");
+  });
+  it("is case-insensitive", () => {
+    expect(mimeToExt("APPLICATION/PDF")).toBe(".pdf");
+    expect(mimeToExt("Text/HTML")).toBe(".html");
+  });
+  it("returns empty string for unknown/null/undefined", () => {
+    expect(mimeToExt("application/x-custom")).toBe("");
+    expect(mimeToExt(null)).toBe("");
+    expect(mimeToExt(undefined)).toBe("");
+    expect(mimeToExt("")).toBe("");
   });
 });

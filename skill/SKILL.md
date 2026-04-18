@@ -150,7 +150,7 @@ Proves Steel works:
 go_to_url(url: "https://example.com")
 get_current_url()
 get_page_text(selector: "body", maxChars: 500)
-get_screenshot(format: "jpeg", quality: 60, outputMode: "file")
+get_screenshot(outputMode: "file")                           # webp default in 0.6.0+
 ```
 
 ## Protect Context Window
@@ -159,8 +159,12 @@ Page text + screenshots can be huge. Constrain:
 
 - `get_page_text` — `maxChars: 3000`, scoped `selector` (e.g. `"main"`,
   `"article"`, `"#results"`). Full page only when needed.
-- `get_screenshot` — `format: "jpeg", quality: 60` default (far smaller than
-  PNG). `outputMode: "file"` when not reading inline. `scale: 0.5` for large.
+- `get_screenshot` — default format is `"webp"` (0.6.0+), the smallest option.
+  Quality defaults to 80. Use `outputMode: "file"` when not reading inline.
+  Use `scale: 0.5` for large pages. Pass `format: "png"` when you need
+  lossless (diagrams, UI regression shots).
+- `get_cookies` — default caps at 50 cookies. Prefer `domain: "example.com"`
+  over `urls: [...]`; simpler and robust against Playwright's matcher quirks.
 - `evaluate` — return only fields needed; no full DOM trees.
 
 ## Extracting Structured Data — Pick the Right Path
@@ -217,6 +221,8 @@ get_links(
 
 Returns deduped `[{text, href}]`. Same first-non-empty-text dedup as matchAll. Use when building link indexes, sitemap scrapes, or feeding URLs into follow-up fetches.
 
+**Selector scope is querySelectorAll (0.6.0+)** — `selector: "article"` iterates every `<article>` on the page and concatenates their descendant anchors. Previous versions scoped to the first match only — pass `selector` freely now to scope to list items.
+
 Example output:
 ```json
 [
@@ -237,7 +243,7 @@ get_attrs(
 )
 ```
 
-Returns compact JSON (one object per line) with ONLY the requested attributes. Special names: `"text"` = textContent (whitespace-collapsed), `"html"` = outerHTML. Missing attributes become `null`.
+Returns compact JSON (one object per line) with ONLY the requested attributes. Special names: `"text"` = innerText (layout-aware, preserves whitespace between block-level children — matches what a user sees), `"html"` = outerHTML. Missing attributes become `null`.
 
 Use cases: scraping product grids with structured data, extracting widget state, pulling embed IDs from iframes.
 
@@ -299,6 +305,11 @@ Spinners/loading: use `textGone`:
 wait_for(textGone: "Loading...", timeout: 15000)
 ```
 
+**`history` no-op detection (0.6.0+)**: `history(action: "back")` on the first
+page of a tab's history returns `(no-op — no previous entry in tab history; URL unchanged)`
+in the response. Previously it silently reported "Went back" even when nothing
+moved. Same for forward on the last page.
+
 ## Multi-Step Form Pattern
 
 Two ways — pick by field count:
@@ -313,21 +324,29 @@ get_current_url()   # confirm landing, not error
 ```
 
 **Many fields (sign-up / checkout / multi-input):** `fill_form` in one call.
+Auto-detects each field's type and dispatches correctly (0.6.0+):
+- text/email/tel/password/url/number/textarea/date/time → `page.fill`
+- `<select>` → `page.selectOption` (value by default; use `kind: "selectLabel"` for label or `kind: "selectIndex"` for index)
+- checkboxes → `page.check`/`page.uncheck` based on truthy/falsy string value
+- radios → click the radio whose `value` attribute matches the given value
+
 ```
 fill_form(
   fields: [
     {selector: "input[name=email]", value: "user@example.com"},
     {selector: "input[name=password]", value: "secret"},
-    {selector: "input[name=confirm]", value: "secret"},
+    {selector: "input[name=newsletter]", value: "yes"},          # checkbox
+    {selector: "input[name=plan]", value: "pro"},                # radio group
+    {selector: "select[name=country]", value: "za"},             # select by value
+    {selector: "select[name=size]", value: "Medium", kind: "selectLabel"},
+    {selector: "input[name=dob]", value: "1990-04-18"},          # date input
   ],
   submitSelector: "button[type=submit]"
 )
 wait_for(text: "Welcome")
 ```
 
-`fill_form` replaces N `type` calls with one; still atomic `page.fill`
-semantics (clears + types). Pass `skipMissing: true` if some fields are
-conditionally rendered.
+`fill_form` replaces N separate tool calls with one. Pass `skipMissing: true` if some fields are conditionally rendered. Force a specific dispatch per field with `kind: "text"|"check"|"radio"|"select"|"selectLabel"|"selectIndex"`.
 
 ## Human-in-the-Loop (HITL)
 
@@ -351,10 +370,10 @@ Never handle 2FA / credentials yourself.
 ### Persist / restore an auth session
 
 After a successful HITL login, dump the cookies so the next run can skip
-the login entirely:
+the login entirely. Prefer `domain` filter over `urls` — simpler and robust:
 
 ```
-get_cookies(urls: ["https://target.example.com"])
+get_cookies(domain: "target.example.com", limit: 0)
 → [{name, value, domain, expires, ...}, ...]
 # Save the JSON to disk.
 
@@ -365,6 +384,16 @@ go_to_url(url: "https://target.example.com/dashboard")
 
 `get_cookies` / `set_cookies` operate on the shared context, so cookies
 survive until `stop_browser` or until they expire naturally.
+
+**Output cap**: without `limit`, `get_cookies` returns at most 50 cookies
+and appends a `[CAPPED — N total]` footer. Set `limit: 0` for all cookies.
+Shared multi-agent contexts can hold hundreds of cross-site cookies, so
+prefer filtering via `domain` or `urls` to keep output tight.
+
+**urls filter fallback**: if Playwright's exact-match URL filter returns
+nothing (happens with some Set-Cookie redirect chains), the tool automatically
+falls back to a host-contains match across all cookies. Usually invisible —
+surfaces in the result the same way a clean match would.
 
 ## Multi-Tab Workflows
 
@@ -399,12 +428,20 @@ console_log(level: "error")
 Network failures, JS errors, CSP violations all appear here. Check this before
 blaming selectors.
 
+**Source location included (0.6.0+)**: each entry renders with an `at url:line:col`
+continuation line when Playwright captures a location. Essential for diagnosing
+"Failed to load resource" 404s — previous versions stripped the URL.
+
+**`pageerror` captured too (0.6.0+)**: unhandled JS exceptions and uncaught
+promise rejections are recorded as `[ERROR] [pageerror] ErrorType: message`.
+These don't surface on `console.*` — previously invisible.
+
 ## Screenshots — format, scope, output path
 
 Format choices (smallest → largest):
-- `"webp"` — smallest. Uses CDP directly (requires Chromium ≥ 88).
+- `"webp"` — smallest. **Default in 0.6.0+.** Uses CDP directly (requires Chromium ≥ 88).
 - `"jpeg"` — widely compatible. Good for photos/screenshots with gradients.
-- `"png"` — lossless. Good for UI shots. Default.
+- `"png"` — lossless. Good for UI regression shots, diagrams with text.
 
 Scope:
 - `selector: "article.hero"` — capture just that element's bounding box.
@@ -442,9 +479,16 @@ allowed output root.
 
 ## Downloading Binaries
 
-Use `download_file` for direct-download URLs (PDF, CSV, ZIP). A plain
-`go_to_url` on a binary URL raises `ERR_ABORTED`; `download_file` handles
-that cleanly via `waitForEvent('download')`:
+`download_file` handles two delivery shapes (0.6.0+):
+
+1. **Attachment downloads** — URLs that send `Content-Disposition: attachment`
+   (or a MIME Chromium saves by default). Uses `waitForEvent('download')`,
+   works around `ERR_ABORTED` on `page.goto`.
+2. **Inline binaries** — URLs that serve `application/octet-stream`, PDFs, CSVs,
+   or API-served bytes WITHOUT a disposition header. Chromium views these
+   inline — no download event fires. On timeout, the tool falls back to
+   `context.request.fetch(url)` which reuses the browser session's cookies
+   and auth, and writes the body directly to disk.
 
 ```
 download_file(
@@ -452,11 +496,21 @@ download_file(
   outputPath: "$WORKSPACE/artifacts/downloads/report.pdf",
   tabId: 7
 )
-→ "Downloaded report.pdf\nSaved to: ...\nSize: 184,329 bytes"
+→ "Downloaded report.pdf [via download-event]\nSaved to: ...\nSize: 184,329 bytes"
+
+# Or for a known-inline API binary:
+download_file(
+  url: "https://api.example.com/export.csv",
+  forceFetch: true,                 # skip download-event path
+  outputPath: "$WORKSPACE/artifacts/export.csv"
+)
+→ "Downloaded export.csv [via forceFetch]\nSaved to: ...\nSize: 5,432 bytes"
 ```
 
-If the download is triggered by a click (not a direct URL), use the
-standard Playwright pattern manually:
+Filename falls back to the last URL path segment + MIME-derived extension
+when the server doesn't suggest one.
+
+If the download is triggered by a click (not a direct URL):
 ```
 click(selector: "a.download-link", tabId: 7)
 # then wait for file to appear under your output dir, extract via kreuzberg, etc.

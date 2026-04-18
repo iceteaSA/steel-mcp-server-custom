@@ -133,3 +133,128 @@ export function isSteelSessionStuck(err: unknown): boolean {
   const msg = (err as Error).message || String(err);
   return STEEL_STUCK_SESSION_RE.test(msg);
 }
+
+/**
+ * Map an HTML element's tagName + input `type` to a fill_form dispatch kind.
+ * Used by fill_form to route each field to page.fill / page.check /
+ * page.selectOption / click-radio. When the element is not found or the
+ * tag/type is unknown, falls back to "text" (page.fill), which is the widest
+ * accept — will throw a clearer error if it really can't accept the value.
+ */
+export type FieldKind = "text" | "check" | "radio" | "select";
+
+export function detectFieldKind(
+  tag: string | null | undefined,
+  type: string | null | undefined
+): FieldKind {
+  const t = (tag ?? "").toUpperCase();
+  if (t === "SELECT") return "select";
+  if (t === "INPUT") {
+    const ty = (type ?? "").toLowerCase();
+    if (ty === "checkbox") return "check";
+    if (ty === "radio") return "radio";
+  }
+  return "text";
+}
+
+/**
+ * Checkbox truthy-value test. fill_form accepts a string value for every
+ * field; for checkboxes we need to decide check vs uncheck. Common truthy
+ * tokens → true; anything else → false. Comparison is case-insensitive.
+ */
+const CHECKBOX_TRUTHY = new Set(["true", "1", "on", "yes", "checked", "y"]);
+
+export function isCheckboxTruthy(value: string): boolean {
+  return CHECKBOX_TRUTHY.has(value.toLowerCase());
+}
+
+/**
+ * Given a radio selector + a value, build a fully-qualified CSS selector that
+ * matches only the radio in the group whose `value` attribute equals value.
+ * If the incoming selector already contains a `[value=...]` attribute filter,
+ * return it unchanged (caller already disambiguated).
+ *
+ * Examples:
+ *   ("input[name=size]", "medium")       → 'input[name=size][value="medium"]'
+ *   ("input[name=size][value=xl]", "xl") → 'input[name=size][value=xl]' (unchanged)
+ */
+export function buildRadioSelector(selector: string, value: string): string {
+  if (/\[value[\s~|^$*]*=/.test(selector)) return selector;
+  const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  return `${selector}[value="${escaped}"]`;
+}
+
+/**
+ * Given a cookie's stored `domain` and a URL's hostname, return true if the
+ * cookie should match. Mirrors how browsers compare cookies against requests:
+ *
+ *   - exact host match
+ *   - cookie domain has a leading dot (public suffix style) and host ends with it
+ *   - cookie domain stripped of leading dot == host OR a parent of host
+ *
+ * Used as the fallback when Playwright's own `context.cookies(urls)` matcher
+ * returns empty for a shape it should have matched (observed with session
+ * cookies set via redirect chains, httpbin-style Set-Cookie headers).
+ */
+export function matchesCookieHost(
+  cookieDomain: string | null | undefined,
+  urlHost: string | null | undefined
+): boolean {
+  if (!cookieDomain || !urlHost) return false;
+  const cd = cookieDomain.toLowerCase().replace(/^\./, "");
+  const uh = urlHost.toLowerCase();
+  if (cd === uh) return true;
+  // host is a subdomain of cookie domain
+  if (uh.endsWith("." + cd)) return true;
+  // cookie domain is a subdomain of host — rare but occurs when passing a
+  // bare hostname filter against cookies scoped to a subdomain
+  if (cd.endsWith("." + uh)) return true;
+  return false;
+}
+
+/**
+ * Map a Content-Type (MIME) string to a plausible file extension for saving
+ * downloaded bodies. Strips parameters (`; charset=…`). Returns empty string
+ * when unknown — caller can leave the filename extension-less.
+ */
+const MIME_EXT_MAP: Record<string, string> = {
+  "application/pdf": ".pdf",
+  "text/csv": ".csv",
+  "application/json": ".json",
+  "application/zip": ".zip",
+  "application/x-tar": ".tar",
+  "application/gzip": ".gz",
+  "application/xml": ".xml",
+  "text/xml": ".xml",
+  "image/jpeg": ".jpg",
+  "image/png": ".png",
+  "image/webp": ".webp",
+  "image/gif": ".gif",
+  "image/svg+xml": ".svg",
+  "application/octet-stream": ".bin",
+  "text/plain": ".txt",
+  "text/html": ".html",
+};
+
+export function mimeToExt(mime: string | null | undefined): string {
+  if (!mime) return "";
+  const m = mime.toLowerCase().split(";")[0].trim();
+  return MIME_EXT_MAP[m] ?? "";
+}
+
+/**
+ * Derive a sensible download filename from a URL when the server didn't send
+ * `Content-Disposition`. Returns the last non-empty path segment if it looks
+ * reasonable (< 200 chars, contains non-slash chars), else a timestamped
+ * fallback.
+ */
+export function deriveDownloadFilename(url: string): string {
+  try {
+    const u = new URL(url);
+    const last = u.pathname.split("/").filter(Boolean).pop();
+    if (last && last.length < 200) return last;
+  } catch {
+    /* ignore — malformed URL, fall through */
+  }
+  return `download_${Date.now()}`;
+}

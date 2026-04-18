@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.6.0] — 2026-04-18
+
+Audit pass based on live-workflow dogfooding — five real bugs fixed, four UX gaps closed, screenshot default switched to WebP for a default-case context-budget win. Non-breaking for existing code except the screenshot format default.
+
+### Fixed
+
+- **`get_cookies` `urls` filter returned empty even on real matches.** Root cause was a shape mismatch in how Playwright's `context.cookies(urls)` matches stored cookies (e.g. `httpbin.org` cookie vs `https://httpbin.org/` filter). Now: if Playwright's exact match returns nothing, the tool falls back to a host-contains match across all cookies in the context. Added `domain` param (string or string[]) as the preferred site-scoped filter — simpler and doesn't fail on Playwright's quirks.
+- **`fill_form` only worked on `<input type=text>` and `<textarea>`.** Every other form field — `<select>`, radios, checkboxes, date/time inputs — threw "page.fill: Timeout". Now auto-detects `tagName`/`type` and dispatches correctly: `page.selectOption` for `<select>`, `page.check`/`page.uncheck` for checkboxes (accepts truthy/falsy strings), `page.click` on `[name][value=X]` for radios, `page.fill` for everything else. Added `kind` override per-field for edge cases. Result report now includes the dispatch kind per field.
+- **`get_links` `selector` scoped to the first matching element only.** `document.querySelector(selector)` was used instead of `querySelectorAll`, so `selector: "article"` returned only the first article's anchors. Now iterates all matching roots and concatenates descendant anchors — matches the expected "scope per list item" semantics already used by `get_page_text(matchAll: true)`.
+- **`get_attrs` `"text"` special used `textContent`.** Block-level children's text got concatenated without whitespace, producing strings like `"Fibre1h agoHeadline"`. Switched to `innerText` (layout-aware, inserts whitespace between block-level children). Matches what a user sees and what `get_page_text` returns.
+- **`download_file` timed out on binaries without `Content-Disposition: attachment`.** Many API-served PDFs, CSVs, and `application/octet-stream` URLs are viewed inline by Chromium, so no download event fires. Now: on download-event timeout, falls back to `context.request.fetch(url)` (reuses session cookies/auth), writes body to disk, derives filename from URL path + MIME type. Added `forceFetch: true` to skip the download-event path when you know the URL serves inline. Also improved filename derivation when no extension is present.
+
+### Changed
+
+- **Screenshot default format is now `webp`** (was `png`). WebP typically 5–10× smaller than PNG for the same visual fidelity, and is produced via CDP `Page.captureScreenshot` which works across all modern Chromium builds. Pass `format: "png"` to restore the old default. `format: "jpeg"` also unchanged.
+- **`get_cookies` output now capped** at 50 cookies by default. Shared browser contexts in multi-agent setups can hold hundreds of cookies; the old unfiltered dump regularly exceeded 80 KB of context. Set `limit: 0` for no cap, or use `domain`/`urls` filters to scope. Response includes a `[CAPPED — …]` footer when truncated.
+- **`history back/forward`** now detects no-op navigations (first page of tab history) and appends `(no-op — no previous entry in tab history; URL unchanged)` to the response. Previously reported "Went back" even when Chromium stayed on the same page.
+
+### Added
+
+- **`console_log` includes source location.** Each console message now captures the `url:lineNumber:columnNumber` of its origin (from Playwright's `ConsoleMessage.location()`) and renders it on a continuation line. Diagnosing "Failed to load resource" errors is now possible — previously the URL was stripped.
+- **`console_log` captures `pageerror`** (unhandled exceptions, uncaught promise rejections). Previously only `console.*` calls were captured; real JS errors were invisible.
+
+### Migration notes
+
+- If you relied on the `png` screenshot default, add `format: "png"` to existing calls.
+- `fill_form` previously passing a `<select>` or radio selector would throw; existing correct calls (all-text-input forms) are unchanged.
+- `get_cookies` with a truthy `urls` filter that was previously returning nothing will now return matches (via the host-contains fallback). If this is unwanted, pass `domain` explicitly instead.
+
 ## [0.5.2] — 2026-04-17
 
 Root-cause fix for the 0.5.1 stuck-session error: idle sweeper must never close the primary tab.
