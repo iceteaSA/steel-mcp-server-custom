@@ -2,6 +2,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildRadioSelector,
   capText,
+  cleanErrorMessage,
   collapseWhitespace,
   dedupeLinks,
   deriveDownloadFilename,
@@ -392,6 +393,68 @@ describe("deriveDownloadFilename", () => {
     const longSeg = "a".repeat(250);
     const result = deriveDownloadFilename(`https://example.com/${longSeg}`);
     expect(result).toMatch(/^download_\d+$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// cleanErrorMessage (0.6.0 — strip ANSI + Playwright internal frames)
+// ---------------------------------------------------------------------------
+
+describe("cleanErrorMessage", () => {
+  it("strips ANSI colour escapes from call-log lines", () => {
+    const raw =
+      "page.waitForSelector: Timeout 1500ms exceeded.\n" +
+      "Call log:\n" +
+      "\u001b[2m  - waiting for locator('.foo') to be visible\u001b[22m";
+    const clean = cleanErrorMessage(new Error(raw));
+    expect(clean).not.toMatch(/\u001b/);
+    expect(clean).not.toMatch(/\[2m|\[22m/);
+    expect(clean).toContain("Timeout 1500ms exceeded");
+    expect(clean).toContain("waiting for locator");
+  });
+
+  it("drops Playwright internal stack frames (UtilityScript.*)", () => {
+    const raw =
+      "page.evaluate: SyntaxError: Unexpected identifier 'is'\n" +
+      "    at eval (<anonymous>)\n" +
+      "    at UtilityScript.evaluate (<anonymous>:290:30)\n" +
+      "    at UtilityScript.<anonymous> (<anonymous>:1:44)";
+    const clean = cleanErrorMessage(new Error(raw));
+    expect(clean).toContain("SyntaxError: Unexpected identifier 'is'");
+    expect(clean).not.toContain("UtilityScript");
+    expect(clean).not.toMatch(/at eval \(<anonymous>\)/);
+  });
+
+  it("drops nested eval frames (get_links bad-regex case)", () => {
+    const raw =
+      "Error: Invalid regular expression: /[unclosed/i: Unterminated character class\n" +
+      "    at eval (eval at evaluate (:290:30), <anonymous>:4:28)\n" +
+      "    at UtilityScript.evaluate (<anonymous>:292:16)\n" +
+      "    at UtilityScript.<anonymous> (<anonymous>:1:44)";
+    const clean = cleanErrorMessage(new Error(raw));
+    expect(clean).toContain("Invalid regular expression");
+    expect(clean).not.toContain("UtilityScript");
+    expect(clean).not.toContain("eval at evaluate");
+  });
+
+  it("leaves meaningful lines intact (user file paths, line/col)", () => {
+    const raw =
+      "SyntaxError: Unexpected token\n" +
+      "    at user-script.js:42:17\n" +
+      "    at UtilityScript.evaluate (<anonymous>:290:30)";
+    const clean = cleanErrorMessage(new Error(raw));
+    expect(clean).toContain("user-script.js:42:17");
+    expect(clean).not.toContain("UtilityScript");
+  });
+
+  it("accepts string input (not just Error)", () => {
+    expect(cleanErrorMessage("plain string")).toBe("plain string");
+  });
+
+  it("handles null/undefined/empty", () => {
+    expect(cleanErrorMessage(null)).toBe("");
+    expect(cleanErrorMessage(undefined)).toBe("");
+    expect(cleanErrorMessage("")).toBe("");
   });
 });
 

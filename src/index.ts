@@ -11,6 +11,7 @@ import { EnvSchema } from "./env";
 import {
   buildRadioSelector,
   capText,
+  cleanErrorMessage,
   dedupeLinks,
   deriveDownloadFilename,
   detectFieldKind,
@@ -573,7 +574,7 @@ server.tool(
       return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -605,7 +606,7 @@ Concurrent agents: pass an \`owner\` tag (e.g. your agent/session label) so you 
       };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -629,7 +630,7 @@ If no tabs match the owner tag, returns an empty list silently (not an error).`,
       return { content: [{ type: "text", text }] };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -658,7 +659,7 @@ server.tool(
       return { content: [{ type: "text", text: `Closed Tab ${id}.${suffix}` }] };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -680,7 +681,7 @@ server.tool(
       };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -888,7 +889,7 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
       };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -1055,10 +1056,14 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
 
         // Inline output: compact (one-entry-per-line) by default to avoid \n
         // pollution in tool response wrappers. `pretty: true` uses 2-space indent.
+        // Empty → clean `[]` instead of `[\n\n]` (was a formatting bug).
         const truncated = capped.length < totalMatched;
-        const body = pretty
-          ? JSON.stringify(capped, null, 2)
-          : "[\n" + capped.map((e) => JSON.stringify(e)).join(",\n") + "\n]";
+        const body =
+          capped.length === 0
+            ? `[]${selector ? `\n(selector "${selector}" matched no elements)` : ""}`
+            : pretty
+              ? JSON.stringify(capped, null, 2)
+              : "[\n" + capped.map((e) => JSON.stringify(e)).join(",\n") + "\n]";
         return {
           content: [
             {
@@ -1074,30 +1079,43 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
       }
 
       // --- single-match path (original behavior) ------------------------
-      let text: string;
-      if (includeLinks) {
-        text = await page.evaluate((sel: string | null) => {
-          const root = sel ? document.querySelector(sel) : document.body;
-          if (!root) return "";
-          const walk = (node: Element): string => {
-            if (node.tagName === "A") {
-              const href = (node as HTMLAnchorElement).href;
-              return `${node.textContent?.trim()} [${href}]`;
-            }
-            return Array.from(node.childNodes)
-              .map((n) => (n.nodeType === 3 ? n.textContent ?? "" : walk(n as Element)))
-              .join(" ");
-          };
-          return walk(root as Element);
-        }, selector ?? null);
-      } else {
-        text = await page.evaluate((sel: string | null) => {
-          const root = sel ? document.querySelector(sel) : document.body;
-          return (root as HTMLElement)?.innerText ?? "";
-        }, selector ?? null);
-      }
+      // Returns a sentinel {__noMatch:true} when a selector is supplied but
+      // doesn't match anything, so the caller can produce an explicit
+      // "no match" message instead of a bare empty string that mcporter
+      // formats as the raw tool response object.
+      type SingleResult = { __noMatch?: true; text?: string };
+      const rawResult: SingleResult = includeLinks
+        ? await page.evaluate((sel: string | null) => {
+            const root = sel ? document.querySelector(sel) : document.body;
+            if (!root) return sel ? { __noMatch: true } : { text: "" };
+            const walk = (node: Element): string => {
+              if (node.tagName === "A") {
+                const href = (node as HTMLAnchorElement).href;
+                return `${node.textContent?.trim()} [${href}]`;
+              }
+              return Array.from(node.childNodes)
+                .map((n) => (n.nodeType === 3 ? n.textContent ?? "" : walk(n as Element)))
+                .join(" ");
+            };
+            return { text: walk(root as Element) };
+          }, selector ?? null)
+        : await page.evaluate((sel: string | null) => {
+            const root = sel ? document.querySelector(sel) : document.body;
+            if (!root) return sel ? { __noMatch: true } : { text: "" };
+            return { text: (root as HTMLElement)?.innerText ?? "" };
+          }, selector ?? null);
 
-      text = text.replace(/\s+/g, " ").trim();
+      if (rawResult.__noMatch) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `(selector "${selector}" matched no elements)`,
+            },
+          ],
+        };
+      }
+      let text: string = (rawResult.text ?? "").replace(/\s+/g, " ").trim();
 
       if (outputMode === "file") {
         const filePath = await writeToFile(
@@ -1131,7 +1149,7 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
       };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -1166,6 +1184,24 @@ Use cases: scraping article list URLs, link indexes, sitemap-like extraction.`,
   },
   async ({ selector, urlPattern, limit = 50, tabId }) => {
     try {
+      // Validate the regex up front so we return a clean user-facing error
+      // (`Invalid regular expression: …`) instead of letting it throw from
+      // inside page.evaluate with a noisy JS call stack.
+      if (urlPattern) {
+        try {
+          new RegExp(urlPattern, "i");
+        } catch (reErr) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `urlPattern is not a valid regex: ${(reErr as Error).message}`,
+              },
+            ],
+          };
+        }
+      }
       const page = await mgr.getPage(tabId);
       // Evaluate returns raw anchor list (possibly with dupes). Node-side
       // dedup via shared helper — testable, matches matchAll semantics.
@@ -1214,7 +1250,7 @@ Use cases: scraping article list URLs, link indexes, sitemap-like extraction.`,
       };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -1291,7 +1327,7 @@ Use when matchAll + links aren't enough — e.g. scraping data-id, data-price, a
       };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -1325,7 +1361,7 @@ After clicking, use wait_for to confirm the expected result before proceeding.`,
       return { content: [{ type: "text", text: `Clicked: ${selector}` }] };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -1384,7 +1420,7 @@ After typing, use wait_for to confirm the expected result or get_screenshot to v
       };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -1447,7 +1483,7 @@ server.tool(
       };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -1595,7 +1631,7 @@ Processes fields sequentially; fails fast on the first missing selector unless \
       return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -1687,7 +1723,7 @@ CONTEXT BUDGET — shared browser contexts can hold hundreds of cookies across m
       };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -1727,7 +1763,7 @@ Use to restore a logged-in session from a saved dump without running the login f
       };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -1854,7 +1890,7 @@ Output path defaults to \`OUTPUT_DIR/<suggestedFilename>\`. Pass \`outputPath\` 
       }
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -1907,7 +1943,7 @@ CONTEXT BUDGET — results are serialised to JSON; large objects can be very lar
       return { content: [{ type: "text", text: text }] };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -1984,7 +2020,7 @@ Conditions (at least one required): selector, text, textGone. Returns elapsed ti
       const error = err as Error;
       return {
         isError: true,
-        content: [{ type: "text", text: `wait_for timed out or failed: ${error.message}` }],
+        content: [{ type: "text", text: `wait_for timed out or failed: ${cleanErrorMessage(error)}` }],
       };
     }
   }
@@ -2057,7 +2093,7 @@ CONTEXT BUDGET — console output can be large on noisy pages. Use the level fil
       };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -2092,7 +2128,7 @@ Merges the old scroll_up / scroll_down tools (0.4.0+). Pass direction="up" or "d
       };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -2139,7 +2175,7 @@ Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back"
       return { content: [{ type: "text", text: `${verb}${suffix}.\nCurrent URL: ${afterUrl}` }] };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -2209,7 +2245,7 @@ Optional waitFor: wait for a CSS selector to appear after navigation (saves a se
       return { content: [{ type: "text", text: navLine + waitMsg }] };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -2238,7 +2274,7 @@ If you need the user to intervene (CAPTCHA, login, 2FA), give them the Interacti
       return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );
@@ -2254,7 +2290,7 @@ server.tool(
       return { content: [{ type: "text", text: "Browser stopped." }] };
     } catch (err) {
       const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: error.message }] };
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
     }
   }
 );

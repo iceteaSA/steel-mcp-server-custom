@@ -283,3 +283,30 @@ export function deriveDownloadFilename(url: string): string {
   }
   return `download_${Date.now()}`;
 }
+
+/**
+ * Clean Playwright error messages for LLM consumption:
+ *   - Strip ANSI colour escapes (ESC + `[` + digits + `m`) that Playwright
+ *     embeds in its `Call log:` sections (visible as `[2m` / `[22m` in MCP
+ *     text output).
+ *   - Drop Playwright's internal stack frames (`UtilityScript.<anonymous>`,
+ *     `UtilityScript.evaluate`, `at eval (<anonymous>…)`) — they never help
+ *     diagnose user errors and waste tokens.
+ *
+ * Leaves meaningful lines (Playwright "Call log:" context, user errors,
+ * SyntaxError messages with line/col) intact.
+ */
+const ANSI_RE = /\u001b\[[0-9;]*m/g;
+const PLAYWRIGHT_INTERNAL_FRAME_RE =
+  /^\s+at (?:UtilityScript\.(?:\w|<)|eval \((?:eval at )?evaluate \(|eval \(<anonymous>)/;
+
+export function cleanErrorMessage(msg: unknown): string {
+  const raw = msg instanceof Error ? msg.message : String(msg ?? "");
+  const noAnsi = raw.replace(ANSI_RE, "");
+  const filtered = noAnsi
+    .split("\n")
+    .filter((line) => !PLAYWRIGHT_INTERNAL_FRAME_RE.test(line))
+    .join("\n")
+    .trimEnd();
+  return filtered;
+}
