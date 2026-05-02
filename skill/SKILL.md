@@ -64,6 +64,38 @@ closed` on a very recent `start_browser` / `new_tab`, the server now soft-resets
 + retries internally. You don't need retry loops around `new_tab`. If the
 retried call still fails, treat it as a real browser outage.
 
+## Credentials — Stored Login Automation
+
+Store site credentials once, reuse them across sessions and profiles without
+re-entering passwords. Credentials persist to disk as JSON.
+
+```
+# Store a credential
+store_credential(name: "github", url: "github.com", username: "user@email.com", password: "s3cret")
+
+# List stored credentials (passwords masked)
+list_credentials()
+→ github: user@email.com @ github.com
+
+# Auto-fill a login form
+use_credential(name: "github", usernameSelector: "#login_field", passwordSelector: "#password", submitSelector: "input[type=submit]")
+→ Credential "github" applied: username, password, submitted.
+
+# Just retrieve (without filling) — useful for API auth
+use_credential(name: "github")
+→ { name: "github", url: "github.com", username: "user@email.com", password: "***ret" }
+```
+
+### Key rules
+
+- **Passwords stored in plain JSON** at `CREDENTIALS_FILE`. Homelab-only —
+  don't use for production without adding encryption.
+- **Extra fields** for 2FA secrets, security questions, etc.:
+  `store_credential(name: "aws", ..., extra: { account_id: "123456" })`
+- **Combine with profiles** for multi-account workflows: create profile
+  "github-work", fill with work credential; create "github-personal",
+  fill with personal credential. Both active simultaneously.
+
 ## Profiles — Concurrent Isolated Sessions
 
 Profiles let multiple agents operate simultaneously with separate cookie jars,

@@ -155,6 +155,9 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 | `scroll` | Scroll the page — `direction: "up"`\|`"down"`, `pixels?` (default 500) |
 | `history` | Browser history op — `action: "back"`\|`"forward"`\|`"reload"` |
 | `go_to_url` | Navigate to a URL. Optional `waitFor` selector + `waitTimeout` — merges nav + wait. Auto-detects Cloudflare/bot walls, returns `isError` on hit |
+| `store_credential` | Store/update/delete a named credential (username + password + extras) for login automation |
+| `use_credential` | Retrieve a credential and optionally auto-fill a login form on the current page |
+| `list_credentials` | List all stored credentials (passwords masked) |
 | `create_profile` | Create a named isolated BrowserContext (separate cookies/localStorage). Auto-restores saved state. Returns tabId |
 | `list_profiles` | Show active + saved profiles with tab counts and save timestamps |
 | `save_profile` | Persist a profile's cookies + localStorage to disk for later restoration |

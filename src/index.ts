@@ -724,6 +724,36 @@ class BrowserManager {
 const mgr = new BrowserManager();
 
 // -----------------------------------------------------------------------------
+// Credentials store — simple file-based JSON store for site credentials.
+// Credentials are stored in plain JSON (CREDENTIALS_FILE env).
+// For homelab use only — not suitable for production without encryption.
+// -----------------------------------------------------------------------------
+
+type Credential = {
+  name: string;
+  url: string;           // URL pattern or domain to match
+  username: string;
+  password: string;
+  extra?: Record<string, string>; // additional fields (e.g., OTP secret, security question)
+  createdAt: string;
+  updatedAt: string;
+};
+
+async function loadCredentials(): Promise<Credential[]> {
+  try {
+    const raw = await fs.readFile(env.CREDENTIALS_FILE, "utf8");
+    return JSON.parse(raw) as Credential[];
+  } catch {
+    return [];
+  }
+}
+
+async function saveCredentials(creds: Credential[]): Promise<void> {
+  await fs.mkdir(path.dirname(env.CREDENTIALS_FILE), { recursive: true });
+  await fs.writeFile(env.CREDENTIALS_FILE, JSON.stringify(creds, null, 2));
+}
+
+// -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
 
@@ -2519,6 +2549,145 @@ If you need the user to intervene (CAPTCHA, login, 2FA), give them the Interacti
         lines.push(`Interactive URL: ${mgr.debugUrl}?interactive=true&showControls=true`);
       }
       return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
+    }
+  }
+);
+
+// store_credential ------------------------------------------------------------
+server.tool(
+  "store_credential",
+  `Store, update, or delete a named credential for a site. Credentials persist across sessions.
+
+Use for login automation: store credentials once, then use use_credential to auto-fill login forms.`,
+  {
+    name: z.string().describe("Unique name for this credential (e.g., 'github', 'aws-prod')."),
+    url: z.string().optional().describe("URL pattern or domain to associate with this credential (e.g., 'github.com', 'https://console.aws.amazon.com')."),
+    username: z.string().optional().describe("Username or email."),
+    password: z.string().optional().describe("Password."),
+    extra: z.string().optional().describe("Additional fields as JSON string (e.g., '{\"otp_secret\": \"...\", \"company\": \"...\"}')."),
+    remove: z.boolean().optional().describe("Set true to delete this credential instead of storing/updating it."),
+  },
+  async ({ name, url, username, password, extra, remove }) => {
+    try {
+      const creds = await loadCredentials();
+
+      if (remove) {
+        const idx = creds.findIndex((c) => c.name === name);
+        if (idx === -1) return { content: [{ type: "text", text: `Credential "${name}" not found.` }] };
+        creds.splice(idx, 1);
+        await saveCredentials(creds);
+        return { content: [{ type: "text", text: `Credential "${name}" deleted.` }] };
+      }
+
+      if (!url || !username || !password) {
+        return { isError: true, content: [{ type: "text", text: "url, username, and password are required for storing a credential." }] };
+      }
+
+      const existing = creds.findIndex((c) => c.name === name);
+      const now = new Date().toISOString();
+      let parsedExtra: Record<string, string> | undefined;
+      if (extra) {
+        try { parsedExtra = JSON.parse(extra); } catch { parsedExtra = { raw: extra }; }
+      }
+      const cred: Credential = {
+        name, url, username, password,
+        ...(parsedExtra ? { extra: parsedExtra } : {}),
+        createdAt: existing >= 0 ? creds[existing].createdAt : now,
+        updatedAt: now,
+      };
+
+      if (existing >= 0) {
+        creds[existing] = cred;
+      } else {
+        creds.push(cred);
+      }
+      await saveCredentials(creds);
+      return { content: [{ type: "text", text: `Credential "${name}" ${existing >= 0 ? "updated" : "stored"} for ${url}.` }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
+    }
+  }
+);
+
+// use_credential --------------------------------------------------------------
+server.tool(
+  "use_credential",
+  `Retrieve a stored credential by name and optionally auto-fill a login form on the current page.
+
+Without selectors: returns the credential (username + password + any extra fields).
+With selectors: fills the form fields on the page and optionally clicks submit.`,
+  {
+    name: z.string().describe("Name of the stored credential to use."),
+    usernameSelector: z.string().optional().describe("CSS selector for the username/email input field."),
+    passwordSelector: z.string().optional().describe("CSS selector for the password input field."),
+    submitSelector: z.string().optional().describe("CSS selector for the submit/login button. If provided, clicks it after filling."),
+    tabId: z.number().int().min(1).optional().describe("Optional tab ID for the page to fill."),
+  },
+  async ({ name, usernameSelector, passwordSelector, submitSelector, tabId }) => {
+    try {
+      const creds = await loadCredentials();
+      const cred = creds.find((c) => c.name === name);
+      if (!cred) {
+        return { isError: true, content: [{ type: "text", text: `Credential "${name}" not found. Use store_credential to save it first.` }] };
+      }
+
+      // If no selectors, just return the credential info
+      if (!usernameSelector && !passwordSelector) {
+        const info: Record<string, string> = {
+          name: cred.name,
+          url: cred.url,
+          username: cred.username,
+          password: "***" + cred.password.slice(-3),
+        };
+        if (cred.extra) Object.assign(info, cred.extra);
+        return { content: [{ type: "text", text: JSON.stringify(info, null, 2) }] };
+      }
+
+      // Fill the form
+      const page = await mgr.getPage(tabId);
+      const filled: string[] = [];
+
+      if (usernameSelector) {
+        await page.fill(usernameSelector, cred.username);
+        filled.push("username");
+      }
+      if (passwordSelector) {
+        await page.fill(passwordSelector, cred.password);
+        filled.push("password");
+      }
+      if (submitSelector) {
+        await page.click(submitSelector);
+        filled.push("submitted");
+      }
+
+      await globalWait();
+      return { content: [{ type: "text", text: `Credential "${name}" applied: ${filled.join(", ")}.` }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
+    }
+  }
+);
+
+// list_credentials ------------------------------------------------------------
+server.tool(
+  "list_credentials",
+  `List all stored credentials (passwords masked).`,
+  {},
+  async () => {
+    try {
+      const creds = await loadCredentials();
+      if (creds.length === 0) {
+        return { content: [{ type: "text", text: "No stored credentials. Use store_credential to add one." }] };
+      }
+      const lines = creds.map((c) =>
+        `  ${c.name}: ${c.username} @ ${c.url}${c.extra ? ` (+${Object.keys(c.extra).length} extra fields)` : ""}`
+      );
+      return { content: [{ type: "text", text: "Credentials:\n" + lines.join("\n") }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };

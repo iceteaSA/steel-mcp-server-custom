@@ -50,6 +50,8 @@ export const EnvSchema = z
     TAB_IDLE_SWEEP_INTERVAL_MS: z.coerce.number().default(60000),
     // Directory for persistent profile state (cookies, localStorage).
     PROFILES_DIR: z.string().default("/tmp/steel-mcp/profiles"),
+    // Path to credentials store (encrypted JSON). Used by store_credential / use_credential.
+    CREDENTIALS_FILE: z.string().default("/tmp/steel-mcp/credentials.json"),
   })
   .refine(
     (env) => {
