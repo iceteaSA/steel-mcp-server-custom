@@ -136,35 +136,32 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 
 | Tool | Description |
 |---|---|
-| `list_tabs` | List all open tabs with ID, URL, title, active state, and owner tag |
-| `new_tab` | Open a new tab (optional URL + `owner` tag), returns tab ID |
-| `switch_tab` | Switch active tab by ID — **discouraged** for concurrent workflows; pass `tabId` to each tool instead |
-| `close_tab` | Close a tab by ID (default: current); auto-switches to next remaining |
-| `close_tabs_by_owner` | Close all tabs matching an owner tag — scoped cleanup for one agent without affecting others |
-| `get_current_url` | Returns current page URL and title |
-| `get_screenshot` | Screenshot with outputMode, format, scale, clip, quality |
-| `get_page_text` | Page text with selector, maxChars, outputMode, includeLinks. `matchAll: true` returns JSON array per-element `{text, title, primaryLink, links}` — preferred for list-page scraping |
-| `get_links` | URL-only extraction from anchors under selector; optional `urlPattern` regex filter |
-| `get_attrs` | Per-element attribute extraction; pass `attrs: [...]` to get structured JSON per match |
-| `click` | Click an element by CSS selector |
-| `type` | Type text into an input (clear, submit options) |
-| `select` | Select a dropdown option by value, label, or index |
-| `evaluate` | Run JavaScript in the page context, return JSON result |
-| `wait_for` | Async condition polling (selector/text appear or disappear) |
-| `console_log` | Browser console messages, filterable by level |
-| `scroll` | Scroll the page — `direction: "up"`\|`"down"`, `pixels?` (default 500) |
-| `history` | Browser history op — `action: "back"`\|`"forward"`\|`"reload"` |
-| `go_to_url` | Navigate to a URL. Optional `waitFor` selector + `waitTimeout` — merges nav + wait. Auto-detects Cloudflare/bot walls, returns `isError` on hit |
-| `captcha_status` | Check CapSolver balance and CAPTCHA solving availability |
-| `store_credential` | Store/update/delete a named credential (username + password + extras) for login automation |
-| `use_credential` | Retrieve a credential and optionally auto-fill a login form on the current page |
-| `list_credentials` | List all stored credentials (passwords masked) |
-| `create_profile` | Create a named isolated BrowserContext (separate cookies/localStorage). Auto-restores saved state. Returns tabId |
-| `list_profiles` | Show active + saved profiles with tab counts and save timestamps |
-| `save_profile` | Persist a profile's cookies + localStorage to disk for later restoration |
-| `delete_profile` | Close a profile's context + all tabs. Optionally remove saved state from disk |
-| `start_browser` | Start browser, returns Steel debug URL |
-| `stop_browser` | Stop browser and release Steel session (shared state — prefer `close_tabs_by_owner` for per-agent cleanup) |
+| `list_tabs` | List tabs (filter by owner/profile/tabId). Replaces get_current_url |
+| `new_tab` | Open a new tab (optional URL, owner, profile) |
+| `close_tabs` | Close by tabId, owner, or both. Replaces close_tab + close_tabs_by_owner |
+| `go_to_url` | Navigate + optional waitFor. Auto-detects bot walls. Returns URL + title |
+| `click` | Click element + optional waitFor/waitForText. Reports navigation |
+| `fill` | Fill 1+ form fields. Auto-detects type. Replaces type + select |
+| `scroll` | Scroll up/down. Reports position + page height + percentage |
+| `history` | Back, forward, or reload. Reports URL + title |
+| `wait_for` | Wait for selector/text/textGone. Timeout shows page context |
+| `get_page_text` | Extract text (auto-selects main content area). matchAll for lists |
+| `get_links` | Extract [{text, href}] with optional urlPattern filter |
+| `get_attrs` | Extract specific attributes from matched elements |
+| `get_screenshot` | Screenshot (webp/jpeg/png, selector/clip/fullPage) |
+| `evaluate` | Run JS in page context, return JSON |
+| `get_console` | Browser console messages (filter by level) |
+| `download_file` | Download URL to disk (handles attachments + inline binaries) |
+| `cookies` | Get or set browser cookies. Filter by domain |
+| `credentials` | List/store/update/delete credentials (no args = list) |
+| `use_credential` | Retrieve or auto-fill login form with stored credential |
+| `captcha_status` | CapSolver balance + availability |
+| `create_profile` | Create isolated BrowserContext. Auto-restores saved state |
+| `list_profiles` | Active + saved profiles |
+| `save_profile` | Persist cookies + localStorage to disk |
+| `delete_profile` | Close profile context + tabs |
+| `start_browser` | Start browser, get Session Viewer + Interactive URLs |
+| `stop_browser` | Stop browser (kills all tabs/profiles — use close_tabs for cleanup) |
 
 ### Design principles for new tools
 

@@ -15,12 +15,64 @@ common failures.
 - **You are the brain.** The MCP is a dumb Playwright driver. Every decision
   is yours.
 - **Never `stop_browser` mid-task.** Destroys the shared session + other agents'
-  tabs. For your own cleanup use `close_tabs_by_owner` (see Concurrent Agents).
+  tabs. For your own cleanup use `close_tabs` (see Concurrent Agents).
 - **Auto-init.** No need to call `start_browser` unless you want the Steel
   debug URL to watch live.
 - **Shared session.** Other agents may be using this browser. Open your own
   tab with an `owner` tag, operate with `tabId`, clean up with
-  `close_tabs_by_owner` at the end.
+  `close_tabs` at the end.
+
+## Tool Selection — Which Tool for What
+
+| I want to...                  | Use                                          | Not                     |
+|-------------------------------|----------------------------------------------|-------------------------|
+| Read page content             | `get_page_text(selector: "main")`            | `evaluate` (overkill)   |
+| Get article URLs from a list  | `get_links(selector: "main")`                | `get_page_text(matchAll)`|
+| Scrape structured list data   | `get_page_text(matchAll: true)`              | `evaluate` + loop       |
+| Get data-*, aria-*, src attrs | `get_attrs(selector, attrs)`                 | `evaluate`              |
+| Type in a search box          | `fill(fields: [{selector, value, submit}])`  | `evaluate`              |
+| Fill a login form             | `fill(fields: [...], submitSelector)`        | Multiple `fill` calls   |
+| Click + wait for result       | `click(selector, waitFor: "...")`            | `click` then `wait_for` |
+| Navigate + wait for content   | `go_to_url(url, waitFor: "...")`             | `go_to_url` then `wait_for`|
+| Check what page I'm on        | `list_tabs(tabId: N)`                        | ~~get_current_url~~     |
+| Clean up my tabs              | `close_tabs(owner: "agent:mine")`            | `stop_browser`          |
+| Debug page errors             | `get_console(level: "error")`                | `evaluate` console scan |
+| Compute/filter/custom extract | `evaluate(expression: "...")`                | —                       |
+
+## Common Workflows
+
+### Read a page (2 calls)
+```
+go_to_url(url: "https://example.com", waitFor: "main")
+get_page_text(selector: "main", maxChars: 3000)
+```
+
+### Scrape a list page (2 calls)
+```
+go_to_url(url: "https://news.site.com", waitFor: "article")
+get_page_text(selector: "article", matchAll: true, includeLinks: true, maxEntries: 10)
+```
+
+### Login with stored credentials (3 calls)
+```
+go_to_url(url: "https://app.example.com/login", waitFor: "#email")
+use_credential(name: "myapp", usernameSelector: "#email", passwordSelector: "#password", submitSelector: "button[type=submit]")
+wait_for(text: "Dashboard")
+```
+
+### Multi-agent concurrent scrape
+```
+# Agent A
+new_tab(url: "https://site-a.com", owner: "agent:A")   → Tab 3
+get_page_text(selector: "main", tabId: 3)
+close_tabs(owner: "agent:A")
+
+# Agent B (simultaneously)
+create_profile(name: "b-session", url: "https://site-b.com")  → Tab 4
+get_page_text(selector: "main", tabId: 4)
+save_profile(name: "b-session")
+delete_profile(name: "b-session")
+```
 
 ## Concurrent Agents — Tab Ownership
 
@@ -45,7 +97,7 @@ Multiple agents share one browser session. To avoid stepping on each other:
 
 3. **Clean up only your own tabs** at end of task:
    ```
-   close_tabs_by_owner(owner: "agent:my-scraper-12345")
+   close_tabs(owner:owner: "agent:my-scraper-12345")
    → Closed 3 tab(s) owned by agent:my-scraper-12345: 7, 9, 11
    ```
    Do NOT call `stop_browser` — that kills everyone's tabs.
@@ -54,7 +106,7 @@ Multiple agents share one browser session. To avoid stepping on each other:
 
 Tabs with no tool activity for `TAB_IDLE_TIMEOUT_MS` (default 5 min) are
 auto-closed. Any `tabId`-targeted tool call refreshes the activity timestamp.
-Don't rely on it as your primary cleanup — call `close_tabs_by_owner` when
+Don't rely on it as your primary cleanup — call `close_tabs` when
 you're done. The sweeper is a safety net for abandoned tabs.
 
 ### Browser-closed auto-retry (automatic)
@@ -71,10 +123,10 @@ re-entering passwords. Credentials persist to disk as JSON.
 
 ```
 # Store a credential
-store_credential(name: "github", url: "github.com", username: "user@email.com", password: "s3cret")
+credentials(name: "github", url: "github.com", username: "user@email.com", password: "s3cret")
 
-# List stored credentials (passwords masked)
-list_credentials()
+# List stored credentials (passwords masked — call with no args)
+credentials()
 → github: user@email.com @ github.com
 
 # Auto-fill a login form
@@ -91,7 +143,7 @@ use_credential(name: "github")
 - **Encrypted at rest** when `CREDENTIALS_PASSPHRASE` env is set (AES-256-GCM).
   Without it, stored as plain JSON — homelab-only.
 - **Extra fields** for 2FA secrets, security questions, etc.:
-  `store_credential(name: "aws", ..., extra: '{"account_id": "123456"}')`
+  `credentials(name: "aws", ..., extra: '{"account_id": "123456"}')`
 - **Combine with profiles** for multi-account workflows: create profile
   "github-work", fill with work credential; create "github-personal",
   fill with personal credential. Both active simultaneously.
@@ -229,7 +281,7 @@ expression='(() => { const out = []; document.querySelectorAll("article").forEac
 
 ## Orient → Act → Confirm
 
-1. **Orient** — `get_current_url` / `list_tabs` before acting. Cheap.
+1. **Orient** — `list_tabs` / `list_tabs` before acting. Cheap.
    After `go_to_url`, re-check URL — redirects to login/bot-check happen silently.
 2. **Act** — click, type, navigate.
 3. **Confirm** — `wait_for` before reading. Don't assume page updated.
@@ -270,7 +322,7 @@ Skip waits only for pure static pages (plain HTML, e.g. Ars Technica article bod
 
 Don't trust leftover browser state for a new task.
 
-- Start with `get_current_url` / `list_tabs`.
+- Start with `list_tabs` / `list_tabs`.
 - For fresh work, explicitly `new_tab(url: ...)` instead of reusing.
 - On unrelated page, re-orient before reading.
 
@@ -280,7 +332,7 @@ Proves Steel works:
 
 ```
 go_to_url(url: "https://example.com")
-get_current_url()
+list_tabs()
 get_page_text(selector: "body", maxChars: 500)
 get_screenshot(outputMode: "file")                           # webp default in 0.6.0+
 ```
@@ -295,7 +347,7 @@ Page text + screenshots can be huge. Constrain:
   Quality defaults to 80. Use `outputMode: "file"` when not reading inline.
   Use `scale: 0.5` for large pages. Pass `format: "png"` when you need
   lossless (diagrams, UI regression shots).
-- `get_cookies` — default caps at 50 cookies. Prefer `domain: "example.com"`
+- `cookies` — default caps at 50 cookies. Prefer `domain: "example.com"`
   over `urls: [...]`; simpler and robust against Playwright's matcher quirks.
 - `evaluate` — return only fields needed; no full DOM trees.
 
@@ -416,7 +468,7 @@ Returns `{n: 21, sample: ["<article class=\"...\" ...>"]}`. Read the classes + n
 For bot walls that appear **after** a click (rare — usually on form submits):
 
 ```
-get_current_url()              # check for unexpected redirect
+list_tabs()              # check for unexpected redirect
 evaluate(expression: "document.title")
 ```
 
@@ -452,10 +504,10 @@ type(selector: "input[name=email]", text: "user@example.com")
 type(selector: "input[name=password]", text: "secret")
 click(selector: "button[type=submit]")
 wait_for(text: "Dashboard")
-get_current_url()   # confirm landing, not error
+list_tabs()   # confirm landing, not error
 ```
 
-**Many fields (sign-up / checkout / multi-input):** `fill_form` in one call.
+**Many fields (sign-up / checkout / multi-input):** `fill` in one call.
 Auto-detects each field's type and dispatches correctly (0.6.0+):
 - text/email/tel/password/url/number/textarea/date/time → `page.fill`
 - `<select>` → `page.selectOption` (value by default; use `kind: "selectLabel"` for label or `kind: "selectIndex"` for index)
@@ -466,7 +518,7 @@ Auto-detects each field's type and dispatches correctly (0.6.0+):
 - radios → click the radio whose `value` attribute matches the given value
 
 ```
-fill_form(
+fill(
   fields: [
     {selector: "input[name=email]", value: "user@example.com"},
     {selector: "input[name=password]", value: "secret"},
@@ -483,7 +535,7 @@ fill_form(
 wait_for(text: "Welcome")
 ```
 
-`fill_form` replaces N separate tool calls with one. Pass `skipMissing: true` if some fields are conditionally rendered. Force a specific dispatch per field with `kind: "text"|"check"|"radio"|"select"|"selectLabel"|"selectIndex"`.
+`fill` replaces N separate tool calls with one. Pass `skipMissing: true` if some fields are conditionally rendered. Force a specific dispatch per field with `kind: "text"|"check"|"radio"|"select"|"selectLabel"|"selectIndex"`.
 
 ## Human-in-the-Loop (HITL)
 
@@ -499,7 +551,7 @@ start_browser()
 → "Interactive URL: https://steel.example.com/v1/sessions/debug?..."
 [user logs in]
 wait_for(text: "Dashboard", timeout: 60000)
-get_current_url()
+list_tabs()
 ```
 
 Never handle 2FA / credentials yourself.
@@ -510,19 +562,19 @@ After a successful HITL login, dump the cookies so the next run can skip
 the login entirely. Prefer `domain` filter over `urls` — simpler and robust:
 
 ```
-get_cookies(domain: "target.example.com", limit: 0)
+cookies(domain: "target.example.com", limit: 0)
 → [{name, value, domain, expires, ...}, ...]
 # Save the JSON to disk.
 
 # Next run:
-set_cookies(cookies: [...])   # paste the saved array
+cookies(setCookies:cookies: [...])   # paste the saved array
 go_to_url(url: "https://target.example.com/dashboard")
 ```
 
-`get_cookies` / `set_cookies` operate on the shared context, so cookies
+`cookies` / `cookies` operate on the shared context, so cookies
 survive until `stop_browser` or until they expire naturally.
 
-**Output cap**: without `limit`, `get_cookies` returns at most 50 cookies
+**Output cap**: without `limit`, `cookies` returns at most 50 cookies
 and appends a `[CAPPED — N total]` footer. Set `limit: 0` for all cookies.
 Shared multi-agent contexts can hold hundreds of cross-site cookies, so
 prefer filtering via `domain` or `urls` to keep output tight.
@@ -543,7 +595,7 @@ b = new_tab(url: "https://site-b.com", owner: "agent:my-job-42")  # → Tab 8
 get_page_text(selector: "main", maxChars: 2000, tabId: 7)
 go_to_url(url: "https://site-c.com", tabId: 8)
 get_page_text(selector: "article", matchAll: true, tabId: 8)
-close_tabs_by_owner(owner: "agent:my-job-42")                      # clean up both
+close_tabs(owner:owner: "agent:my-job-42")                      # clean up both
 ```
 
 Rules:
@@ -552,14 +604,14 @@ Rules:
 - `new_tab` uses real CDP context; visible in session viewer.
 - Never `browser.newPage()` / `browser.newContext()` directly — phantom
   contexts. Always use MCP tools.
-- Prefer `close_tabs_by_owner` over `stop_browser` for end-of-task cleanup.
+- Prefer `close_tabs` over `stop_browser` for end-of-task cleanup.
 
 ## Debugging Failures
 
 First stop for unexpected page behavior:
 
 ```
-console_log(level: "error")
+get_console(level: "error")
 ```
 
 Network failures, JS errors, CSP violations all appear here. Check this before
@@ -661,7 +713,7 @@ Rough budget for a single scrape task:
 - 1 `go_to_url`
 - 1 `wait_for` (content loaded)
 - 1 `get_page_text` with `matchAll` (list extraction)
-- 1 `get_current_url` (verify, optional)
+- 1 `list_tabs` (verify, optional)
 
 ≈ 5–6 calls total per page. If you exceed 8 without new info, stop + probe
 with the selector diagnostic — don't iterate blind.

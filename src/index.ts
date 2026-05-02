@@ -1028,13 +1028,24 @@ async function writeToFile(
 // list_tabs -------------------------------------------------------------------
 server.tool(
   "list_tabs",
-  "List all open browser tabs with their tab ID, URL, title, active state, and owner tag (if set via new_tab). Owners let concurrent agents clean up only their own tabs via close_tabs_by_owner.",
-  {},
-  async () => {
+  "List open tabs. Filter by owner, profile, or get a single tab's URL+title via tabId. Returns tab ID, URL, title, owner, and profile for each.",
+  {
+    tabId: z.number().int().min(1).optional().describe("Get info for a specific tab (replaces get_current_url)."),
+    owner: z.string().optional().describe("Filter to tabs with this owner tag."),
+    profile: z.string().optional().describe("Filter to tabs in this profile."),
+  },
+  async ({ tabId, owner, profile }) => {
     try {
-      const tabs = await mgr.listTabs();
+      let tabs = await mgr.listTabs();
+      if (tabId) {
+        const t = tabs.find((t) => t.tabId === tabId);
+        if (!t) return { isError: true, content: [{ type: "text", text: `Tab ${tabId} not found.` }] };
+        return { content: [{ type: "text", text: `Tab ${t.tabId}: ${t.url}\nTitle: ${t.title}${t.profile ? `\nProfile: ${t.profile}` : ""}${t.owner ? `\nOwner: ${t.owner}` : ""}` }] };
+      }
+      if (owner) tabs = tabs.filter((t) => t.owner === owner);
+      if (profile) tabs = tabs.filter((t) => t.profile === profile);
       if (tabs.length === 0) {
-        return { content: [{ type: "text", text: "No open tabs." }] };
+        return { content: [{ type: "text", text: "No matching tabs." }] };
       }
       const lines = tabs.map(
         (t) =>
@@ -1081,23 +1092,37 @@ Concurrent agents: pass an \`owner\` tag (e.g. your agent/session label) so you 
   }
 );
 
-// close_tabs_by_owner ---------------------------------------------------------
+// close_tabs ------------------------------------------------------------------
 server.tool(
-  "close_tabs_by_owner",
-  `Close all tabs owned by a given agent tag. Use this at end-of-task instead of stop_browser, so other agents sharing the browser keep their tabs. Returns the list of closed tab IDs.
-
-If no tabs match the owner tag, returns an empty list silently (not an error).`,
+  "close_tabs",
+  "Close tabs by ID or owner tag. Pass tabId for one tab, owner to close all tabs with that tag, or both. Use instead of stop_browser for per-agent cleanup.",
   {
-    owner: z.string().describe("The owner tag to match (set via new_tab's `owner` parameter)."),
+    tabId: z.number().int().min(1).optional().describe("Close a specific tab by ID."),
+    owner: z.string().optional().describe("Close all tabs with this owner tag."),
   },
-  async ({ owner }) => {
+  async ({ tabId, owner }) => {
     try {
-      const closed = await mgr.closeTabsByOwner(owner);
-      const text =
-        closed.length === 0
-          ? `No tabs found with owner=${owner}.`
-          : `Closed ${closed.length} tab(s) owned by ${owner}: ${closed.join(", ")}`;
-      return { content: [{ type: "text", text }] };
+      if (!tabId && !owner) {
+        // Default: close the active tab
+        const tabs = await mgr.listTabs();
+        const active = tabs.find((t) => t.active);
+        if (!active) return { isError: true, content: [{ type: "text", text: "No active tab to close." }] };
+        await mgr.closeTab(active.tabId);
+        const remaining = await mgr.listTabs();
+        const nowActive = remaining.find((t) => t.active);
+        const suffix = nowActive ? `\nNow on Tab ${nowActive.tabId}: ${nowActive.url}` : "\nNo tabs remaining.";
+        return { content: [{ type: "text", text: `Closed Tab ${active.tabId}.${suffix}` }] };
+      }
+      const parts: string[] = [];
+      if (owner) {
+        const closed = await mgr.closeTabsByOwner(owner);
+        parts.push(closed.length === 0 ? `No tabs with owner=${owner}.` : `Closed ${closed.length} tab(s) owned by ${owner}: ${closed.join(", ")}`);
+      }
+      if (tabId) {
+        await mgr.closeTab(tabId);
+        parts.push(`Closed Tab ${tabId}.`);
+      }
+      return { content: [{ type: "text", text: parts.join("\n") }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
@@ -1105,65 +1130,12 @@ If no tabs match the owner tag, returns an empty list silently (not an error).`,
   }
 );
 
-// (switch_tab removed in 0.5.0 — use `tabId` parameter on every tool instead.
-// Mutating a global "active tab" is not safe under concurrent agent use.)
-
-// close_tab -------------------------------------------------------------------
-server.tool(
-  "close_tab",
-  "Close a browser tab by ID. Defaults to the currently active tab. Automatically switches to the next available tab.",
-  {
-    tabId: z.number().int().min(1).optional().describe("Tab ID to close. Defaults to the currently active tab."),
-  },
-  async ({ tabId }) => {
-    try {
-      const tabs = await mgr.listTabs();
-      const id = tabId ?? tabs.find((t) => t.active)?.tabId;
-      if (!id) return { isError: true, content: [{ type: "text", text: "No active tab to close." }] };
-      await mgr.closeTab(id);
-      const remaining = await mgr.listTabs();
-      const nowActive = remaining.find((t) => t.active);
-      const suffix = nowActive
-        ? `\nNow on Tab ${nowActive.tabId}: ${nowActive.url}`
-        : "\nNo tabs remaining.";
-      return { content: [{ type: "text", text: `Closed Tab ${id}.${suffix}` }] };
-    } catch (err) {
-      const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
-    }
-  }
-);
-
-// get_current_url -------------------------------------------------------------
-server.tool(
-  "get_current_url",
-  "Return the URL and title of a tab. Defaults to the current active tab; pass tabId to target a specific tab (required for concurrent agents).",
-  {
-    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
-  },
-  async ({ tabId }) => {
-    try {
-      const page = await mgr.getPage(tabId);
-      const url = page.url();
-      const title = await page.title();
-      return {
-        content: [{ type: "text", text: `URL: ${url}\nTitle: ${title}` }],
-      };
-    } catch (err) {
-      const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
-    }
-  }
-);
+// (get_current_url removed — use list_tabs instead, which returns URL + title per tab)
 
 // get_screenshot --------------------------------------------------------------
 server.tool(
   "get_screenshot",
-  `Take a screenshot of the current page.
-
-CONTEXT BUDGET — screenshots can be large. Use outputMode: 'file' when you will process or upload the image separately rather than reading it into context. Use 'inline' (default) when you need immediate visual inspection; will auto-downgrade to 'file' if the output exceeds maxInlineBytes.
-
-Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, or clip to a region.`,
+  `Screenshot the page. Default: webp, viewport only, inline. Auto-downgrades to file if too large. Use selector or clip to capture a specific region. Reduce size: scale < 1.0, format 'jpeg', lower quality.`,
   {
     outputMode: z
       .enum(["inline", "file"])
@@ -1390,12 +1362,7 @@ Reduce size with: scale < 1.0, format: 'jpeg' + lower quality, fullPage: false, 
 // get_page_text ---------------------------------------------------------------
 server.tool(
   "get_page_text",
-  `Get visible text content from the current page.
-
-Single match (default): selector picks FIRST element, returns one text blob.
-Multi match (matchAll: true): selector picks ALL elements (querySelectorAll), returns JSON array with per-element text + link data. Ideal for scraping list pages (article cards, product tiles, search results) — one call replaces N evaluate calls.
-
-CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry text, maxEntries to cap array length, outputMode: 'file' to save full output to disk without loading into context. Use a specific CSS selector; avoid dumping document.body.`,
+  `Extract text from the page. Without selector, auto-detects main content area (main/article) before falling back to body. With matchAll: true, returns JSON array of per-element {text, title, primaryLink, links} — ideal for list pages. Use maxChars/maxEntries to control size.`,
   {
     selector: z
       .string()
@@ -1686,11 +1653,7 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
 // get_links ------------------------------------------------------------------
 server.tool(
   "get_links",
-  `Extract anchor URLs from the current page.
-
-Simpler than get_page_text(matchAll) when you only need URLs — no per-element text tree walking. Returns a JSON array of {text, href} objects. Deduped by href (fragment stripped). Optional urlPattern filters to regex-matching hrefs only.
-
-Use cases: scraping article list URLs, link indexes, sitemap-like extraction.`,
+  `Extract links from the page as [{text, href}]. Deduped by href. Use urlPattern to filter by regex. Lighter than get_page_text(matchAll) when you only need URLs.`,
   {
     selector: z
       .string()
@@ -1790,11 +1753,7 @@ Use cases: scraping article list URLs, link indexes, sitemap-like extraction.`,
 // get_attrs -------------------------------------------------------------------
 server.tool(
   "get_attrs",
-  `Extract specific attributes from elements matching a CSS selector.
-
-Returns a JSON array of objects — one per matched element — containing only the attributes you asked for. Special values: "text" returns the element's innerText (preserves whitespace between block-level children, same as what users see), "html" returns outerHTML.
-
-Use when matchAll + links aren't enough — e.g. scraping data-id, data-price, aria-label, src, alt, or structured data from custom markup.`,
+  `Extract specific attributes from matched elements as JSON array. Special attrs: "text" = innerText, "html" = outerHTML. Use for data-*, aria-*, src, alt, or structured data.`,
   {
     selector: z
       .string()
@@ -1869,11 +1828,7 @@ Use when matchAll + links aren't enough — e.g. scraping data-id, data-price, a
 // click -----------------------------------------------------------------------
 server.tool(
   "click",
-  `Click an element on the page identified by a CSS selector.
-
-Use this for buttons, links, checkboxes, or any clickable element. If the selector matches multiple elements, the first visible one is clicked.
-
-Optional waitFor: wait for a CSS selector or text to appear after clicking (saves a separate wait_for call). Reports navigation if the URL changed.`,
+  `Click an element. Reports navigation if URL changes. Optional waitFor/waitForText to confirm result in one call (saves a separate wait_for).`,
   {
     selector: z
       .string()
@@ -1943,149 +1898,15 @@ Optional waitFor: wait for a CSS selector or text to appear after clicking (save
   }
 );
 
-// type ------------------------------------------------------------------------
+// (type and select removed — use fill_form for all form input, including single fields.
+// (type and select removed — use fill for all form input, including single fields.
+//  fill auto-detects field type: text/email/password → fill, select → selectOption,
+//  checkbox → check/uncheck, radio → click. Use submit: true on a field for Enter.)
+
+// fill ------------------------------------------------------------------------
 server.tool(
-  "type",
-  `Type text into an input field, textarea, or other editable element.
-
-Use clear: true to replace existing content (recommended for form fields). Use submit: true to press Enter after typing (useful for search boxes).
-
-After typing, use wait_for to confirm the expected result or get_screenshot to verify the input.`,
-  {
-    selector: z
-      .string()
-      .describe("CSS selector of the input element (e.g. 'input[name=q]', '#email', 'textarea')."),
-    text: z
-      .string()
-      .describe("Text to type into the element."),
-    clear: z
-      .boolean()
-      .default(true)
-      .optional()
-      .describe("Replace any existing content before typing. Default: true."),
-    submit: z
-      .boolean()
-      .default(false)
-      .optional()
-      .describe("Press Enter after typing (e.g. to submit a search form). Default: false."),
-    timeout: z
-      .number()
-      .min(100)
-      .max(30000)
-      .default(10000)
-      .optional()
-      .describe("Max time in ms to wait for the element. Default: 10000."),
-    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
-  },
-  async ({ selector, text, clear = true, submit = false, timeout = 10000, tabId }) => {
-    try {
-      const page = await mgr.getPage(tabId);
-      if (clear) {
-        // fill() replaces content atomically — preferred over triple-click + type.
-        await page.fill(selector, text, { timeout });
-      } else {
-        await page.type(selector, text, { timeout });
-      }
-      const beforeUrl = page.url();
-      if (submit) {
-        await page.press(selector, "Enter");
-      }
-      await globalWait();
-      const action = clear ? "Filled" : "Typed into";
-      const suffix = submit ? " and pressed Enter" : "";
-      const afterUrl = page.url();
-      const navNote = submit && afterUrl !== beforeUrl ? `\nNavigated to: ${afterUrl}` : "";
-      return {
-        content: [{ type: "text", text: `${action} ${selector}${suffix}.${navNote}` }],
-      };
-    } catch (err) {
-      const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
-    }
-  }
-);
-
-// select ----------------------------------------------------------------------
-server.tool(
-  "select",
-  "Select an option from a <select> dropdown element by its value, label, or index.",
-  {
-    selector: z
-      .string()
-      .describe("CSS selector of the <select> element (e.g. 'select[name=country]', '#sort-by')."),
-    value: z
-      .string()
-      .optional()
-      .describe("The option value attribute to select (e.g. 'us', 'price-asc')."),
-    label: z
-      .string()
-      .optional()
-      .describe("The visible option text to select (e.g. 'United States', 'Price: Low to High')."),
-    index: z
-      .number()
-      .int()
-      .min(0)
-      .optional()
-      .describe("Zero-based index of the option to select."),
-    timeout: z
-      .number()
-      .min(100)
-      .max(30000)
-      .default(10000)
-      .optional()
-      .describe("Max time in ms to wait for the element. Default: 10000."),
-    tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
-  },
-  async ({ selector, value, label, index, timeout = 10000, tabId }) => {
-    try {
-      const page = await mgr.getPage(tabId);
-
-      if (value === undefined && label === undefined && index === undefined) {
-        return {
-          isError: true,
-          content: [{ type: "text", text: "At least one of 'value', 'label', or 'index' must be provided." }],
-        };
-      }
-
-      let selectArg: string | { value: string } | { label: string } | { index: number };
-      if (value !== undefined) {
-        selectArg = { value };
-      } else if (label !== undefined) {
-        selectArg = { label };
-      } else {
-        selectArg = { index: index! };
-      }
-
-      const selected = await page.selectOption(selector, selectArg, { timeout });
-      await globalWait();
-      return {
-        content: [{ type: "text", text: `Selected option(s): ${selected.join(", ")} in ${selector}` }],
-      };
-    } catch (err) {
-      const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
-    }
-  }
-);
-
-// fill_form -------------------------------------------------------------------
-server.tool(
-  "fill_form",
-  `Fill multiple form fields in one call. Replaces N separate tool calls for sign-in, sign-up, checkout, and search forms.
-
-Auto-detects field type and dispatches correctly:
-- \`<input type=text/email/tel/password/search/url/number/hidden>\` / \`<textarea>\` → page.fill
-- \`<input type=checkbox>\` — three value shapes:
-    - truthy token ("true"/"1"/"on"/"yes"/"checked"/"y") → page.check
-    - falsy token ("false"/"0"/"off"/"no"/"unchecked"/"n"/"") → page.uncheck
-    - other → targets the checkbox whose \`value\` attribute matches that string (same shape as radio); useful for groups like \`{selector: "input[name=topping]", value: "cheese"}\`
-- \`<input type=radio>\` → click the radio whose \`value\` attribute matches the given value (selector + value disambiguation)
-- \`<select>\` → page.selectOption (value by default; override per-field with \`kind: "selectLabel"\` or \`kind: "selectIndex"\`)
-- \`<input type=date/time/datetime-local/month/week>\` → page.fill (ISO format, e.g. "2026-04-18")
-
-Per-field \`kind\` override forces a specific dispatch if auto-detect is wrong.
-
-Processes fields sequentially; fails fast on the first missing selector unless \`skipMissing\` is set. Pass \`submitSelector\` to click a submit button after all fields are filled.`,
+  "fill",
+  `Fill one or more form fields. Auto-detects type: text/email/password → fill, select → selectOption, checkbox → check/uncheck, radio → click by value. Use for single fields (replaces type/select tools) or entire forms. Pass submitSelector to click submit after filling. Reports navigation if URL changes.`,
   {
     fields: z
       .array(
@@ -2221,35 +2042,53 @@ Processes fields sequentially; fails fast on the first missing selector unless \
   }
 );
 
-// get_cookies -----------------------------------------------------------------
+// cookies ---------------------------------------------------------------------
 server.tool(
-  "get_cookies",
-  `Return browser cookies for the shared context. Filter by URL(s) or domain(s).
-
-Use for debugging auth flows or persisting a session to re-inject later via \`set_cookies\`.
-
-CONTEXT BUDGET — shared browser contexts can hold hundreds of cookies across many sites. Unfiltered calls are capped by \`limit\` (default 50). Prefer \`domain\` for site-scoped queries — simpler and more reliable than \`urls\` which must exactly match host + path + scheme.`,
+  "cookies",
+  `Get or set browser cookies. Default: return cookies (filter by domain). Pass setCookies to inject cookies (e.g. restore a saved session). Cap: 50 cookies unless limit=0.`,
   {
-    urls: z
-      .array(z.string())
-      .optional()
-      .describe(
-        "Optional list of full URLs to filter by (Playwright-style match: host + path + scheme). If Playwright's exact-match returns nothing, falls back to host-contains match."
-      ),
     domain: z
       .union([z.string(), z.array(z.string())])
       .optional()
-      .describe(
-        "Optional domain substring(s) to filter by (e.g. 'github.com' matches '.github.com' + 'www.github.com'). Preferred over `urls` for site-scoped queries."
-      ),
+      .describe("Filter by domain (e.g. 'github.com'). Preferred over urls."),
+    urls: z
+      .array(z.string())
+      .optional()
+      .describe("Filter by full URLs. Falls back to host-contains if exact match empty."),
     limit: z
       .number()
       .optional()
-      .describe("Max cookies returned. Default 50. Set 0 for no cap."),
+      .describe("Max cookies returned. Default 50. Set 0 for all."),
+    setCookies: z
+      .array(
+        z
+          .object({
+            name: z.string(),
+            value: z.string(),
+            url: z.string().optional(),
+            domain: z.string().optional(),
+            path: z.string().optional(),
+            expires: z.number().optional(),
+            httpOnly: z.boolean().optional(),
+            secure: z.boolean().optional(),
+            sameSite: z.enum(["Strict", "Lax", "None"]).optional(),
+          })
+          .passthrough()
+      )
+      .optional()
+      .describe("Inject cookies into the browser context. Each needs name+value and either url or domain+path."),
   },
-  async ({ urls, domain, limit }) => {
+  async ({ urls, domain, limit, setCookies }) => {
     try {
       await mgr.initialize();
+
+      // Set mode — inject cookies and return
+      if (setCookies && setCookies.length > 0) {
+        await mgr.browserContext!.addCookies(setCookies as Parameters<BrowserContext["addCookies"]>[0]);
+        return { content: [{ type: "text", text: `Set ${setCookies.length} cookie(s).` }] };
+      }
+
+      // Get mode
       const cap = limit === undefined ? 50 : limit;
       let cookies = await mgr.browserContext!.cookies(urls);
 
@@ -2313,61 +2152,12 @@ CONTEXT BUDGET — shared browser contexts can hold hundreds of cookies across m
   }
 );
 
-// set_cookies -----------------------------------------------------------------
-server.tool(
-  "set_cookies",
-  `Inject cookies into the shared browser context. Each cookie must have \`name\` + \`value\` and either \`url\` or (\`domain\` + \`path\`).
-
-Use to restore a logged-in session from a saved dump without running the login flow in-browser.`,
-  {
-    cookies: z
-      .array(
-        z
-          .object({
-            name: z.string(),
-            value: z.string(),
-            url: z.string().optional(),
-            domain: z.string().optional(),
-            path: z.string().optional(),
-            expires: z.number().optional().describe("Unix epoch seconds. Omit for a session cookie."),
-            httpOnly: z.boolean().optional(),
-            secure: z.boolean().optional(),
-            sameSite: z.enum(["Strict", "Lax", "None"]).optional(),
-          })
-          .passthrough()
-      )
-      .min(1)
-      .describe("Array of Playwright-shaped cookie objects."),
-  },
-  async ({ cookies }) => {
-    try {
-      await mgr.initialize();
-      await mgr.browserContext!.addCookies(cookies as Parameters<BrowserContext["addCookies"]>[0]);
-      return {
-        content: [{ type: "text", text: `Set ${cookies.length} cookie(s) on the shared browser context.` }],
-      };
-    } catch (err) {
-      const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
-    }
-  }
-);
+// (set_cookies removed — use get_cookies with setCookies param to inject cookies)
 
 // download_file ---------------------------------------------------------------
 server.tool(
   "download_file",
-  `Fetch a URL and save its body to disk. Handles two delivery shapes:
-
-1) **Attachment downloads** — URLs that serve \`Content-Disposition: attachment\`
-   (or a MIME that Chromium saves by default). Uses Playwright's
-   \`waitForEvent('download')\` — works even when \`page.goto\` raises \`ERR_ABORTED\`.
-2) **Inline binaries** — URLs that serve \`application/octet-stream\`, PDFs, CSVs,
-   or API-served bytes WITHOUT a Content-Disposition header. Chromium views
-   these inline, so no download event fires. When the download event times out,
-   this tool falls back to \`context.request.fetch(url)\` — reuses the browser
-   session's cookies/auth headers — and writes the body directly to disk.
-
-Output path defaults to \`OUTPUT_DIR/<suggestedFilename>\`. Pass \`outputPath\` to override.`,
+  `Download a URL to disk. Handles both attachment downloads and inline binaries (auto-fallback to fetch). Uses browser cookies for auth. Pass forceFetch: true to skip download-event detection.`,
   {
     url: z.string().describe("The download URL to fetch."),
     outputPath: z
@@ -2483,13 +2273,7 @@ Output path defaults to \`OUTPUT_DIR/<suggestedFilename>\`. Pass \`outputPath\` 
 // evaluate --------------------------------------------------------------------
 server.tool(
   "evaluate",
-  `Execute JavaScript in the page context and return the result as JSON.
-
-Use this as an escape hatch when no other tool covers your need: reading computed styles, extracting structured data, manipulating the DOM, calling page-level APIs.
-
-When \`selector\` is set, the expression runs with a local \`el\` bound to \`document.querySelector(selector)\`. Use \`el.textContent\`, \`el.getAttribute(...)\`, etc. Returns null if the selector matches nothing.
-
-CONTEXT BUDGET — results are serialised to JSON; large objects can be very large. Keep expressions targeted. The expression must be a valid JS expression (not a statement); wrap multi-line logic in an IIFE: (() => { ... })()`,
+  `Run JavaScript in the page and return the result as JSON. Escape hatch for anything other tools don't cover. With selector: expression gets \`el\` bound to first match (null if none). Must be an expression, not a statement — wrap multi-line in IIFE: (() => { ... })()`,
   {
     expression: z
       .string()
@@ -2536,11 +2320,7 @@ CONTEXT BUDGET — results are serialised to JSON; large objects can be very lar
 // wait_for --------------------------------------------------------------------
 server.tool(
   "wait_for",
-  `Wait for a condition on the page before proceeding — more reliable than sleeping.
-
-Use after an action that triggers async changes (form submit, click, navigation) when you need to confirm the page has updated before reading or screenshotting.
-
-Conditions (at least one required): selector, text, textGone. Returns elapsed time or error on timeout.`,
+  `Wait for a condition before proceeding. Pass selector (CSS), text (appears), or textGone (disappears). On timeout, reports current page URL+title for diagnosis.`,
   {
     selector: z.string().optional().describe("CSS selector to wait for (e.g. '#results', '.loaded')."),
     text: z.string().optional().describe("Text string to wait for anywhere on the page."),
@@ -2620,12 +2400,10 @@ Conditions (at least one required): selector, text, textGone. Returns elapsed ti
   }
 );
 
-// console_log -----------------------------------------------------------------
+// get_console -----------------------------------------------------------------
 server.tool(
-  "console_log",
-  `Return browser console messages captured since the browser was started or last cleared.
-
-CONTEXT BUDGET — console output can be large on noisy pages. Use the level filter to limit to errors/warnings. Use clear: true to reset the buffer after reading.`,
+  "get_console",
+  `Get browser console messages. Filter by level (error/warning/info/log). Use clear: true to reset buffer after reading.`,
   {
     level: z
       .enum(["all", "error", "warning", "info", "log"])
@@ -2813,9 +2591,7 @@ Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back"
 // go_to_url -------------------------------------------------------------------
 server.tool(
   "go_to_url",
-  `Navigate the browser to the specified URL.
-
-Optional waitFor: wait for a CSS selector to appear after navigation (saves a separate wait_for call). Returns isError if the destination page is a bot-check wall (Cloudflare "Just a moment", "Attention Required", or /cdn-cgi/challenge-platform/ redirect).`,
+  `Navigate to a URL. Returns final URL + title. Optional waitFor selector. Auto-detects bot-check walls (Cloudflare/WAF) and returns isError.`,
   {
     url: z.string().describe("The URL to navigate to."),
     waitFor: z
@@ -2881,13 +2657,7 @@ Optional waitFor: wait for a CSS selector to appear after navigation (saves a se
 // start_browser ---------------------------------------------------------------
 server.tool(
   "start_browser",
-  `Start the browser if it is not already running. Returns a Steel debug URL when running in steel mode.
-
-When running in steel mode, returns three URLs:
-- Session Viewer: read-only live view of the browser session
-- Interactive URL: lets a human take control (click, type, solve CAPTCHAs, enter credentials)
-
-If you need the user to intervene (CAPTCHA, login, 2FA), give them the Interactive URL and wait for them to confirm they are done before continuing.`,
+  `Start the browser. Returns Session Viewer (read-only) and Interactive URL (human takeover for CAPTCHA/login/2FA). Auto-starts on first tool call — only needed for the URLs.`,
   {},
   async () => {
     try {
@@ -2907,14 +2677,12 @@ If you need the user to intervene (CAPTCHA, login, 2FA), give them the Interacti
   }
 );
 
-// store_credential ------------------------------------------------------------
+// credentials -----------------------------------------------------------------
 server.tool(
-  "store_credential",
-  `Store, update, or delete a named credential for a site. Credentials persist across sessions.
-
-Use for login automation: store credentials once, then use use_credential to auto-fill login forms.`,
+  "credentials",
+  `Manage stored credentials. Call with no args to list all (passwords masked). Provide name+url+username+password to store/update. Set remove=true to delete.`,
   {
-    name: z.string().describe("Unique name for this credential (e.g., 'github', 'aws-prod')."),
+    name: z.string().optional().describe("Credential name. Omit to list all."),
     url: z.string().optional().describe("URL pattern or domain to associate with this credential (e.g., 'github.com', 'https://console.aws.amazon.com')."),
     username: z.string().optional().describe("Username or email."),
     password: z.string().optional().describe("Password."),
@@ -2924,6 +2692,15 @@ Use for login automation: store credentials once, then use use_credential to aut
   async ({ name, url, username, password, extra, remove }) => {
     try {
       const creds = await loadCredentials();
+
+      // List mode — no name provided
+      if (!name) {
+        if (creds.length === 0) return { content: [{ type: "text", text: "No stored credentials." }] };
+        const lines = creds.map((c) =>
+          `  ${c.name}: ${c.username} @ ${c.url}${c.extra ? ` (+${Object.keys(c.extra).length} extra)` : ""}`
+        );
+        return { content: [{ type: "text", text: "Credentials:\n" + lines.join("\n") }] };
+      }
 
       if (remove) {
         const idx = creds.findIndex((c) => c.name === name);
@@ -2983,7 +2760,7 @@ With selectors: fills the form fields on the page and optionally clicks submit.`
       const creds = await loadCredentials();
       const cred = creds.find((c) => c.name === name);
       if (!cred) {
-        return { isError: true, content: [{ type: "text", text: `Credential "${name}" not found. Use store_credential to save it first.` }] };
+        return { isError: true, content: [{ type: "text", text: `Credential "${name}" not found. Use credentials tool to save it first.` }] };
       }
 
       // If no selectors, just return the credential info
@@ -3024,27 +2801,7 @@ With selectors: fills the form fields on the page and optionally clicks submit.`
   }
 );
 
-// list_credentials ------------------------------------------------------------
-server.tool(
-  "list_credentials",
-  `List all stored credentials (passwords masked).`,
-  {},
-  async () => {
-    try {
-      const creds = await loadCredentials();
-      if (creds.length === 0) {
-        return { content: [{ type: "text", text: "No stored credentials. Use store_credential to add one." }] };
-      }
-      const lines = creds.map((c) =>
-        `  ${c.name}: ${c.username} @ ${c.url}${c.extra ? ` (+${Object.keys(c.extra).length} extra fields)` : ""}`
-      );
-      return { content: [{ type: "text", text: "Credentials:\n" + lines.join("\n") }] };
-    } catch (err) {
-      const error = err as Error;
-      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
-    }
-  }
-);
+// (list_credentials removed — call store_credential with no args to list all)
 
 // captcha_status --------------------------------------------------------------
 server.tool(
@@ -3094,14 +2851,7 @@ server.tool(
 // create_profile --------------------------------------------------------------
 server.tool(
   "create_profile",
-  `Create a named browser profile (isolated BrowserContext) with its own cookies, localStorage, and cache. If a saved profile with this name exists on disk, its cookies/localStorage are restored automatically.
-
-Use profiles for:
-- Concurrent agents that need separate auth sessions
-- Persisting login state across browser restarts
-- Isolating scraping sessions to avoid cross-contamination
-
-Returns a tabId for the new profile's initial page. Use this tabId with all subsequent tools.`,
+  `Create an isolated browser profile with separate cookies/localStorage. Auto-restores saved state if available. Returns a tabId for the profile's initial page. Use new_tab(profile: name) for additional tabs in this profile.`,
   {
     name: z.string().describe("Profile name (e.g., 'shopping', 'research', 'agent-1'). Must be unique among active profiles."),
     url: z.string().optional().describe("Optional URL to navigate to immediately after creating the profile."),
