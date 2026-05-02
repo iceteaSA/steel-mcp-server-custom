@@ -1858,9 +1858,13 @@ After clicking, use wait_for to confirm the expected result before proceeding.`,
   async ({ selector, timeout = 10000, tabId }) => {
     try {
       const page = await mgr.getPage(tabId);
+      const beforeUrl = page.url();
       await page.click(selector, { timeout });
       await globalWait();
-      return { content: [{ type: "text", text: `Clicked: ${selector}` }] };
+      const afterUrl = page.url();
+      const navigated = afterUrl !== beforeUrl;
+      const suffix = navigated ? `\nNavigated to: ${afterUrl}` : "";
+      return { content: [{ type: "text", text: `Clicked: ${selector}${suffix}` }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
@@ -1911,14 +1915,17 @@ After typing, use wait_for to confirm the expected result or get_screenshot to v
       } else {
         await page.type(selector, text, { timeout });
       }
+      const beforeUrl = page.url();
       if (submit) {
         await page.press(selector, "Enter");
       }
       await globalWait();
       const action = clear ? "Filled" : "Typed into";
       const suffix = submit ? " and pressed Enter" : "";
+      const afterUrl = page.url();
+      const navNote = submit && afterUrl !== beforeUrl ? `\nNavigated to: ${afterUrl}` : "";
       return {
-        content: [{ type: "text", text: `${action} ${selector}${suffix}.` }],
+        content: [{ type: "text", text: `${action} ${selector}${suffix}.${navNote}` }],
       };
     } catch (err) {
       const error = err as Error;
@@ -2442,7 +2449,7 @@ CONTEXT BUDGET — results are serialised to JSON; large objects can be very lar
       }
       if (waitAfter) await globalWait();
       const text = result === undefined ? "undefined" : JSON.stringify(result, null, 2);
-      return { content: [{ type: "text", text: text }] };
+      return { content: [{ type: "text", text }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
@@ -2631,7 +2638,10 @@ Merges the old scroll_up / scroll_down tools (0.4.0+). Pass direction="up" or "d
         ({ yDelta }: { yDelta: number }) => {
           const before = window.scrollY;
           window.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
-          return { before, after: window.scrollY };
+          const after = window.scrollY;
+          const pageHeight = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight);
+          const viewportHeight = window.innerHeight;
+          return { before, after, pageHeight, viewportHeight };
         },
         { yDelta: dy }
       );
@@ -2643,11 +2653,15 @@ Merges the old scroll_up / scroll_down tools (0.4.0+). Pass direction="up" or "d
         : actual !== pixels
           ? ` (actual: ${actual}px — reached document edge)`
           : "";
+      const pct = result.pageHeight > 0
+        ? Math.round(((result.after + result.viewportHeight) / result.pageHeight) * 100)
+        : 0;
+      const posInfo = `\nPosition: ${Math.round(result.after)}px / ${result.pageHeight}px (${Math.min(pct, 100)}% through page)`;
       return {
         content: [
           {
             type: "text",
-            text: `Scrolled ${direction} by ${pixels} pixels${suffix}.`,
+            text: `Scrolled ${direction} by ${pixels} pixels${suffix}.${posInfo}`,
           },
         ],
       };
@@ -2767,7 +2781,9 @@ Optional waitFor: wait for a CSS selector to appear after navigation (saves a se
         finalUrl !== url
           ? `Navigated to ${url}\nFinal URL: ${finalUrl}`
           : `Navigated to ${finalUrl}`;
-      return { content: [{ type: "text", text: navLine + waitMsg }] };
+      const pageTitle = title || (await page.title().catch(() => ""));
+      const titleLine = pageTitle ? `\nTitle: ${pageTitle}` : "";
+      return { content: [{ type: "text", text: navLine + titleLine + waitMsg }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
