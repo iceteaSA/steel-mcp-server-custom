@@ -800,7 +800,14 @@ class BrowserManager {
     const savedPath = path.join(env.PROFILES_DIR, `${name}.json`);
     await fs.mkdir(path.dirname(savedPath), { recursive: true });
     await fs.writeFile(savedPath, JSON.stringify(state, null, 2));
-    return savedPath;
+
+    // Return summary for LLM context
+    const lsDomains = Object.keys(localStorage);
+    const cookieDomains = [...new Set(cookies.map((c) => c.domain))];
+    const summary = [savedPath];
+    summary.push(`  ${cookies.length} cookie(s)${cookieDomains.length ? ` from ${cookieDomains.join(", ")}` : ""}`);
+    if (lsDomains.length) summary.push(`  localStorage from ${lsDomains.join(", ")}`);
+    return summary.join("\n");
   }
 
   /**
@@ -2126,6 +2133,7 @@ Processes fields sequentially; fails fast on the first missing selector unless \
           };
         }
       }
+      const beforeUrl = page.url();
       if (submitSelector) {
         await page.click(submitSelector, { timeout });
       }
@@ -2136,7 +2144,11 @@ Processes fields sequentially; fails fast on the first missing selector unless \
         lines.push(`  ok: ${byKind}`);
       }
       if (skipped.length) lines.push(`  skipped: ${skipped.join(", ")}`);
-      if (submitSelector) lines.push(`Clicked submit: ${submitSelector}`);
+      if (submitSelector) {
+        const afterUrl = page.url();
+        lines.push(`Clicked submit: ${submitSelector}`);
+        if (afterUrl !== beforeUrl) lines.push(`Navigated to: ${afterUrl}`);
+      }
       return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (err) {
       const error = err as Error;
@@ -2527,9 +2539,18 @@ Conditions (at least one required): selector, text, textGone. Returns elapsed ti
       };
     } catch (err) {
       const error = err as Error;
+      // Include page context so the LLM can tell if it's on the wrong page
+      // vs right page with wrong selector.
+      let context = "";
+      try {
+        const page = await mgr.getPage(tabId);
+        const url = page.url();
+        const title = await page.title().catch(() => "");
+        context = `\nCurrent page: ${url}${title ? ` — ${title}` : ""}`;
+      } catch { /* */ }
       return {
         isError: true,
-        content: [{ type: "text", text: `wait_for timed out or failed: ${cleanErrorMessage(error)}` }],
+        content: [{ type: "text", text: `wait_for timed out or failed: ${cleanErrorMessage(error)}${context}` }],
       };
     }
   }
@@ -2711,7 +2732,9 @@ Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back"
       const suffix = noOp
         ? ` (no-op — no ${action === "back" ? "previous" : "next"} entry in tab history; URL unchanged)`
         : "";
-      return { content: [{ type: "text", text: `${verb}${suffix}.\nCurrent URL: ${afterUrl}` }] };
+      const pageTitle = await page.title().catch(() => "");
+      const titlePart = pageTitle ? `\nTitle: ${pageTitle}` : "";
+      return { content: [{ type: "text", text: `${verb}${suffix}.\nCurrent URL: ${afterUrl}${titlePart}` }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
