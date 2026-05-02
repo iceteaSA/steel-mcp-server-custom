@@ -390,23 +390,36 @@ class BrowserManager {
    * `owner` tag lets concurrent agents clean up only their own tabs later
    * via close_tabs_by_owner. Auto-retries on transient browser-closed errors.
    */
-  async newTab(url?: string, owner?: string): Promise<{ tabId: number; page: Page }> {
+  async newTab(url?: string, owner?: string, profileName?: string): Promise<{ tabId: number; page: Page }> {
     await this.initialize();
     try {
-      return await this._doNewTab(url, owner);
+      return await this._doNewTab(url, owner, profileName);
     } catch (err) {
       if (!isBrowserClosedError(err)) throw err;
       await this.softReset();
       await sleep(2000);
       await this.initialize();
-      return await this._doNewTab(url, owner);
+      return await this._doNewTab(url, owner, profileName);
     }
   }
 
-  private async _doNewTab(url?: string, owner?: string): Promise<{ tabId: number; page: Page }> {
-    const page = await this.browserContext!.newPage();
+  private async _doNewTab(url?: string, owner?: string, profileName?: string): Promise<{ tabId: number; page: Page }> {
+    // If a profile is specified, open the tab in that profile's context
+    let context = this.browserContext!;
+    if (profileName) {
+      const profile = this.profiles.get(profileName);
+      if (!profile) throw new Error(`Profile "${profileName}" not found. Create it with create_profile first.`);
+      context = profile.context;
+    }
+    const page = await context.newPage();
     const tabId = this.allocateTab(page, owner);
     this.currentTabId = tabId;
+    // Track profile membership
+    if (profileName) {
+      const profile = this.profiles.get(profileName)!;
+      profile.tabIds.add(tabId);
+      this.tabToProfile.set(tabId, profileName);
+    }
     if (url) {
       await page.goto(url, { waitUntil: "domcontentloaded" });
     }
@@ -478,12 +491,12 @@ class BrowserManager {
   }
 
   /** Return a snapshot of all open tabs, including owner tags. */
-  async listTabs(): Promise<{ tabId: number; url: string; title: string; active: boolean; owner?: string }[]> {
+  async listTabs(): Promise<{ tabId: number; url: string; title: string; active: boolean; owner?: string; profile?: string }[]> {
     await this.initialize();
-    const result: { tabId: number; url: string; title: string; active: boolean; owner?: string }[] = [];
+    const result: { tabId: number; url: string; title: string; active: boolean; owner?: string; profile?: string }[] = [];
     for (const [id, page] of this.tabs) {
       if (page.isClosed()) continue;
-      const row: { tabId: number; url: string; title: string; active: boolean; owner?: string } = {
+      const row: { tabId: number; url: string; title: string; active: boolean; owner?: string; profile?: string } = {
         tabId: id,
         url: page.url(),
         title: await page.title(),
@@ -491,6 +504,8 @@ class BrowserManager {
       };
       const o = this.tabOwners.get(id);
       if (o) row.owner = o;
+      const p = this.tabToProfile.get(id);
+      if (p) row.profile = p;
       result.push(row);
     }
     return result;
@@ -795,7 +810,7 @@ server.tool(
       }
       const lines = tabs.map(
         (t) =>
-          `[Tab ${t.tabId}]${t.active ? " *" : ""}${t.owner ? ` (owner=${t.owner})` : ""}  ${t.url}  —  ${t.title}`
+          `[Tab ${t.tabId}]${t.active ? " *" : ""}${t.profile ? ` [${t.profile}]` : ""}${t.owner ? ` (owner=${t.owner})` : ""}  ${t.url}  —  ${t.title}`
       );
       return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (err) {
@@ -814,10 +829,11 @@ Concurrent agents: pass an \`owner\` tag (e.g. your agent/session label) so you 
   {
     url: z.string().optional().describe("URL to navigate to immediately after opening. Optional — omit to open a blank tab."),
     owner: z.string().optional().describe("Optional ownership tag (e.g. 'agent:my-scraper-1'). Lets you clean up only your own tabs later via close_tabs_by_owner."),
+    profile: z.string().optional().describe("Open the tab in this profile's isolated BrowserContext (shares its cookies/localStorage). Must be an active profile created via create_profile."),
   },
-  async ({ url, owner }) => {
+  async ({ url, owner, profile }) => {
     try {
-      const { tabId, page } = await mgr.newTab(url, owner);
+      const { tabId, page } = await mgr.newTab(url, owner, profile);
       await globalWait();
       const finalUrl = page.url();
       const title = await page.title();
