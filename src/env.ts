@@ -54,6 +54,9 @@ export const EnvSchema = z
     // Path to credentials store (JSON). Used by store_credential / use_credential.
     // Defaults to $OUTPUT_DIR/credentials.json — override for a custom location.
     CREDENTIALS_FILE: z.string().optional(),
+    // Passphrase for encrypting credentials at rest (AES-256-GCM).
+    // If not set, credentials are stored in plain JSON (homelab-only).
+    CREDENTIALS_PASSPHRASE: z.string().optional(),
   })
   .transform((env) => ({
     ...env,
