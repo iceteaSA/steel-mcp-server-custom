@@ -88,10 +88,10 @@ use_credential(name: "github")
 
 ### Key rules
 
-- **Passwords stored in plain JSON** at `CREDENTIALS_FILE`. Homelab-only —
-  don't use for production without adding encryption.
+- **Encrypted at rest** when `CREDENTIALS_PASSPHRASE` env is set (AES-256-GCM).
+  Without it, stored as plain JSON — homelab-only.
 - **Extra fields** for 2FA secrets, security questions, etc.:
-  `store_credential(name: "aws", ..., extra: { account_id: "123456" })`
+  `store_credential(name: "aws", ..., extra: '{"account_id": "123456"}')`
 - **Combine with profiles** for multi-account workflows: create profile
   "github-work", fill with work credential; create "github-personal",
   fill with personal credential. Both active simultaneously.
@@ -120,13 +120,13 @@ create_profile(name: "github", url: "https://github.com")
 go_to_url(url: "https://github.com/notifications", tabId: 4)
 get_page_text(selector: "main", tabId: 4)
 
-# 3. Open more tabs within the same profile
-new_tab(url: "https://github.com/pulls", owner: "agent:researcher")
-→ Tab 5 (shares profile "github"'s cookies)
+# 3. Open more tabs within the same profile (pass profile param)
+new_tab(url: "https://github.com/pulls", profile: "github", owner: "agent:researcher")
+→ Tab 5 [github] (shares profile "github"'s cookies)
 
 # 4. Save the profile state (cookies + localStorage) to disk
 save_profile(name: "github")
-→ Profile "github" saved to /tmp/steel-mcp/profiles/github.json
+→ Profile "github" saved to $OUTPUT_DIR/profiles/github.json
 
 # 5. Check what profiles exist
 list_profiles()
@@ -147,6 +147,54 @@ delete_profile(name: "github")
   contexts including profiles. Save first if you want to restore later.
 - **Saved profiles survive restarts.** `create_profile("github")` automatically
   restores cookies/localStorage from the last `save_profile("github")` call.
+- **Profile HTTP UA limitation.** Profile contexts show `HeadlessChrome` in
+  HTTP `User-Agent` headers (server-side). All JS-visible properties
+  (`navigator.userAgent`, `platform`, `plugins`, WebGL, etc.) are fully spoofed.
+  Most anti-bot detection is client-side JS — the HTTP header rarely matters.
+
+## CAPTCHA Solving
+
+CapSolver extension is loaded in the Steel container. It auto-detects and
+solves CAPTCHAs via API (token mode — no visual click simulation).
+
+**Supported:** reCAPTCHA v2/v3, hCaptcha, Cloudflare Turnstile, AWS WAF,
+GeeTest v4, DataDome, ImageToText.
+
+```
+# Check balance and availability before CAPTCHA-heavy tasks
+captcha_status()
+→ Balance: $10.00 | Extension: loaded (token mode)
+```
+
+### Key rules
+
+- **Automatic.** No manual trigger needed — extension detects CAPTCHAs and
+  solves them without agent intervention.
+- **Token mode.** Solutions are injected via API tokens, not visual clicking.
+  More reliable in headless environments.
+- **Budget.** ~$0.80-1.20 per 1000 solves depending on type. Check balance
+  with `captcha_status` before large batches.
+- **Google `/sorry` pages.** CapSolver handles these transparently — wait
+  a few seconds after the redirect and the page loads with results.
+
+## Stealth & Fingerprint
+
+The Steel container presents as a macOS Chrome user from South Africa:
+
+- **UA:** macOS Chrome (version varies per container start)
+- **Platform:** MacIntel
+- **Languages:** en-ZA, en
+- **Timezone:** Africa/Johannesburg
+- **WebGL:** Apple M-series GPU (Metal renderer)
+- **Plugins:** 5 PDF viewer plugins (matches real Chrome)
+- **Canvas/Audio:** Per-session noise (anti-correlation across sessions)
+- **webdriver:** false (hidden)
+- **Intl locale:** en-ZA
+
+The fingerprint is generated fresh on each container start. In the default
+context (non-profile tabs), HTTP and JS fingerprints are unified. Profile
+contexts have full JS-level stealth but HTTP headers show the real Chrome UA
+(see profile limitation above).
 
 ## Calling Routes
 
