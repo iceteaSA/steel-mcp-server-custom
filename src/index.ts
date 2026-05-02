@@ -74,6 +74,13 @@ class BrowserManager {
   private nextTabId = 1;
   private currentTabId = 1;
 
+  // Profile management — multiple isolated BrowserContexts within one browser.
+  // Each profile has its own cookies/localStorage/cache. Tabs from all profiles
+  // share the global tabs map (globally unique tabId), so existing tools work
+  // unchanged — agents just pass their tabId.
+  private profiles: Map<string, { context: BrowserContext; tabIds: Set<number> }> = new Map();
+  private tabToProfile: Map<number, string> = new Map(); // tabId → profileName
+
   /** Mark a tab as recently used. Called on every page-interacting tool. */
   touchTab(tabId: number): void {
     if (this.tabs.has(tabId)) this.tabLastActivity.set(tabId, Date.now());
@@ -487,6 +494,195 @@ class BrowserManager {
       result.push(row);
     }
     return result;
+  }
+
+  /**
+   * Create a named profile (isolated BrowserContext). Optionally restore
+   * cookies from a previously saved profile JSON on disk. Returns the tab ID
+   * of the initial page in the new context.
+   */
+  async createProfile(name: string, url?: string): Promise<{ tabId: number; restored: boolean }> {
+    await this.initialize();
+    if (this.profiles.has(name)) {
+      throw new Error(`Profile "${name}" already exists. Use delete_profile first.`);
+    }
+    const context = await this.browser!.newContext({
+      viewport: { width: env.DEFAULT_VIEWPORT_WIDTH, height: env.DEFAULT_VIEWPORT_HEIGHT },
+    });
+    const page = await context.newPage();
+    const tabId = this.allocateTab(page);
+    this.currentTabId = tabId;
+
+    const profile = { context, tabIds: new Set([tabId]) };
+    this.profiles.set(name, profile);
+    this.tabToProfile.set(tabId, name);
+
+    // Restore saved state if it exists
+    let restored = false;
+    const savedPath = path.join(env.PROFILES_DIR, `${name}.json`);
+    try {
+      const raw = await fs.readFile(savedPath, "utf8");
+      const state = JSON.parse(raw) as {
+        cookies?: Array<{ name: string; value: string; domain: string; path: string; expires?: number; httpOnly?: boolean; secure?: boolean; sameSite?: "Strict" | "Lax" | "None" }>;
+        localStorage?: Record<string, Record<string, string>>;
+      };
+      if (state.cookies?.length) {
+        await context.addCookies(state.cookies);
+        restored = true;
+      }
+      // localStorage can only be set per-origin after navigating there.
+      // We'll inject it after navigation if a URL was provided.
+      if (url && state.localStorage) {
+        await page.goto(url, { waitUntil: "domcontentloaded" });
+        const origin = new URL(url).origin;
+        const ls = state.localStorage[origin];
+        if (ls) {
+          await page.evaluate((entries: Record<string, string>) => {
+            for (const [k, v] of Object.entries(entries)) {
+              localStorage.setItem(k, v);
+            }
+          }, ls);
+        }
+        return { tabId, restored: true };
+      }
+    } catch {
+      // No saved state — that's fine
+    }
+
+    if (url) {
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+    }
+    return { tabId, restored };
+  }
+
+  /**
+   * Save a profile's cookies + localStorage to disk as JSON.
+   * localStorage is captured from all origins the profile has visited.
+   */
+  async saveProfile(name: string): Promise<string> {
+    const profile = this.profiles.get(name);
+    if (!profile) throw new Error(`Profile "${name}" is not active.`);
+
+    const cookies = await profile.context.cookies();
+
+    // Collect localStorage from all open pages in this profile
+    const localStorage: Record<string, Record<string, string>> = {};
+    for (const tabId of profile.tabIds) {
+      const page = this.tabs.get(tabId);
+      if (!page || page.isClosed()) continue;
+      try {
+        const origin = new URL(page.url()).origin;
+        if (origin === "about:" || origin === "chrome:") continue;
+        const ls = await page.evaluate(() => {
+          const entries: Record<string, string> = {};
+          for (let i = 0; i < window.localStorage.length; i++) {
+            const key = window.localStorage.key(i);
+            if (key) entries[key] = window.localStorage.getItem(key) ?? "";
+          }
+          return entries;
+        });
+        if (Object.keys(ls).length > 0) {
+          localStorage[origin] = ls;
+        }
+      } catch {
+        // Page might be on a special URL or crashed — skip
+      }
+    }
+
+    const state = { cookies, localStorage, savedAt: new Date().toISOString() };
+    const savedPath = path.join(env.PROFILES_DIR, `${name}.json`);
+    await fs.mkdir(path.dirname(savedPath), { recursive: true });
+    await fs.writeFile(savedPath, JSON.stringify(state, null, 2));
+    return savedPath;
+  }
+
+  /**
+   * List all active profiles + any saved profiles on disk.
+   */
+  async listProfiles(): Promise<Array<{ name: string; active: boolean; tabCount: number; savedAt?: string }>> {
+    const result: Array<{ name: string; active: boolean; tabCount: number; savedAt?: string }> = [];
+
+    // Active profiles
+    for (const [name, profile] of this.profiles) {
+      const liveTabs = [...profile.tabIds].filter((id) => {
+        const p = this.tabs.get(id);
+        return p && !p.isClosed();
+      });
+      result.push({ name, active: true, tabCount: liveTabs.length });
+    }
+
+    // Saved profiles on disk (that aren't currently active)
+    try {
+      const dir = env.PROFILES_DIR;
+      const files = await fs.readdir(dir);
+      for (const f of files) {
+        if (!f.endsWith(".json")) continue;
+        const name = f.replace(".json", "");
+        if (this.profiles.has(name)) {
+          // Already in the active list — add savedAt
+          const existing = result.find((r) => r.name === name);
+          if (existing) {
+            try {
+              const raw = await fs.readFile(path.join(dir, f), "utf8");
+              const state = JSON.parse(raw);
+              existing.savedAt = state.savedAt;
+            } catch { /* */ }
+          }
+          continue;
+        }
+        let savedAt: string | undefined;
+        try {
+          const raw = await fs.readFile(path.join(dir, f), "utf8");
+          const state = JSON.parse(raw);
+          savedAt = state.savedAt;
+        } catch { /* */ }
+        result.push({ name, active: false, tabCount: 0, savedAt });
+      }
+    } catch {
+      // profiles dir may not exist yet
+    }
+
+    return result;
+  }
+
+  /**
+   * Delete a profile: close its context + all tabs, optionally remove saved state.
+   */
+  async deleteProfile(name: string, removeSaved = false): Promise<void> {
+    const profile = this.profiles.get(name);
+    if (profile) {
+      // Close all tabs in this profile
+      for (const tabId of profile.tabIds) {
+        try {
+          const page = this.tabs.get(tabId);
+          if (page && !page.isClosed()) await page.close().catch(() => {});
+          this.tabs.delete(tabId);
+          this.tabOwners.delete(tabId);
+          this.tabLastActivity.delete(tabId);
+          this.tabToProfile.delete(tabId);
+        } catch { /* */ }
+      }
+      // Close the context
+      await profile.context.close().catch(() => {});
+      this.profiles.delete(name);
+    }
+
+    if (removeSaved) {
+      const savedPath = path.join(env.PROFILES_DIR, `${name}.json`);
+      await fs.unlink(savedPath).catch(() => {});
+    }
+  }
+
+  /**
+   * Override allocateTab to also track profile membership.
+   */
+  newTabInProfile(profileName: string, page: Page, owner?: string): number {
+    const profile = this.profiles.get(profileName);
+    if (!profile) throw new Error(`Profile "${profileName}" not found.`);
+    const tabId = this.allocateTab(page, owner);
+    profile.tabIds.add(tabId);
+    this.tabToProfile.set(tabId, profileName);
+    return tabId;
   }
 
   async stop() {
@@ -2323,6 +2519,97 @@ If you need the user to intervene (CAPTCHA, login, 2FA), give them the Interacti
         lines.push(`Interactive URL: ${mgr.debugUrl}?interactive=true&showControls=true`);
       }
       return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
+    }
+  }
+);
+
+// create_profile --------------------------------------------------------------
+server.tool(
+  "create_profile",
+  `Create a named browser profile (isolated BrowserContext) with its own cookies, localStorage, and cache. If a saved profile with this name exists on disk, its cookies/localStorage are restored automatically.
+
+Use profiles for:
+- Concurrent agents that need separate auth sessions
+- Persisting login state across browser restarts
+- Isolating scraping sessions to avoid cross-contamination
+
+Returns a tabId for the new profile's initial page. Use this tabId with all subsequent tools.`,
+  {
+    name: z.string().describe("Profile name (e.g., 'shopping', 'research', 'agent-1'). Must be unique among active profiles."),
+    url: z.string().optional().describe("Optional URL to navigate to immediately after creating the profile."),
+  },
+  async ({ name, url }) => {
+    try {
+      const { tabId, restored } = await mgr.createProfile(name, url);
+      const parts = [`Profile "${name}" created. Tab ID: ${tabId}`];
+      if (restored) parts.push("(restored saved cookies/localStorage)");
+      if (url) parts.push(`Navigated to ${url}`);
+      return { content: [{ type: "text", text: parts.join(" ") }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
+    }
+  }
+);
+
+// list_profiles ---------------------------------------------------------------
+server.tool(
+  "list_profiles",
+  `List all browser profiles — both active (with live BrowserContexts) and saved (on disk). Shows tab count for active profiles and last saved timestamp for persisted ones.`,
+  {},
+  async () => {
+    try {
+      const profiles = await mgr.listProfiles();
+      if (profiles.length === 0) {
+        return { content: [{ type: "text", text: "No profiles. Use create_profile to create one." }] };
+      }
+      const lines = profiles.map((p) => {
+        const status = p.active ? `active (${p.tabCount} tab${p.tabCount !== 1 ? "s" : ""})` : "saved";
+        const saved = p.savedAt ? ` | saved: ${p.savedAt}` : "";
+        return `  ${p.name}: ${status}${saved}`;
+      });
+      return { content: [{ type: "text", text: "Profiles:\n" + lines.join("\n") }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
+    }
+  }
+);
+
+// save_profile ----------------------------------------------------------------
+server.tool(
+  "save_profile",
+  `Persist a profile's cookies and localStorage to disk as JSON. The saved state can be restored later by create_profile with the same name. Useful for preserving login sessions across browser restarts.`,
+  {
+    name: z.string().describe("Name of the active profile to save."),
+  },
+  async ({ name }) => {
+    try {
+      const savedPath = await mgr.saveProfile(name);
+      return { content: [{ type: "text", text: `Profile "${name}" saved to ${savedPath}` }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
+    }
+  }
+);
+
+// delete_profile --------------------------------------------------------------
+server.tool(
+  "delete_profile",
+  `Delete a browser profile. Closes its BrowserContext and all tabs. Optionally removes the saved state from disk.`,
+  {
+    name: z.string().describe("Name of the profile to delete."),
+    removeSaved: z.boolean().optional().default(false).describe("Also remove the saved profile JSON from disk. Default: false (keep saved state for future restoration)."),
+  },
+  async ({ name, removeSaved }) => {
+    try {
+      await mgr.deleteProfile(name, removeSaved);
+      const extra = removeSaved ? " (saved state also removed)" : "";
+      return { content: [{ type: "text", text: `Profile "${name}" deleted${extra}.` }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };

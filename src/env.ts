@@ -48,6 +48,8 @@ export const EnvSchema = z
     TAB_IDLE_TIMEOUT_MS: z.coerce.number().default(300000),
     // How often the idle sweeper runs (ms). Default: 60s.
     TAB_IDLE_SWEEP_INTERVAL_MS: z.coerce.number().default(60000),
+    // Directory for persistent profile state (cookies, localStorage).
+    PROFILES_DIR: z.string().default("/tmp/steel-mcp/profiles"),
   })
   .refine(
     (env) => {

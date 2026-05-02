@@ -64,6 +64,58 @@ closed` on a very recent `start_browser` / `new_tab`, the server now soft-resets
 + retries internally. You don't need retry loops around `new_tab`. If the
 retried call still fails, treat it as a real browser outage.
 
+## Profiles — Concurrent Isolated Sessions
+
+Profiles let multiple agents operate simultaneously with separate cookie jars,
+localStorage, and browsing history. Each profile is a distinct BrowserContext
+within the same Chromium instance — zero resource duplication.
+
+### When to use profiles
+
+- Multiple agents need **separate auth sessions** (e.g. Agent A logged into
+  GitHub, Agent B logged into Jira — concurrently)
+- You want to **persist login state** across browser restarts
+- You need **isolation** between scraping targets to avoid cookie leaks
+
+### Workflow
+
+```
+# 1. Create a named profile (auto-restores saved cookies if available)
+create_profile(name: "github", url: "https://github.com")
+→ Profile "github" created. Tab ID: 4
+
+# 2. Use the returned tabId for all operations in this profile
+go_to_url(url: "https://github.com/notifications", tabId: 4)
+get_page_text(selector: "main", tabId: 4)
+
+# 3. Open more tabs within the same profile
+new_tab(url: "https://github.com/pulls", owner: "agent:researcher")
+→ Tab 5 (shares profile "github"'s cookies)
+
+# 4. Save the profile state (cookies + localStorage) to disk
+save_profile(name: "github")
+→ Profile "github" saved to /tmp/steel-mcp/profiles/github.json
+
+# 5. Check what profiles exist
+list_profiles()
+→ github: active (2 tabs) | saved: 2026-05-02T18:30:00Z
+   jira: saved
+
+# 6. Clean up when done
+delete_profile(name: "github")
+→ Closes all tabs + BrowserContext. Saved state remains on disk.
+```
+
+### Key rules
+
+- **Tabs from profiles use the same global tabId space.** All existing tools
+  work unchanged — just pass the tabId returned by `create_profile`.
+- **Profiles don't share cookies.** That's the point. Each context is isolated.
+- **`save_profile` before `stop_browser`.** Stopping the browser kills all
+  contexts including profiles. Save first if you want to restore later.
+- **Saved profiles survive restarts.** `create_profile("github")` automatically
+  restores cookies/localStorage from the last `save_profile("github")` call.
+
 ## Calling Routes
 
 Two ways this MCP is reached. Escaping rules differ.
