@@ -49,10 +49,18 @@ export const EnvSchema = z
     // How often the idle sweeper runs (ms). Default: 60s.
     TAB_IDLE_SWEEP_INTERVAL_MS: z.coerce.number().default(60000),
     // Directory for persistent profile state (cookies, localStorage).
-    PROFILES_DIR: z.string().default("/tmp/steel-mcp/profiles"),
-    // Path to credentials store (encrypted JSON). Used by store_credential / use_credential.
-    CREDENTIALS_FILE: z.string().default("/tmp/steel-mcp/credentials.json"),
+    // Defaults to $OUTPUT_DIR/profiles — override for a custom location.
+    PROFILES_DIR: z.string().optional(),
+    // Path to credentials store (JSON). Used by store_credential / use_credential.
+    // Defaults to $OUTPUT_DIR/credentials.json — override for a custom location.
+    CREDENTIALS_FILE: z.string().optional(),
   })
+  .transform((env) => ({
+    ...env,
+    // Derive persistent paths from OUTPUT_DIR if not explicitly set.
+    PROFILES_DIR: env.PROFILES_DIR ?? `${env.OUTPUT_DIR}/profiles`,
+    CREDENTIALS_FILE: env.CREDENTIALS_FILE ?? `${env.OUTPUT_DIR}/credentials.json`,
+  }))
   .refine(
     (env) => {
       // STEEL_API_KEY is required for Steel Cloud (no STEEL_BASE_URL).
