@@ -1575,14 +1575,27 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
       }
 
       // --- single-match path (original behavior) ------------------------
-      // Returns a sentinel {__noMatch:true} when a selector is supplied but
-      // doesn't match anything, so the caller can produce an explicit
-      // "no match" message instead of a bare empty string that mcporter
-      // formats as the raw tool response object.
-      type SingleResult = { __noMatch?: true; text?: string };
+      // When no selector is specified, try content-area elements first (main,
+      // article, [role=main]) to avoid dumping nav/footer/ads. Falls back to
+      // body if none found. This saves LLMs from wasting tokens on noise.
+      const effectiveSelector: string | null = selector ?? null;
+      type SingleResult = { __noMatch?: true; text?: string; usedSelector?: string };
       const rawResult: SingleResult = includeLinks
         ? await page.evaluate((sel: string | null) => {
-            const root = sel ? document.querySelector(sel) : document.body;
+            let root: Element | null = null;
+            if (sel) {
+              root = document.querySelector(sel);
+            } else {
+              // Smart fallback: try content-area selectors before body
+              for (const s of ["main", "article", "[role=main]"]) {
+                const el = document.querySelector(s);
+                if (el && (el.textContent?.trim().length ?? 0) > 100) {
+                  root = el;
+                  break;
+                }
+              }
+              if (!root) root = document.body;
+            }
             if (!root) return sel ? { __noMatch: true } : { text: "" };
             const blockTags = new Set(["P","DIV","LI","H1","H2","H3","H4","H5","H6","TR","BLOCKQUOTE","PRE","SECTION","ARTICLE","HEADER","FOOTER","NAV","ASIDE","MAIN","DETAILS","SUMMARY","FIGCAPTION","DT","DD"]);
             const walk = (node: Element): string => {
@@ -1597,12 +1610,24 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
               return blockTags.has(node.tagName) ? "\n" + inner + "\n" : inner;
             };
             return { text: walk(root as Element) };
-          }, selector ?? null)
+          }, effectiveSelector)
         : await page.evaluate((sel: string | null) => {
-            const root = sel ? document.querySelector(sel) : document.body;
+            let root: Element | null = null;
+            if (sel) {
+              root = document.querySelector(sel);
+            } else {
+              for (const s of ["main", "article", "[role=main]"]) {
+                const el = document.querySelector(s);
+                if (el && (el.textContent?.trim().length ?? 0) > 100) {
+                  root = el;
+                  break;
+                }
+              }
+              if (!root) root = document.body;
+            }
             if (!root) return sel ? { __noMatch: true } : { text: "" };
             return { text: (root as HTMLElement)?.innerText ?? "" };
-          }, selector ?? null);
+          }, effectiveSelector);
 
       if (rawResult.__noMatch) {
         return {
@@ -1848,11 +1873,26 @@ server.tool(
 
 Use this for buttons, links, checkboxes, or any clickable element. If the selector matches multiple elements, the first visible one is clicked.
 
-After clicking, use wait_for to confirm the expected result before proceeding.`,
+Optional waitFor: wait for a CSS selector or text to appear after clicking (saves a separate wait_for call). Reports navigation if the URL changed.`,
   {
     selector: z
       .string()
       .describe("CSS selector of the element to click (e.g. 'button[type=submit]', '#login', 'a.nav-link')."),
+    waitFor: z
+      .string()
+      .optional()
+      .describe("CSS selector to wait for after clicking (e.g. '#results', '.loaded'). Saves a separate wait_for call."),
+    waitForText: z
+      .string()
+      .optional()
+      .describe("Text to wait for on the page after clicking (e.g. 'Order confirmed'). Alternative to waitFor selector."),
+    waitTimeout: z
+      .number()
+      .min(100)
+      .max(60000)
+      .default(10000)
+      .optional()
+      .describe("Timeout in ms for waitFor/waitForText. Default: 10000."),
     timeout: z
       .number()
       .min(100)
@@ -1862,16 +1902,40 @@ After clicking, use wait_for to confirm the expected result before proceeding.`,
       .describe("Max time in ms to wait for the element to be clickable. Default: 10000."),
     tabId: z.number().int().min(1).optional().describe("Optional tab ID. Omit to use the current active tab."),
   },
-  async ({ selector, timeout = 10000, tabId }) => {
+  async ({ selector, waitFor, waitForText, waitTimeout = 10000, timeout = 10000, tabId }) => {
     try {
       const page = await mgr.getPage(tabId);
       const beforeUrl = page.url();
       await page.click(selector, { timeout });
       await globalWait();
+
+      // Optional post-click wait
+      let waitMsg = "";
+      if (waitFor) {
+        try {
+          await page.waitForSelector(waitFor, { timeout: waitTimeout });
+          waitMsg = `\nwaitFor "${waitFor}" matched.`;
+        } catch {
+          waitMsg = `\nwaitFor "${waitFor}" TIMED OUT after ${waitTimeout}ms.`;
+        }
+      }
+      if (waitForText) {
+        try {
+          await page.waitForFunction(
+            (t: string) => document.body?.innerText?.includes(t),
+            waitForText,
+            { timeout: waitTimeout }
+          );
+          waitMsg += `\nText "${waitForText}" appeared.`;
+        } catch {
+          waitMsg += `\nText "${waitForText}" NOT found after ${waitTimeout}ms.`;
+        }
+      }
+
       const afterUrl = page.url();
       const navigated = afterUrl !== beforeUrl;
-      const suffix = navigated ? `\nNavigated to: ${afterUrl}` : "";
-      return { content: [{ type: "text", text: `Clicked: ${selector}${suffix}` }] };
+      const navMsg = navigated ? `\nNavigated to: ${afterUrl}` : "";
+      return { content: [{ type: "text", text: `Clicked: ${selector}${navMsg}${waitMsg}` }] };
     } catch (err) {
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
