@@ -2932,6 +2932,133 @@ server.tool(
   }
 );
 
+// smoke_test ------------------------------------------------------------------
+server.tool(
+  "smoke_test",
+  `Self-test: navigates to example.com, checks fingerprint consistency, verifies stealth properties, and reports pass/fail for each check. Use to verify the browser is working correctly after restarts or config changes.`,
+  {},
+  async () => {
+    try {
+      // Use a temporary tab so we don't disrupt any active session
+      const { tabId, page } = await mgr.newTab("https://example.com");
+      const results: Array<{ check: string; pass: boolean; detail: string }> = [];
+
+      // 1. Navigation
+      try {
+        const title = await page.title();
+        results.push({ check: "Navigation", pass: title.includes("Example"), detail: `Title: ${title}` });
+      } catch (e) {
+        results.push({ check: "Navigation", pass: false, detail: (e as Error).message });
+      }
+
+      // 2. Fingerprint
+      try {
+        const fp = await page.evaluate(() => ({
+          ua: navigator.userAgent,
+          platform: navigator.platform,
+          webdriver: navigator.webdriver,
+          plugins: navigator.plugins.length,
+          langs: navigator.languages,
+          webgl: (() => {
+            const c = document.createElement("canvas");
+            const gl = c.getContext("webgl");
+            if (!gl) return "none";
+            const d = gl.getExtension("WEBGL_debug_renderer_info");
+            return d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : "no ext";
+          })(),
+        }));
+
+        const uaMac = fp.ua.includes("Macintosh");
+        const platMac = fp.platform === "MacIntel";
+        results.push({
+          check: "UA → macOS",
+          pass: uaMac,
+          detail: fp.ua.substring(0, 80),
+        });
+        results.push({
+          check: "Platform match",
+          pass: uaMac === platMac,
+          detail: `platform=${fp.platform}`,
+        });
+        results.push({
+          check: "Webdriver hidden",
+          pass: fp.webdriver === false,
+          detail: `webdriver=${fp.webdriver}`,
+        });
+        results.push({
+          check: "Plugins spoofed",
+          pass: fp.plugins >= 3,
+          detail: `${fp.plugins} plugins`,
+        });
+        results.push({
+          check: "WebGL spoofed",
+          pass: fp.webgl !== "none" && !fp.webgl.includes("SwiftShader"),
+          detail: (fp.webgl as string).substring(0, 60),
+        });
+        results.push({
+          check: "Languages",
+          pass: fp.langs.length > 0,
+          detail: fp.langs.join(", "),
+        });
+      } catch (e) {
+        results.push({ check: "Fingerprint", pass: false, detail: (e as Error).message });
+      }
+
+      // 3. Canvas noise
+      try {
+        const noised = await page.evaluate(() => {
+          const c = document.createElement("canvas");
+          c.width = 50; c.height = 50;
+          const ctx = c.getContext("2d")!;
+          ctx.fillStyle = "red";
+          ctx.fillRect(0, 0, 25, 25);
+          ctx.fillText("test", 5, 15);
+          return c.toDataURL() !== c.toDataURL();
+        });
+        results.push({ check: "Canvas noise", pass: noised, detail: noised ? "active" : "NOT noised" });
+      } catch (e) {
+        results.push({ check: "Canvas noise", pass: false, detail: (e as Error).message });
+      }
+
+      // 4. CapSolver
+      const apiKey = process.env.CAPSOLVER_API_KEY;
+      if (apiKey) {
+        try {
+          const res = await fetch("https://api.capsolver.com/getBalance", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ clientKey: apiKey }),
+          });
+          const data = (await res.json()) as { balance?: number; errorId?: number };
+          const hasBalance = (data.balance ?? 0) > 0;
+          results.push({ check: "CapSolver", pass: hasBalance, detail: `$${data.balance?.toFixed(2) ?? "0.00"}` });
+        } catch {
+          results.push({ check: "CapSolver", pass: false, detail: "API unreachable" });
+        }
+      } else {
+        results.push({ check: "CapSolver", pass: false, detail: "No API key set" });
+      }
+
+      // Clean up temp tab
+      await mgr.closeTab(tabId).catch(() => {});
+
+      // Format
+      const passed = results.filter((r) => r.pass).length;
+      const total = results.length;
+      const lines = results.map((r) => `${r.pass ? "✓" : "✗"} ${r.check}: ${r.detail}`);
+      lines.push(`\n${passed}/${total} checks passed`);
+
+      return {
+        content: [{ type: "text", text: lines.join("\n") }],
+        ...(passed < total ? { isError: true } : {}),
+      };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: `Smoke test failed to run: ${cleanErrorMessage(error)}` }] };
+    }
+  }
+);
+
 // stop_browser ----------------------------------------------------------------
 server.tool(
   "stop_browser",
