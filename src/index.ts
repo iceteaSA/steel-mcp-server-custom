@@ -99,6 +99,12 @@ class BrowserManager {
       this.tabs.delete(id);
       this.tabOwners.delete(id);
       this.tabLastActivity.delete(id);
+      const profileName = this.tabToProfile.get(id);
+      if (profileName) {
+        this.tabToProfile.delete(id);
+        const profile = this.profiles.get(profileName);
+        if (profile) profile.tabIds.delete(id);
+      }
     });
     return id;
   }
@@ -1790,7 +1796,7 @@ Use when matchAll + links aren't enough — e.g. scraping data-id, data-price, a
                 // all visual whitespace → "Header1h agoTitle" style jams.
                 const raw =
                   (el as HTMLElement).innerText ?? el.textContent ?? "";
-                out[name] = raw.replace(/\s+/g, " ").trim();
+                out[name] = raw.replace(/[^\S\n]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
               } else if (name === "html") {
                 out[name] = (el as HTMLElement).outerHTML ?? null;
               } else {
