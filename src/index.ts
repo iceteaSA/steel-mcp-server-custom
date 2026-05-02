@@ -1464,7 +1464,9 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
               : [document.body];
             const collect = (root: Element) => {
               const rawLinks: Array<{ text: string; href: string }> = [];
+              const blockTags = new Set(["P","DIV","LI","H1","H2","H3","H4","H5","H6","TR","BLOCKQUOTE","PRE","SECTION","ARTICLE","HEADER","FOOTER","NAV","ASIDE","MAIN","DETAILS","SUMMARY","FIGCAPTION","DT","DD"]);
               const walk = (node: Element): string => {
+                if (node.tagName === "BR") return "\n";
                 if (node.tagName === "A") {
                   const href = (node as HTMLAnchorElement).href;
                   const txt = (node.textContent ?? "")
@@ -1473,15 +1475,16 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
                   if (withLinks && href) rawLinks.push({ text: txt, href });
                   return txt;
                 }
-                return Array.from(node.childNodes)
+                const inner = Array.from(node.childNodes)
                   .map((n) =>
                     n.nodeType === 3
                       ? n.textContent ?? ""
                       : walk(n as Element)
                   )
-                  .join(" ");
+                  .join("");
+                return blockTags.has(node.tagName) ? "\n" + inner + "\n" : inner;
               };
-              const text = walk(root).replace(/\s+/g, " ").trim();
+              const text = walk(root).replace(/[^\S\n]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
               return { text, rawLinks };
             };
             return roots.map(collect);
@@ -1568,14 +1571,17 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
         ? await page.evaluate((sel: string | null) => {
             const root = sel ? document.querySelector(sel) : document.body;
             if (!root) return sel ? { __noMatch: true } : { text: "" };
+            const blockTags = new Set(["P","DIV","LI","H1","H2","H3","H4","H5","H6","TR","BLOCKQUOTE","PRE","SECTION","ARTICLE","HEADER","FOOTER","NAV","ASIDE","MAIN","DETAILS","SUMMARY","FIGCAPTION","DT","DD"]);
             const walk = (node: Element): string => {
+              if (node.tagName === "BR") return "\n";
               if (node.tagName === "A") {
                 const href = (node as HTMLAnchorElement).href;
                 return `${node.textContent?.trim()} [${href}]`;
               }
-              return Array.from(node.childNodes)
+              const inner = Array.from(node.childNodes)
                 .map((n) => (n.nodeType === 3 ? n.textContent ?? "" : walk(n as Element)))
-                .join(" ");
+                .join("");
+              return blockTags.has(node.tagName) ? "\n" + inner + "\n" : inner;
             };
             return { text: walk(root as Element) };
           }, selector ?? null)
@@ -1595,7 +1601,12 @@ CONTEXT BUDGET — page text can be very large. Use maxChars to cap per-entry te
           ],
         };
       }
-      let text: string = (rawResult.text ?? "").replace(/\s+/g, " ").trim();
+      // Collapse horizontal whitespace (spaces/tabs) but preserve newlines.
+      // Then collapse 3+ consecutive newlines into double newline.
+      let text: string = (rawResult.text ?? "")
+        .replace(/[^\S\n]+/g, " ")       // collapse spaces/tabs (not \n)
+        .replace(/\n{3,}/g, "\n\n")       // 3+ newlines → 2
+        .trim();
 
       if (outputMode === "file") {
         const filePath = await writeToFile(
