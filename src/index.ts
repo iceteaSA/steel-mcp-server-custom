@@ -2695,6 +2695,51 @@ server.tool(
   }
 );
 
+// captcha_status --------------------------------------------------------------
+server.tool(
+  "captcha_status",
+  `Check CapSolver CAPTCHA solving status: API balance and whether the extension is loaded. Useful before tasks that may encounter CAPTCHAs.`,
+  {},
+  async () => {
+    try {
+      // Check CapSolver balance via API
+      const apiKey = process.env.CAPSOLVER_API_KEY;
+      let balance: number | null = null;
+      let apiError: string | undefined;
+
+      if (apiKey) {
+        try {
+          const res = await fetch("https://api.capsolver.com/getBalance", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ clientKey: apiKey }),
+          });
+          const data = (await res.json()) as { balance?: number; errorId?: number; errorDescription?: string };
+          if (data.errorId && data.errorId !== 0) {
+            apiError = data.errorDescription || "Unknown API error";
+          } else {
+            balance = data.balance ?? null;
+          }
+        } catch (err) {
+          apiError = (err as Error).message;
+        }
+      }
+
+      const lines: string[] = [];
+      lines.push(`CapSolver API key: ${apiKey ? "configured" : "NOT SET"}`);
+      if (balance !== null) lines.push(`Balance: $${balance.toFixed(2)}`);
+      if (apiError) lines.push(`API error: ${apiError}`);
+      lines.push(`Extension: loaded in Steel container (token mode)`);
+      lines.push(`Supported: reCAPTCHA v2/v3, hCaptcha, Cloudflare Turnstile, AWS WAF, GeeTest, DataDome, ImageToText`);
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    } catch (err) {
+      const error = err as Error;
+      return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
+    }
+  }
+);
+
 // create_profile --------------------------------------------------------------
 server.tool(
   "create_profile",

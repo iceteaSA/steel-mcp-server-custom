@@ -155,6 +155,7 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 | `scroll` | Scroll the page — `direction: "up"`\|`"down"`, `pixels?` (default 500) |
 | `history` | Browser history op — `action: "back"`\|`"forward"`\|`"reload"` |
 | `go_to_url` | Navigate to a URL. Optional `waitFor` selector + `waitTimeout` — merges nav + wait. Auto-detects Cloudflare/bot walls, returns `isError` on hit |
+| `captcha_status` | Check CapSolver balance and CAPTCHA solving availability |
 | `store_credential` | Store/update/delete a named credential (username + password + extras) for login automation |
 | `use_credential` | Retrieve a credential and optionally auto-fill a login form on the current page |
 | `list_credentials` | List all stored credentials (passwords masked) |
