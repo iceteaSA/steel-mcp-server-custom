@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    :root {
+      --bg: #1a1a2e;
+      --surface: #16213e;
+      --border: #0f3460;
+      --accent: #e94560;
+      --accent-hover: #ff6b81;
+      --text: #eee;
+      --text-dim: #888;
+      --success: #4ade80;
+      --error: #f87171;
+      --input-bg: #0f3460;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 360px;
+      min-height: 200px;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      font-size: 13px;
+      padding: 16px;
+    }
+    h1 {
+      font-size: 15px;
+      font-weight: 600;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    h1 .logo { font-size: 18px; }
+    .section {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 12px;
+      margin-bottom: 10px;
+    }
+    .section-title {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+    }
+    .info-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 4px 0;
+    }
+    .info-label { color: var(--text-dim); }
+    .info-value {
+      font-family: 'SF Mono', 'Fira Code', monospace;
+      font-size: 12px;
+      max-width: 200px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    label {
+      display: block;
+      font-size: 11px;
+      color: var(--text-dim);
+      margin-bottom: 4px;
+      margin-top: 8px;
+    }
+    label:first-child { margin-top: 0; }
+    input[type="text"], input[type="password"], input[type="number"] {
+      width: 100%;
+      padding: 6px 8px;
+      background: var(--input-bg);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      color: var(--text);
+      font-size: 13px;
+      font-family: inherit;
+      outline: none;
+    }
+    input:focus { border-color: var(--accent); }
+    .checkbox-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .checkbox-row input[type="checkbox"] {
+      accent-color: var(--accent);
+    }
+    .checkbox-row label {
+      margin: 0;
+      font-size: 13px;
+      color: var(--text);
+      cursor: pointer;
+    }
+    .row { display: flex; gap: 8px; }
+    .row > * { flex: 1; }
+    button {
+      width: 100%;
+      padding: 10px;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: 6px;
+      font-size: 13px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 12px;
+      transition: background 0.2s;
+    }
+    button:hover { background: var(--accent-hover); }
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+    .status {
+      margin-top: 8px;
+      padding: 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      display: none;
+    }
+    .status.success {
+      display: block;
+      background: rgba(74, 222, 128, 0.15);
+      color: var(--success);
+      border: 1px solid rgba(74, 222, 128, 0.3);
+    }
+    .status.error {
+      display: block;
+      background: rgba(248, 113, 113, 0.15);
+      color: var(--error);
+      border: 1px solid rgba(248, 113, 113, 0.3);
+    }
+    .badge {
+      display: inline-block;
+      background: var(--accent);
+      color: white;
+      font-size: 10px;
+      font-weight: 700;
+      padding: 1px 6px;
+      border-radius: 10px;
+    }
+    .settings-toggle {
+      font-size: 11px;
+      color: var(--text-dim);
+      cursor: pointer;
+      text-align: right;
+      margin-bottom: 8px;
+    }
+    .settings-toggle:hover { color: var(--text); }
+    .settings-panel { display: none; }
+    .settings-panel.visible { display: block; }
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 8px 0;
+    }
+  </style>
+</head>
+<body>
+  <h1><span class="logo">&#x1F6E1;</span> Steel Cookie Push</h1>
+
+  <!-- Current site info -->
+  <div class="section">
+    <div class="section-title">Current Site</div>
+    <div class="info-row">
+      <span class="info-label">Domain</span>
+      <span class="info-value" id="currentDomain">—</span>
+    </div>
+    <div class="info-row">
+      <span class="info-label">Cookies</span>
+      <span class="info-value" id="cookieCount">—</span>
+    </div>
+  </div>
+
+  <!-- Push options -->
+  <div class="section">
+    <div class="section-title">Push To Profile</div>
+    <label for="profileName">Profile name</label>
+    <input type="text" id="profileName" placeholder="e.g. vivaldi, work, personal" value="vivaldi">
+
+    <div class="checkbox-row">
+      <input type="checkbox" id="includeAllCookies">
+      <label for="includeAllCookies">Include ALL cookies (not just this site)</label>
+    </div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="includeLocalStorage" checked>
+      <label for="includeLocalStorage">Include localStorage</label>
+    </div>
+  </div>
+
+  <!-- Credentials (collapsible) -->
+  <div class="section">
+    <div class="section-title">Credentials (Optional)</div>
+    <div class="checkbox-row">
+      <input type="checkbox" id="includeCredentials">
+      <label for="includeCredentials">Save login credentials</label>
+    </div>
+    <div id="credentialFields" style="display: none;">
+      <label for="credName">Credential name</label>
+      <input type="text" id="credName" placeholder="e.g. github, aws">
+      <div class="row" style="margin-top: 8px;">
+        <div>
+          <label for="credUsername">Username</label>
+          <input type="text" id="credUsername" placeholder="user@example.com">
+        </div>
+        <div>
+          <label for="credPassword">Password</label>
+          <input type="password" id="credPassword" placeholder="••••••••">
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings -->
+  <div class="settings-toggle" id="settingsToggle">&#x2699; Server settings</div>
+  <div class="settings-panel" id="settingsPanel">
+    <div class="section">
+      <label for="serverUrl">Relay server URL</label>
+      <input type="text" id="serverUrl" placeholder="http://localhost:3001">
+      <label for="serverSecret">Shared secret</label>
+      <input type="password" id="serverSecret" placeholder="RELAY_SECRET value">
+      <button id="saveSettings" style="background: var(--border); margin-top: 8px; padding: 6px;">Save Settings</button>
+      <button id="testConnection" style="background: var(--surface); border: 1px solid var(--border); margin-top: 4px; padding: 6px;">Test Connection</button>
+    </div>
+  </div>
+
+  <button id="pushBtn" disabled>Push to Steel</button>
+  <div class="status" id="status"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

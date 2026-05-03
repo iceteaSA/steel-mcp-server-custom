@@ -57,6 +57,17 @@ export const EnvSchema = z
     // Passphrase for encrypting credentials at rest (AES-256-GCM).
     // If not set, credentials are stored in plain JSON (homelab-only).
     CREDENTIALS_PASSPHRASE: z.string().optional(),
+    // Relay server port for receiving cookies/credentials from the browser extension.
+    // Set to 0 to disable the relay server entirely. Default: 3001.
+    RELAY_PORT: z.coerce.number().default(3001),
+    // Shared secret for authenticating relay requests from the extension.
+    // Required when RELAY_PORT > 0. Extension sends this as Bearer token.
+    RELAY_SECRET: z.string().optional(),
+    // Public-facing URL for the relay server. Shown to users so they can
+    // configure the Steel Cookie Push extension. If not set, defaults to
+    // http://localhost:<RELAY_PORT>. Set when the MCP server runs on a
+    // remote machine (e.g. http://10.1.1.5:3001).
+    RELAY_PUBLIC_URL: z.string().optional(),
   })
   .transform((env) => ({
     ...env,

@@ -204,6 +204,49 @@ delete_profile(name: "github")
   (`navigator.userAgent`, `platform`, `plugins`, WebGL, etc.) are fully spoofed.
   Most anti-bot detection is client-side JS — the HTTP header rarely matters.
 
+## Cookie Push — Browser Extension Integration
+
+The Steel Cookie Push browser extension lets users push cookies, localStorage,
+and credentials from their real browser (Vivaldi/Chrome/Edge) to a Steel profile
+in one click. A built-in relay HTTP server receives the push.
+
+### How it works
+
+1. User clicks the extension icon on any site they're logged into
+2. Extension grabs cookies + localStorage + optional credentials
+3. POSTs to the relay server (runs alongside the MCP stdio transport)
+4. Relay writes a profile JSON to disk (same format as `save_profile`)
+5. Agent uses `create_profile(name: "...")` to restore the session in Steel
+
+### Agent workflow — using a pushed profile
+
+```
+# 1. start_browser shows the relay URL
+start_browser()
+→ Relay server: http://localhost:3001 (for Steel Cookie Push extension)
+
+# 2. Tell user to push cookies from their browser
+#    "Push your github.com cookies using the Steel Cookie Push extension"
+
+# 3. Once pushed, create the profile — auto-restores cookies/localStorage
+create_profile(name: "github", url: "https://github.com")
+→ Profile "github" created. Tab ID: 4 (restored saved cookies/localStorage)
+
+# 4. You're authenticated — scrape away
+get_page_text(selector: "main", tabId: 4)
+```
+
+### Key rules
+
+- **Relay URL comes from `start_browser`.** Give the user this URL + the
+  shared secret so they can configure the extension.
+- **Profile names match.** The extension's "Profile name" field determines
+  the filename. Use the same name in `create_profile`.
+- **Merges, not replaces.** Pushing again to the same profile merges new
+  cookies/localStorage with existing data.
+- **Auth: Bearer token.** The relay requires `Authorization: Bearer <RELAY_SECRET>`.
+  The extension stores this in `chrome.storage.local`.
+
 ## CAPTCHA Solving
 
 CapSolver extension is loaded in the Steel container. It auto-detects and

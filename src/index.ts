@@ -26,6 +26,7 @@ import {
   pickPrimaryLink,
   type Link,
 } from "./helpers";
+import { startRelayServer } from "./relay";
 import { z } from "zod";
 
 // -----------------------------------------------------------------------------
@@ -2669,6 +2670,10 @@ server.tool(
       if (mgr.debugUrl) {
         lines.push(`Interactive URL: ${mgr.debugUrl}?interactive=true&showControls=true`);
       }
+      if (env.RELAY_PORT > 0 && env.RELAY_SECRET) {
+        const relayUrl = env.RELAY_PUBLIC_URL ?? `http://localhost:${env.RELAY_PORT}`;
+        lines.push(`Relay server: ${relayUrl} (for Steel Cookie Push extension)`);
+      }
       return { content: [{ type: "text", text: lines.join("\n") }] };
     } catch (err) {
       const error = err as Error;
@@ -3082,6 +3087,21 @@ async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error("Steel MCP Server running on stdio");
+
+  // Start relay HTTP server for browser extension cookie/credential push
+  if (env.RELAY_PORT > 0) {
+    if (!env.RELAY_SECRET) {
+      console.error("[steel-mcp] WARNING: RELAY_PORT is set but RELAY_SECRET is not. Relay server disabled for security.");
+    } else {
+      startRelayServer({
+        port: env.RELAY_PORT,
+        secret: env.RELAY_SECRET,
+        profilesDir: env.PROFILES_DIR,
+        credentialsFile: env.CREDENTIALS_FILE,
+        credentialsPassphrase: env.CREDENTIALS_PASSPHRASE,
+      });
+    }
+  }
 }
 
 runServer().catch((error) => {

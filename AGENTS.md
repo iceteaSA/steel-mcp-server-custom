@@ -58,6 +58,12 @@ Invalid values cause the process to exit with a descriptive error.
 | `STEEL_PUBLIC_URL` | — | Public-facing Steel URL (e.g. `https://steel.example.com`). Rewrites debug/interactive/viewer URLs in `start_browser` output so they are accessible remotely. Does **not** affect the CDP WebSocket connection. |
 | `TAB_IDLE_TIMEOUT_MS` | `300000` (5 min) | Auto-close tabs with no tool activity for this long. `0` disables the sweeper. |
 | `TAB_IDLE_SWEEP_INTERVAL_MS` | `60000` (60 s) | How often the idle sweeper checks for stale tabs. |
+| `PROFILES_DIR` | `$OUTPUT_DIR/profiles` | Directory for persistent profile state (cookies, localStorage). |
+| `CREDENTIALS_FILE` | `$OUTPUT_DIR/credentials.json` | Path to credentials store (JSON or encrypted). |
+| `CREDENTIALS_PASSPHRASE` | — | Passphrase for encrypting credentials at rest (AES-256-GCM). Plain JSON if unset. |
+| `RELAY_PORT` | `3001` | Port for the HTTP relay server (receives cookies from browser extension). `0` disables. |
+| `RELAY_SECRET` | — | Shared secret for relay auth (Bearer token). Required when `RELAY_PORT > 0`. |
+| `RELAY_PUBLIC_URL` | — | Public URL for the relay (e.g. `http://10.1.0.14:3001`). Shown in `start_browser` output. Defaults to `http://localhost:<RELAY_PORT>`. |
 
 ### Concurrency — multi-agent sessions
 
@@ -105,7 +111,7 @@ No LLM API key required — the calling agent provides all reasoning.
 
 ## Architecture
 
-Two source files: `src/index.ts` (tool registrations; shared pure helpers for sanitization, dedup, bot detection live at top of file) + `src/env.ts` (Zod env schema).
+Source files: `src/index.ts` (tool registrations + BrowserManager), `src/relay.ts` (HTTP relay server for browser extension), `src/helpers.ts` (pure helper functions), `src/env.ts` (Zod env schema).
 
 **Key class — `BrowserManager`:**
 - `initialize()` — creates a Steel session (or local Chromium launch), connects Playwright
@@ -160,7 +166,8 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 | `list_profiles` | Active + saved profiles |
 | `save_profile` | Persist cookies + localStorage to disk |
 | `delete_profile` | Close profile context + tabs |
-| `start_browser` | Start browser, get Session Viewer + Interactive URLs |
+| `smoke_test` | Self-test: navigate, fingerprint, stealth, CapSolver checks |
+| `start_browser` | Start browser, get Session Viewer + Interactive + Relay URLs |
 | `stop_browser` | Stop browser (kills all tabs/profiles — use close_tabs for cleanup) |
 
 ### Design principles for new tools
