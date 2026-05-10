@@ -66,7 +66,7 @@ export const EnvSchema = z
     // Public-facing URL for the relay server. Shown to users so they can
     // configure the Steel Cookie Push extension. If not set, defaults to
     // http://localhost:<RELAY_PORT>. Set when the MCP server runs on a
-    // remote machine (e.g. http://10.1.1.5:3001).
+    // remote machine (e.g. http://your-host:3001).
     RELAY_PUBLIC_URL: z.string().optional(),
   })
   .transform((env) => ({

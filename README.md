@@ -1,25 +1,25 @@
 # Steel MCP Server (Custom Fork)
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server that gives AI agents direct control of a browser via [Steel](https://steel.dev) and [Playwright](https://playwright.dev). No internal LLM required — the calling agent (Claude Code, OpenCode, Gemini, etc.) provides all reasoning and drives the tools directly.
+A [Model Context Protocol](https://modelcontextprotocol.io) server that gives AI agents direct control of a browser via [Steel](https://steel.dev) and [Playwright](https://playwright.dev). No internal LLM required — the calling agent provides all reasoning.
 
-Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-server), customised for self-hosted Steel with context-budget-aware tooling.
+Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-server), customised for self-hosted Steel with enhanced stealth, CAPTCHA solving, credential management, profile isolation, and a browser extension for session sharing.
 
 ---
 
 ## Features
 
-- **21 browser tools** — navigate, click, type, select, screenshot, page text, extract links/attrs, evaluate JS, scroll, history, wait (consolidated in 0.4.0 from 25 → 21)
-- **Concurrent-agent safe** — `new_tab(owner)` tags tabs; `close_tabs_by_owner` lets each agent clean up only its own tabs without stopping the shared browser. All page-interacting tools accept an optional `tabId` so concurrent agents can operate on distinct tabs.
-- **Idle tab sweeper** — tabs untouched for `TAB_IDLE_TIMEOUT_MS` (default 5 min) are auto-closed. Keeps long-running shared sessions from leaking tabs.
-- **Browser-closed auto-retry** — `new_tab` and page lookups transparently recover from transient `browserContext.newPage: Target page/context/browser has been closed` races (one soft-reset + retry).
-- **List-page scraping** — `get_page_text(matchAll: true)` returns one structured entry per matched element with `{text, title, primaryLink, links}`; `get_links` returns URL-only extracts. One call replaces N evaluates.
-- **Nav + wait in one call** — `go_to_url(waitFor: "selector")` merges navigation + content-ready wait. Saves a round trip on JS-rendered pages.
-- **Bot-check detection** — `go_to_url` returns `isError` when destination is a Cloudflare / Access-denied wall; agents hand off via Interactive URL instead of silently reading an empty page.
-- **Context budget aware** — `get_screenshot`, `get_page_text`, `get_links`, and `get_attrs` support `outputMode: "file"` and per-entry / per-array caps; auto-downgrade if output exceeds `MAX_INLINE_BYTES`
-- **No LLM dependency** — works in pure toolset mode; the calling agent is the LLM
-- **Self-hosted Steel** — connect to any Steel instance via `STEEL_BASE_URL`; no API key needed for local installs
-- **Direct Playwright** — uses `chromium.connectOverCDP()` for Steel sessions and `chromium.launch()` for local mode
-- **Human-in-the-loop** — `start_browser` returns an interactive URL (via `STEEL_PUBLIC_URL`) so remote users can take control for CAPTCHAs, 2FA, or sensitive logins
+- **27 browser tools** — navigate, click, fill forms, screenshot, extract text/links/attrs, evaluate JS, scroll, history, wait, download files
+- **Concurrent-agent safe** — owner-tagged tabs, `tabId` on all tools, idle sweeper, scoped cleanup
+- **Profiles** — isolated BrowserContexts with persistent cookies/localStorage across restarts
+- **Credentials** — encrypted credential store (AES-256-GCM) with auto-fill support
+- **Cookie Push Extension** — Chrome/Vivaldi extension pushes real browser sessions to Steel profiles via HTTP relay
+- **CAPTCHA solving** — CapSolver extension (reCAPTCHA, hCaptcha, Turnstile, AWS WAF, GeeTest)
+- **Stealth fingerprint** — unified navigator/WebGL/canvas/audio/Intl spoofing across JS and HTTP
+- **Bot-check detection** — `go_to_url` returns `isError` on Cloudflare/WAF walls
+- **Context budget aware** — `outputMode: "file"`, per-entry caps, auto-downgrade on large output
+- **List-page scraping** — `get_page_text(matchAll: true)` for structured extraction in one call
+- **Self-hosted Steel** — connect via `STEEL_BASE_URL`; no API key needed for local installs
+- **Human-in-the-loop** — interactive URL for CAPTCHAs, 2FA, sensitive logins
 
 ---
 
@@ -28,29 +28,29 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 ### Prerequisites
 
 - [pnpm](https://pnpm.io) — `npm install -g pnpm`
-- [Steel Browser](https://github.com/steel-dev/steel-browser) running locally (or a Steel Cloud account)
-- A Playwright-compatible Chromium — installed automatically via `pnpm install`
+- [Steel Browser](https://github.com/steel-dev/steel-browser) running (self-hosted or Steel Cloud)
+- Node.js 18+
 
 ### Build
 
 ```bash
-git clone https://github.com/your-fork/steel-mcp-server-custom
+git clone <this-repo>
 cd steel-mcp-server-custom
 pnpm install
-pnpm build
-# Output: dist/index.cjs
+pnpm build          # → dist/index.cjs
+pnpm test           # run tests (vitest)
 ```
 
 ### Run
 
 ```bash
-# Self-hosted Steel
+# Self-hosted Steel (most common)
 BROWSER_MODE=steel STEEL_BASE_URL=http://your-steel-host:3000 node dist/index.cjs
 
 # Steel Cloud (API key required)
 BROWSER_MODE=steel STEEL_API_KEY=your_key node dist/index.cjs
 
-# Local Chromium (no Steel)
+# Local Chromium (no Steel, no stealth/CAPTCHA)
 BROWSER_MODE=local node dist/index.cjs
 ```
 
@@ -58,94 +58,138 @@ BROWSER_MODE=local node dist/index.cjs
 
 ## Environment Variables
 
+All variables are validated at startup via Zod (`src/env.ts`). Invalid values cause a descriptive error.
+
 | Variable | Default | Description |
 |---|---|---|
-| `BROWSER_MODE` | `"steel"` | `"steel"` for Steel Cloud/self-hosted; `"local"` for plain Chromium |
-| `STEEL_API_KEY` | — | Required for Steel Cloud (`BROWSER_MODE=steel` with no `STEEL_BASE_URL`) |
-| `STEEL_BASE_URL` | Steel Cloud | Self-hosted Steel URL (e.g. `http://your-steel-host:3000`). When set, `STEEL_API_KEY` is optional. |
-| `STEEL_PUBLIC_URL` | — | Public-facing Steel URL (e.g. `https://steel.example.com`). Rewrites debug/interactive/viewer URLs in `start_browser` output so they are accessible remotely. Does **not** affect the CDP connection. |
-| `SESSION_TIMEOUT_MS` | `300000` (5 min) | Steel session auto-release timeout in ms. Safety net if `stop_browser` is never called. |
-| `GLOBAL_WAIT_SECONDS` | `0` | Seconds to wait after each action tool (for slow-loading pages) |
-| `OPTIMIZE_BANDWIDTH` | `false` | When `true`, blocks images/fonts/CSS in Steel sessions for faster text-only scraping |
-| `MAX_INLINE_BYTES` | `512000` | Bytes threshold above which inline output auto-downgrades to file mode |
-| `OUTPUT_DIR` | `/tmp/steel-mcp` | Directory for file-mode outputs (screenshots, page text) |
-| `DEFAULT_SCREENSHOT_QUALITY` | `80` | Default JPEG quality (1–100) |
+| `BROWSER_MODE` | `"steel"` | `"steel"` for Steel; `"local"` for plain Chromium |
+| `STEEL_API_KEY` | — | Required for Steel Cloud (when `STEEL_BASE_URL` is not set) |
+| `STEEL_BASE_URL` | Steel Cloud | Self-hosted Steel URL (e.g. `http://your-steel-host:3000`) |
+| `STEEL_PUBLIC_URL` | — | Public-facing Steel URL for debug/interactive URLs in `start_browser` output |
+| `SESSION_TIMEOUT_MS` | `300000` | Steel session auto-release timeout (ms) |
+| `GLOBAL_WAIT_SECONDS` | `0` | Seconds to wait after each action tool |
+| `OPTIMIZE_BANDWIDTH` | `false` | Block images/fonts/CSS for text-only scraping |
+| `MAX_INLINE_BYTES` | `512000` | Auto-downgrade to file mode above this size |
+| `OUTPUT_DIR` | `/tmp/steel-mcp` | Directory for file outputs, profiles, credentials |
+| `PROFILES_DIR` | `$OUTPUT_DIR/profiles` | Profile state persistence directory |
+| `CREDENTIALS_FILE` | `$OUTPUT_DIR/credentials.json` | Credential store path |
+| `CREDENTIALS_PASSPHRASE` | — | Encrypts credentials at rest (AES-256-GCM). Plain JSON if unset |
+| `DEFAULT_SCREENSHOT_QUALITY` | `80` | Default webp/jpeg quality (1–100) |
 | `DEFAULT_VIEWPORT_WIDTH` | `1280` | Viewport width in px |
 | `DEFAULT_VIEWPORT_HEIGHT` | `720` | Viewport height in px |
-| `TAB_IDLE_TIMEOUT_MS` | `300000` (5 min) | Auto-close tabs with no tool activity for this long. `0` disables the sweeper. |
-| `TAB_IDLE_SWEEP_INTERVAL_MS` | `60000` (60 s) | How often the idle sweeper checks for stale tabs. |
+| `TAB_IDLE_TIMEOUT_MS` | `300000` | Auto-close idle tabs after this long. `0` disables |
+| `TAB_IDLE_SWEEP_INTERVAL_MS` | `60000` | Sweeper check interval |
+| `RELAY_PORT` | `3001` | HTTP relay port for Cookie Push extension. `0` disables |
+| `RELAY_SECRET` | — | Shared secret for relay auth (Bearer token). Required when relay enabled |
+| `RELAY_PUBLIC_URL` | — | Public relay URL shown in `start_browser` (e.g. `http://your-host:3001`) |
 
 ---
 
-## Tools
+## Tools (27)
 
-All page-interacting tools accept an optional `tabId` parameter. Omit for current-active-tab behaviour; pass it in concurrent-agent workflows where each agent holds its own tab.
+All page-interacting tools accept an optional `tabId`. Omit for current-active-tab; pass it for concurrent-agent safety.
 
 | Tool | Description |
 |---|---|
-| `list_tabs` | List all open tabs with ID, URL, title, active state, and owner tag |
-| `new_tab` | Open a new tab (optional URL + `owner` tag), returns tab ID |
-| `switch_tab` | Switch active tab by ID |
-| `close_tab` | Close a tab by ID (default: current); auto-switches to next |
-| `close_tabs_by_owner` | Close all tabs matching an owner tag (for agent-scoped cleanup) |
-| `get_current_url` | URL + title of current or specified tab |
-| `get_screenshot` | Screenshot — format, quality, scale, clip, fullPage, outputMode, `tabId` |
-| `get_page_text` | Visible page text — selector, maxChars, outputMode, includeLinks, `tabId`. With `matchAll: true`, returns JSON array of per-element `{text, title, primaryLink, links}` — list-page scraping in one call |
-| `get_links` | Extract deduped `[{text, href}]` under selector, optional `urlPattern` regex filter, `tabId` |
-| `get_attrs` | Extract arbitrary element attributes — pass `attrs: ["data-id", "href", …]` and get structured per-element JSON, `tabId` |
-| `click` | Click an element by CSS selector |
-| `type` | Type into an input — clear (default true), submit (press Enter) |
-| `select` | Select a `<select>` dropdown by value, label, or index |
-| `evaluate` | Run JavaScript in the page context, returns JSON |
-| `wait_for` | Wait for a selector, text to appear, or text to disappear |
-| `console_log` | Browser console messages — level filter, maxEntries, clear |
-| `scroll` | Scroll page by pixels — `direction: "up"`\|`"down"`, `pixels?`, `tabId?` (replaces scroll_up/scroll_down) |
-| `history` | Browser history op — `action: "back"`\|`"forward"`\|`"reload"`, `tabId?` (replaces go_back/go_forward/refresh) |
-| `go_to_url` | Navigate to URL, optional `waitFor` selector + `waitTimeout`. Auto-detects Cloudflare / bot-check walls and returns `isError` |
-| `start_browser` | Start browser; returns Session Viewer and Interactive URL (shared state — affects all agents) |
-| `stop_browser` | Stop browser and release Steel session (shared state — affects all agents; use `close_tabs_by_owner` for per-agent cleanup) |
+| **Navigation** | |
+| `go_to_url` | Navigate + optional `waitFor`. Auto-detects bot walls |
+| `history` | Back, forward, or reload |
+| `scroll` | Scroll up/down. Reports position + percentage |
+| `wait_for` | Wait for selector, text appear, or text disappear |
+| **Tabs** | |
+| `list_tabs` | List tabs (filter by tabId, owner, profile) |
+| `new_tab` | Open tab with optional URL, owner, profile |
+| `close_tabs` | Close by tabId, owner, or both |
+| **Extraction** | |
+| `get_page_text` | Text extraction with smart content area fallback. `matchAll` for list scraping |
+| `get_links` | Extract `[{text, href}]` with optional `urlPattern` filter |
+| `get_attrs` | Extract specific attributes from matched elements |
+| `get_screenshot` | Screenshot (webp/jpeg/png, selector/clip/fullPage) |
+| `evaluate` | Run JS in page context, return JSON |
+| `get_console` | Browser console messages (filter by level) |
+| **Interaction** | |
+| `click` | Click element + optional `waitFor`/`waitForText` |
+| `fill` | Fill form fields. Auto-detects text/select/checkbox/radio |
+| `download_file` | Download URL to disk (handles attachments + inline binaries) |
+| **Sessions & Auth** | |
+| `create_profile` | Isolated BrowserContext with auto-restore |
+| `list_profiles` | Active + saved profiles |
+| `save_profile` | Persist cookies + localStorage to disk |
+| `delete_profile` | Close profile context + tabs |
+| `cookies` | Get or set browser cookies |
+| `credentials` | List/store/update/delete credentials |
+| `use_credential` | Retrieve or auto-fill login form |
+| **System** | |
+| `captcha_status` | CapSolver balance + extension status |
+| `smoke_test` | Self-test: navigate, fingerprint, stealth checks |
+| `start_browser` | Start browser, get Session Viewer + Interactive + Relay URLs |
+| `stop_browser` | Stop browser (kills all tabs/profiles) |
+
+---
+
+## Cookie Push Extension
+
+A Chrome/Vivaldi/Edge extension that pushes your real browser cookies, localStorage, and credentials to Steel profiles in one click.
+
+### Setup
+
+1. **Install the extension** — Go to `chrome://extensions` (or `vivaldi://extensions`), enable Developer Mode, click "Load unpacked", select the `extension/` directory.
+
+2. **Configure the relay** — Set `RELAY_PORT` and `RELAY_SECRET` env vars on the MCP server. The relay starts automatically alongside the stdio transport.
+
+3. **Configure the extension** — Click the extension icon → Server settings → enter the relay URL and shared secret → Save Settings → Test Connection.
+
+### Usage
+
+1. Navigate to a site you're logged into in your browser
+2. Click the extension icon
+3. Set a profile name (e.g. "github")
+4. Click "Push to Steel"
+5. In your agent, use `create_profile(name: "github")` — cookies are restored automatically
+
+### Relay API
+
+| Endpoint | Auth | Description |
+|---|---|---|
+| `GET /status` | No | Health check |
+| `POST /push` | Bearer token | Receive cookies/localStorage/credentials → profile |
 
 ---
 
 ## Client Configuration
 
-### mcporter (recommended for local use)
-
-Add to `~/.mcporter/mcporter.json`:
+### mcporter
 
 ```json
 "steel": {
   "command": "node",
-  "args": ["/path/to/steel-mcp-server-custom/dist/index.cjs"],
+  "args": ["/path/to/dist/index.cjs"],
   "lifecycle": { "mode": "keep-alive" },
   "env": {
     "BROWSER_MODE": "steel",
     "STEEL_BASE_URL": "http://your-steel-host:3000",
-    "STEEL_PUBLIC_URL": "https://steel.example.com",
+    "STEEL_PUBLIC_URL": "https://your-public-steel-url",
+    "CREDENTIALS_PASSPHRASE": "your-passphrase",
+    "RELAY_SECRET": "your-relay-secret",
     "SESSION_TIMEOUT_MS": "300000",
     "GLOBAL_WAIT_SECONDS": "2",
-    "OUTPUT_DIR": "/home/user/.mcporter/steel-output"
+    "OUTPUT_DIR": "/path/to/output"
   }
 }
 ```
 
 ### OpenCode
 
-Add to `~/.config/opencode/opencode.jsonc`:
-
 ```jsonc
 "mcp": {
   "steel": {
     "type": "local",
-    "command": ["node", "/path/to/steel-mcp-server-custom/dist/index.cjs"],
+    "command": ["node", "/path/to/dist/index.cjs"],
     "enabled": true,
     "environment": {
       "BROWSER_MODE": "steel",
       "STEEL_BASE_URL": "http://your-steel-host:3000",
-      "STEEL_PUBLIC_URL": "https://steel.example.com",
-      "SESSION_TIMEOUT_MS": "300000",
-      "GLOBAL_WAIT_SECONDS": "2",
-      "OUTPUT_DIR": "/home/user/.mcporter/steel-output"
+      "RELAY_SECRET": "your-relay-secret"
     }
   }
 }
@@ -153,62 +197,27 @@ Add to `~/.config/opencode/opencode.jsonc`:
 
 ### Claude Code
 
-Run once to register at user scope (available in all projects):
-
 ```bash
 claude mcp add --transport stdio \
   --env BROWSER_MODE=steel \
   --env STEEL_BASE_URL=http://your-steel-host:3000 \
-  --env STEEL_PUBLIC_URL=https://steel.example.com \
-  --env SESSION_TIMEOUT_MS=300000 \
-  --env GLOBAL_WAIT_SECONDS=2 \
-  --env OUTPUT_DIR=/tmp/steel-mcp \
+  --env RELAY_SECRET=your-relay-secret \
   --scope user \
-  steel -- node /path/to/steel-mcp-server-custom/dist/index.cjs
+  steel -- node /path/to/dist/index.cjs
 ```
 
-Verify with `claude mcp get steel`.
-
-### Claude Desktop
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `~/.config/Claude/claude_desktop_config.json` (Linux):
+### Claude Desktop / Gemini CLI
 
 ```json
 {
   "mcpServers": {
     "steel": {
       "command": "node",
-      "args": ["/path/to/steel-mcp-server-custom/dist/index.cjs"],
+      "args": ["/path/to/dist/index.cjs"],
       "env": {
         "BROWSER_MODE": "steel",
         "STEEL_BASE_URL": "http://your-steel-host:3000",
-        "STEEL_PUBLIC_URL": "https://steel.example.com",
-        "SESSION_TIMEOUT_MS": "300000",
-        "GLOBAL_WAIT_SECONDS": "2",
-        "OUTPUT_DIR": "/tmp/steel-mcp"
-      }
-    }
-  }
-}
-```
-
-### Gemini CLI
-
-Add to `~/.gemini/mcp_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "steel": {
-      "command": "node",
-      "args": ["/path/to/steel-mcp-server-custom/dist/index.cjs"],
-      "env": {
-        "BROWSER_MODE": "steel",
-        "STEEL_BASE_URL": "http://your-steel-host:3000",
-        "STEEL_PUBLIC_URL": "https://steel.example.com",
-        "SESSION_TIMEOUT_MS": "300000",
-        "GLOBAL_WAIT_SECONDS": "2",
-        "OUTPUT_DIR": "/tmp/steel-mcp"
+        "RELAY_SECRET": "your-relay-secret"
       }
     }
   }
@@ -217,12 +226,57 @@ Add to `~/.gemini/mcp_config.json`:
 
 ---
 
+## Custom Steel Docker Image (Optional)
+
+For enhanced stealth and CAPTCHA solving, build a custom Steel image. See `docker/build/steel/` in the companion homelab repo for:
+
+- **CapSolver extension** — auto-solves reCAPTCHA, hCaptcha, Turnstile, AWS WAF (token mode)
+- **Stealth extension** — canvas/audio noise, WebGL spoofing, navigator/platform/userAgentData overrides
+- **Unified fingerprint** — generated per container start, consistent across JS and HTTP headers
+- **Custom entrypoint** — configurable locale, timezone, GPU renderer
+
+---
+
 ## Development
 
 ```bash
+pnpm install        # Install dependencies
+pnpm build          # Compile to dist/index.cjs
+pnpm test           # Run tests (vitest)
 pnpm watch          # Watch mode (rebuild on changes)
-pnpm exec tsc --noEmit  # Type-check
+pnpm exec tsc --noEmit  # Type-check without emitting
 pnpm inspector      # Inspect tools via MCP Inspector
 ```
 
-See [AGENTS.md](./AGENTS.md) for architecture details, code style, and tool patterns.
+### Project Structure
+
+```
+src/
+  index.ts          # Main server — 27 tools, BrowserManager, profiles, credentials
+  relay.ts          # HTTP relay server for Cookie Push extension
+  helpers.ts        # Pure helper functions (sanitization, dedup, bot detection)
+  env.ts            # Zod env schema with defaults and derivation
+  __tests__/        # vitest tests (helpers, encryption, env, relay, tools)
+extension/          # Chrome/Vivaldi Cookie Push extension (MV3)
+skill/              # LLM-facing skill documentation (SKILL.md)
+dist/               # Built output (index.cjs)
+```
+
+### Tests
+
+```
+130 tests total:
+  helpers.test.ts     — 80 tests (pure helper functions)
+  encryption.test.ts  — 8 tests (AES-256-GCM round-trip)
+  env.test.ts         — 7 tests (env schema derivation)
+  relay.test.ts       — 14 tests (HTTP relay server)
+  tools.test.ts       — 7 non-browser + 10 browser-dependent (skipped when Steel unavailable)
+```
+
+See [AGENTS.md](./AGENTS.md) for architecture details, code style, and tool handler patterns.
+
+---
+
+## License
+
+MIT — see [LICENSE](./LICENSE).

@@ -39,7 +39,7 @@ class MCPTestClient {
       env: {
         ...process.env,
         BROWSER_MODE: "steel",
-        STEEL_BASE_URL: "http://10.1.1.1:3000",
+        STEEL_BASE_URL: "http://localhost:3000",
         OUTPUT_DIR: TEST_OUTPUT,
         CREDENTIALS_FILE: TEST_CREDS,
         ...env,
@@ -217,7 +217,7 @@ describe("browser tools", () => {
   beforeAll(async () => {
     // Check if Steel is reachable
     try {
-      const res = await fetch("http://10.1.1.1:3000/");
+      const res = await fetch(process.env.STEEL_BASE_URL || "http://localhost:3000/");
       steelAvailable = res.ok;
     } catch {
       steelAvailable = false;

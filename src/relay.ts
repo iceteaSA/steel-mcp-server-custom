@@ -294,6 +294,17 @@ export function startRelayServer(config: RelayConfig): http.Server {
     jsonResponse(res, 404, { error: "Not found. Endpoints: GET /status, POST /push" });
   });
 
+  srv.on("error", (err: NodeJS.ErrnoException) => {
+    if (err.code === "EADDRINUSE") {
+      console.error(
+        `[steel-mcp] Relay port ${config.port} already in use (another session's relay is running). Continuing without relay.`,
+      );
+      srv.close();
+    } else {
+      console.error(`[steel-mcp] Relay server error: ${err.message}`);
+    }
+  });
+
   srv.listen(config.port, "0.0.0.0", () => {
     console.error(`[steel-mcp] Relay server listening on http://0.0.0.0:${config.port}`);
   });

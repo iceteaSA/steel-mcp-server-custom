@@ -63,7 +63,7 @@ Invalid values cause the process to exit with a descriptive error.
 | `CREDENTIALS_PASSPHRASE` | — | Passphrase for encrypting credentials at rest (AES-256-GCM). Plain JSON if unset. |
 | `RELAY_PORT` | `3001` | Port for the HTTP relay server (receives cookies from browser extension). `0` disables. |
 | `RELAY_SECRET` | — | Shared secret for relay auth (Bearer token). Required when `RELAY_PORT > 0`. |
-| `RELAY_PUBLIC_URL` | — | Public URL for the relay (e.g. `http://10.1.0.14:3001`). Shown in `start_browser` output. Defaults to `http://localhost:<RELAY_PORT>`. |
+| `RELAY_PUBLIC_URL` | — | Public URL for the relay (e.g. `http://your-host:3001`). Shown in `start_browser` output. Defaults to `http://localhost:<RELAY_PORT>`. |
 
 ### Concurrency — multi-agent sessions
 
