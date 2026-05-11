@@ -1,0 +1,16 @@
+{
+  "manifest_version": 3,
+  "name": "Stealth Extra",
+  "version": "2.0.0",
+  "description": "Full fingerprint consistency: navigator, WebGL, canvas noise, audio noise, client hints",
+  "permissions": [],
+  "content_scripts": [
+    {
+      "matches": ["http://*/*", "https://*/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    }
+  ]
+}
