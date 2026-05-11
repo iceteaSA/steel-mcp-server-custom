@@ -226,14 +226,61 @@ claude mcp add --transport stdio \
 
 ---
 
-## Custom Steel Docker Image (Optional)
+## Custom Steel Browser Docker Image
 
-For enhanced stealth and CAPTCHA solving, build a custom Steel image. See `docker/build/steel/` in the companion homelab repo for:
+For enhanced stealth and CAPTCHA solving, this repo includes a custom Steel Browser image in `docker/`.
 
-- **CapSolver extension** — auto-solves reCAPTCHA, hCaptcha, Turnstile, AWS WAF (token mode)
-- **Stealth extension** — canvas/audio noise, WebGL spoofing, navigator/platform/userAgentData overrides
+### Quick Start
+
+```bash
+cd docker
+
+# Optional: set CapSolver API key for CAPTCHA solving
+export CAPSOLVER_API_KEY=your-key
+
+# Build and start
+docker compose up -d --build
+
+# Verify
+curl http://localhost:3000/
+```
+
+This starts the Steel Browser on port `3000` (API + session viewer) and `9223` (CDP debug).
+
+### What's Included
+
+- **CapSolver extension** — auto-solves reCAPTCHA v2/v3, hCaptcha, Turnstile, AWS WAF, GeeTest (token mode)
+- **Stealth extension** — canvas/audio noise, WebGL spoofing, navigator/platform/userAgentData overrides, Client Hints
 - **Unified fingerprint** — generated per container start, consistent across JS and HTTP headers
-- **Custom entrypoint** — configurable locale, timezone, GPU renderer
+- **Custom entrypoint** — configurable locale, timezone, GPU renderer (SwiftShader for headless WebGL)
+
+### Configuration
+
+| Env Variable | Default | Description |
+|---|---|---|
+| `CAPSOLVER_API_KEY` | — | CapSolver API key. Leave empty to disable CAPTCHA solving |
+| `TZ` | `UTC` | Container timezone |
+| `LANG` | `en-US` | Chrome `--lang` flag |
+
+### Files
+
+| File | Purpose |
+|---|---|
+| `docker/Dockerfile` | Custom Steel Browser image (CapSolver + stealth on official base) |
+| `docker/docker-compose.yml` | Compose file with browser + optional MCP server |
+| `docker/entrypoint.sh` | Fingerprint generation, CDPService patching, CapSolver config |
+| `docker/extensions/stealth-extra/` | Canvas/audio/WebGL/navigator spoofing extension |
+| `docker/smoke-test.sh` | End-to-end test script |
+
+### Running the MCP Server
+
+The MCP server runs locally (not in Docker) since it communicates via stdio with your AI agent:
+
+```bash
+BROWSER_MODE=steel STEEL_BASE_URL=http://localhost:3000 node dist/index.cjs
+```
+
+For an all-Docker setup, uncomment the `steel-mcp` service in `docker/docker-compose.yml`.
 
 ---
 
@@ -257,9 +304,16 @@ src/
   helpers.ts        # Pure helper functions (sanitization, dedup, bot detection)
   env.ts            # Zod env schema with defaults and derivation
   __tests__/        # vitest tests (helpers, encryption, env, relay, tools)
+docker/
+  Dockerfile        # Custom Steel Browser image (CapSolver + stealth)
+  docker-compose.yml # Compose for Steel Browser + optional MCP server
+  entrypoint.sh     # Fingerprint gen, CDPService patch, CapSolver config
+  extensions/       # stealth-extra extension (canvas/audio/WebGL/navigator)
+  smoke-test.sh     # End-to-end browser test
 extension/          # Chrome/Vivaldi Cookie Push extension (MV3)
 skill/              # LLM-facing skill documentation (SKILL.md)
 dist/               # Built output (index.cjs)
+Dockerfile          # MCP server container image
 ```
 
 ### Tests
