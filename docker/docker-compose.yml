@@ -1,0 +1,57 @@
+services:
+  steel-browser:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: steel-browser-custom:latest
+    container_name: steel-browser
+    restart: unless-stopped
+    ports:
+      - "3000:3000"    # Steel API + session viewer
+      - "9223:9223"    # CDP debug port
+    environment:
+      TZ: ${TZ:-UTC}
+      # CapSolver API key for CAPTCHA solving (optional — leave empty to disable)
+      CAPSOLVER_API_KEY: ${CAPSOLVER_API_KEY:-}
+      # Chrome launch args — loads stealth + CapSolver extensions
+      CHROME_ARGS: >-
+        --lang=${LANG:-en-US}
+        --use-gl=angle
+        --use-angle=swiftshader
+        --load-extension=/app/api/extensions/capsolver,/app/api/extensions/stealth-extra
+        --disable-extensions-except=/app/api/extensions/recorder,/app/api/extensions/capsolver,/app/api/extensions/stealth-extra
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Uncomment to also run the MCP server alongside the browser.
+  # Most setups run the MCP server locally (not in Docker) since it
+  # communicates via stdio with your AI agent.
+  #
+  # steel-mcp:
+  #   build:
+  #     context: ..
+  #     dockerfile: Dockerfile
+  #   image: steel-mcp-server:latest
+  #   container_name: steel-mcp
+  #   restart: unless-stopped
+  #   depends_on:
+  #     steel-browser:
+  #       condition: service_healthy
+  #   ports:
+  #     - "3001:3001"    # Cookie Push relay
+  #   environment:
+  #     BROWSER_MODE: steel
+  #     STEEL_BASE_URL: http://steel-browser:3000
+  #     RELAY_PORT: "3001"
+  #     RELAY_SECRET: ${RELAY_SECRET:-}
+  #     CREDENTIALS_PASSPHRASE: ${CREDENTIALS_PASSPHRASE:-}
+  #     OUTPUT_DIR: /data
+  #   volumes:
+  #     - steel-mcp-data:/data
+  #
+  # volumes:
+  #   steel-mcp-data:
