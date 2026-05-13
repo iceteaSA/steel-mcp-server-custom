@@ -8,14 +8,19 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 
 ## Features
 
-- **27 browser tools** — navigate, click, fill forms, screenshot, extract text/links/attrs, evaluate JS, scroll, history, wait, download files
+- **29 browser tools** — navigate, click, fill forms, screenshot, extract text/links/attrs, evaluate JS, scroll, history, wait, download files, batch-fetch URLs, declarative structured extraction
 - **Concurrent-agent safe** — owner-tagged tabs, `tabId` on all tools, idle sweeper, scoped cleanup
 - **Profiles** — isolated BrowserContexts with persistent cookies/localStorage across restarts
 - **Credentials** — encrypted credential store (AES-256-GCM) with auto-fill support
 - **Cookie Push Extension** — Chrome/Vivaldi extension pushes real browser sessions to Steel profiles via HTTP relay
-- **CAPTCHA solving** — CapSolver extension (reCAPTCHA, hCaptcha, Turnstile, AWS WAF, GeeTest)
+- **CAPTCHA solving** — CapSolver extension (reCAPTCHA, hCaptcha, Turnstile, AWS WAF, GeeTest) + automatic wait-and-retry (15s CapSolver poll before returning `isError`)
 - **Stealth fingerprint** — unified navigator/WebGL/canvas/audio/Intl spoofing across JS and HTTP
 - **Bot-check detection** — `go_to_url` returns `isError` on Cloudflare/WAF walls
+- **Error loop detection** — `ErrorTracker` warns when the same URL or domain repeatedly returns errors
+- **Readability extraction** — `get_page_text(extractContent: true)` strips nav/ads and returns article body; `format: "markdown"` converts via turndown
+- **Batch URL fetching** — `fetch_urls` fetches 1–10 URLs in parallel with Readability extraction in one call
+- **Declarative extraction** — `extract(selector, fields)` maps CSS selectors to a field schema and returns structured JSON
+- **Image resize/compress** — `get_screenshot` post-capture resize/compress via `@napi-rs/image`; new `maxWidth`/`maxHeight`/`maxFileBytes` params
 - **Context budget aware** — `outputMode: "file"`, per-entry caps, auto-downgrade on large output
 - **List-page scraping** — `get_page_text(matchAll: true)` for structured extraction in one call
 - **Self-hosted Steel** — connect via `STEEL_BASE_URL`; no API key needed for local installs
@@ -85,28 +90,30 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 
 ---
 
-## Tools (27)
+## Tools (29)
 
 All page-interacting tools accept an optional `tabId`. Omit for current-active-tab; pass it for concurrent-agent safety.
 
 | Tool | Description |
 |---|---|
 | **Navigation** | |
-| `go_to_url` | Navigate + optional `waitFor`. Auto-detects bot walls |
+| `go_to_url` | Navigate + optional `waitFor`. `readPage` extracts content in same call. `disableMedia` blocks images/fonts/CSS. CAPTCHA wait-and-retry (15s poll). Auto-detects bot walls + error loops |
 | `history` | Back, forward, or reload |
-| `scroll` | Scroll up/down. Reports position + percentage |
+| `scroll` | Scroll up/down. `readAfterScroll` returns visible text in same call |
 | `wait_for` | Wait for selector, text appear, or text disappear |
 | **Tabs** | |
 | `list_tabs` | List tabs (filter by tabId, owner, profile) |
 | `new_tab` | Open tab with optional URL, owner, profile |
 | `close_tabs` | Close by tabId, owner, or both |
 | **Extraction** | |
-| `get_page_text` | Text extraction with smart content area fallback. `matchAll` for list scraping |
+| `get_page_text` | Text extraction with smart content area fallback. `extractContent` for Readability article extraction. `format: "markdown"` via turndown. `matchAll` for list scraping. Default maxChars: 5K |
 | `get_links` | Extract `[{text, href}]` with optional `urlPattern` filter |
 | `get_attrs` | Extract specific attributes from matched elements |
-| `get_screenshot` | Screenshot (webp/jpeg/png, selector/clip/fullPage) |
-| `evaluate` | Run JS in page context, return JSON |
+| `get_screenshot` | Screenshot (webp/jpeg/png, selector/clip/fullPage). Default `outputMode: "file"`. Post-capture resize/compress via `@napi-rs/image` (`maxWidth`, `maxHeight`, `maxFileBytes`) |
+| `evaluate` | Run JS in page context, return JSON. `maxChars` cap (default 10K). `outputMode: "file"` for large output |
 | `get_console` | Browser console messages (filter by level) |
+| `fetch_urls` | Batch-fetch 1–10 URLs in parallel with Readability extraction |
+| `extract` | Declarative structured extraction: CSS selector + field map → JSON |
 | **Interaction** | |
 | `click` | Click element + optional `waitFor`/`waitForText` |
 | `fill` | Fill form fields. Auto-detects text/select/checkbox/radio |
@@ -293,17 +300,34 @@ pnpm test           # Run tests (vitest)
 pnpm watch          # Watch mode (rebuild on changes)
 pnpm exec tsc --noEmit  # Type-check without emitting
 pnpm inspector      # Inspect tools via MCP Inspector
+npx oxlint src/     # Lint source files
+npx oxfmt --check src/  # Check formatting
 ```
 
 ### Project Structure
 
 ```
 src/
-  index.ts          # Main server — 27 tools, BrowserManager, profiles, credentials
-  relay.ts          # HTTP relay server for Cookie Push extension
-  helpers.ts        # Pure helper functions (sanitization, dedup, bot detection)
-  env.ts            # Zod env schema with defaults and derivation
-  __tests__/        # vitest tests (helpers, encryption, env, relay, tools)
+  index.ts               # Entry point — env, server, register tools, lifecycle
+  manager.ts             # BrowserManager class (single responsibility)
+  credentials-store.ts   # Credential type + load/save + crypto re-exports
+  crypto.ts              # AES-256-GCM encrypt/decrypt (shared)
+  utils.ts               # sleep, globalWait, writeToFile
+  env.ts                 # Zod env schema
+  helpers.ts             # Pure functions — bot-wall, ErrorTracker, dedup, etc.
+  relay.ts               # Cookie push relay server
+  tools/
+    index.ts             # Barrel re-exports
+    extraction.ts        # get_page_text, fetch_urls, get_links, get_attrs, evaluate, extract
+    interaction.ts       # click, fill, scroll, wait_for
+    screenshots.ts       # get_screenshot (+ @napi-rs/image)
+    session.ts           # start_browser, stop_browser, smoke_test, captcha_status, get_console
+    network.ts           # cookies, download_file
+    navigation.ts        # go_to_url, history (+ ErrorTracker, CAPTCHA wait)
+    credentials.ts       # credentials, use_credential
+    tabs.ts              # list_tabs, new_tab, close_tabs
+    profiles.ts          # create_profile, list_profiles, save_profile, delete_profile
+  __tests__/             # 5 test files, 146 passed
 docker/
   Dockerfile        # Custom Steel Browser image (CapSolver + stealth)
   docker-compose.yml # Compose for Steel Browser + optional MCP server
@@ -319,12 +343,12 @@ Dockerfile          # MCP server container image
 ### Tests
 
 ```
-130 tests total:
-  helpers.test.ts     — 80 tests (pure helper functions)
-  encryption.test.ts  — 8 tests (AES-256-GCM round-trip)
-  env.test.ts         — 7 tests (env schema derivation)
-  relay.test.ts       — 14 tests (HTTP relay server)
-  tools.test.ts       — 7 non-browser + 10 browser-dependent (skipped when Steel unavailable)
+146 tests total (10 skipped):
+  helpers.test.ts     — pure helper functions
+  encryption.test.ts  — AES-256-GCM round-trip
+  env.test.ts         — env schema derivation
+  relay.test.ts       — HTTP relay server
+  tools.test.ts       — non-browser + browser-dependent (skipped when Steel unavailable)
 ```
 
 See [AGENTS.md](./AGENTS.md) for architecture details, code style, and tool handler patterns.

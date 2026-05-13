@@ -29,6 +29,12 @@ BROWSER_MODE=local node dist/index.cjs
 
 # Inspect tools via MCP inspector
 pnpm inspector
+
+# Lint source files
+npx oxlint src/
+
+# Check formatting
+npx oxfmt --check src/
 ```
 
 **Tests:** `pnpm test` runs vitest (`test/*.test.ts`) — covers the pure helpers shared by
@@ -111,9 +117,33 @@ No LLM API key required — the calling agent provides all reasoning.
 
 ## Architecture
 
-Source files: `src/index.ts` (tool registrations + BrowserManager), `src/relay.ts` (HTTP relay server for browser extension), `src/helpers.ts` (pure helper functions), `src/env.ts` (Zod env schema).
+Source files:
 
-**Key class — `BrowserManager`:**
+```
+src/
+  index.ts               # Entry point — env, server, register tools, lifecycle
+  manager.ts             # BrowserManager class (single responsibility)
+  credentials-store.ts   # Credential type + load/save + crypto re-exports
+  crypto.ts              # AES-256-GCM encrypt/decrypt (shared)
+  utils.ts               # sleep, globalWait, writeToFile
+  env.ts                 # Zod env schema
+  helpers.ts             # Pure functions — bot-wall, ErrorTracker, dedup, etc.
+  relay.ts               # Cookie push relay server
+  tools/
+    index.ts             # Barrel re-exports
+    extraction.ts        # get_page_text, fetch_urls, get_links, get_attrs, evaluate, extract
+    interaction.ts       # click, fill, scroll, wait_for
+    screenshots.ts       # get_screenshot (+ @napi-rs/image)
+    session.ts           # start_browser, stop_browser, smoke_test, captcha_status, get_console
+    network.ts           # cookies, download_file
+    navigation.ts        # go_to_url, history (+ ErrorTracker, CAPTCHA wait)
+    credentials.ts       # credentials, use_credential
+    tabs.ts              # list_tabs, new_tab, close_tabs
+    profiles.ts          # create_profile, list_profiles, save_profile, delete_profile
+  __tests__/             # 5 test files, 146 passed
+```
+
+**Key class — `BrowserManager`** (in `src/manager.ts`):
 - `initialize()` — creates a Steel session (or local Chromium launch), connects Playwright
   via `chromium.connectOverCDP()`, opens the first page, wires console log capture.
 - `getPage()` — returns the current Playwright `Page`, reopening if closed. Re-attaches
@@ -145,18 +175,20 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 | `list_tabs` | List tabs (filter by owner/profile/tabId). Replaces get_current_url |
 | `new_tab` | Open a new tab (optional URL, owner, profile) |
 | `close_tabs` | Close by tabId, owner, or both. Replaces close_tab + close_tabs_by_owner |
-| `go_to_url` | Navigate + optional waitFor. Auto-detects bot walls. Returns URL + title |
+| `go_to_url` | Navigate + optional waitFor. `readPage` extracts content in same call. `disableMedia` blocks images/fonts/CSS. CAPTCHA wait-and-retry (15s CapSolver poll). Auto-detects bot walls + error loops |
 | `click` | Click element + optional waitFor/waitForText. Reports navigation |
 | `fill` | Fill 1+ form fields. Auto-detects type. Replaces type + select |
-| `scroll` | Scroll up/down. Reports position + page height + percentage |
+| `scroll` | Scroll up/down. `readAfterScroll` returns visible text in same call |
 | `history` | Back, forward, or reload. Reports URL + title |
 | `wait_for` | Wait for selector/text/textGone. Timeout shows page context |
-| `get_page_text` | Extract text (auto-selects main content area). matchAll for lists |
+| `get_page_text` | Extract text (auto-selects main content area). `extractContent` for Readability article extraction. `format: "markdown"` via turndown. `matchAll` for lists. Default maxChars: 5K |
 | `get_links` | Extract [{text, href}] with optional urlPattern filter |
 | `get_attrs` | Extract specific attributes from matched elements |
-| `get_screenshot` | Screenshot (webp/jpeg/png, selector/clip/fullPage) |
-| `evaluate` | Run JS in page context, return JSON |
+| `get_screenshot` | Screenshot (webp/jpeg/png, selector/clip/fullPage). Default outputMode: "file". Post-capture resize via @napi-rs/image (maxWidth, maxHeight, maxFileBytes) |
+| `evaluate` | Run JS in page context, return JSON. maxChars cap (default 10K). outputMode: "file" for large output |
 | `get_console` | Browser console messages (filter by level) |
+| `fetch_urls` | Batch-fetch 1–10 URLs in parallel with Readability extraction |
+| `extract` | Declarative structured extraction: CSS selector + field map → JSON |
 | `download_file` | Download URL to disk (handles attachments + inline binaries) |
 | `cookies` | Get or set browser cookies. Filter by domain |
 | `credentials` | List/store/update/delete credentials (no args = list) |
@@ -177,6 +209,8 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 - **Dedup + sanitize** — collapse whitespace, strip fragments, first-non-empty-wins across duplicate hrefs (DOM-order yields headlines, not excerpts).
 - **One call not N** — if an existing tool takes 3 exec to accomplish a common task, add an option to merge them (`go_to_url` gained `waitFor` for this reason).
 - **Fail safely** — auto-detect Cloudflare/bot walls and return `isError: true`, don't swallow the response and let the agent silently scrape an empty page.
+- **Search first, never guess URLs** — use extraction tools to discover links; never construct or guess URLs from patterns.
+- **Wait for CAPTCHA before failing** — `go_to_url` polls CapSolver for up to 15s on CAPTCHA walls before returning `isError: true`, giving the solver time to complete.
 
 ---
 
@@ -184,7 +218,7 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 
 ### TypeScript
 - `strict: true`, target `ES2022`, `moduleResolution: "bundler"` (tsup bundles to `.cjs`)
-- No `.js` extension on local imports
+- Local imports use `.js` extension (required for the ESM module system): `import { foo } from "./helpers.js"`
 - Cast caught errors: `const error = err as Error`
 
 ### Imports
@@ -198,7 +232,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { chromium } from "playwright";
 import { z } from "zod";
 
-import { EnvSchema } from "./env";
+import { EnvSchema } from "./env.js";
 ```
 
 ### Tool handler pattern
@@ -214,7 +248,7 @@ CONTEXT BUDGET — one sentence about output size risk.`,
     try {
       const page = await mgr.getPage();
       // ... do work ...
-      await globalWait(); // action tools only; not read-only tools
+      await globalWait(env); // action tools only; not read-only tools
       return { content: [{ type: "text", text: "Result." }] };
     } catch (err) {
       const error = err as Error;
@@ -232,10 +266,10 @@ CONTEXT BUDGET — one sentence about output size risk.`,
 - `"inline"` — return data directly; auto-downgrades to `"file"` if `buffer.length > maxInlineBytes`
 - `"file"` — write to `OUTPUT_DIR`, return file path only
 
-Use `writeToFile(data, defaultName, outputPath?)` — creates parent dirs automatically.
+Use `writeToFile(data, defaultName, env, outputPath?)` — takes `env` param, creates parent dirs automatically.
 
 ### Global wait
-Call `await globalWait()` after every action tool (navigation, scroll, click, type, select, etc.).
+Call `await globalWait(env)` after every action tool (navigation, scroll, click, type, select, etc.).
 Do **not** call it in read-only tools (get_screenshot, get_page_text, get_current_url,
 console_log, wait_for). Controlled by `GLOBAL_WAIT_SECONDS` env var (default 0).
 

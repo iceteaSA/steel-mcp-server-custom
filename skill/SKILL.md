@@ -24,28 +24,53 @@ common failures.
 
 ## Tool Selection — Which Tool for What
 
-| I want to...                  | Use                                          | Not                     |
-|-------------------------------|----------------------------------------------|-------------------------|
-| Read page content             | `get_page_text(selector: "main")`            | `evaluate` (overkill)   |
-| Get article URLs from a list  | `get_links(selector: "main")`                | `get_page_text(matchAll)`|
-| Scrape structured list data   | `get_page_text(matchAll: true)`              | `evaluate` + loop       |
-| Get data-*, aria-*, src attrs | `get_attrs(selector, attrs)`                 | `evaluate`              |
-| Type in a search box          | `fill(fields: [{selector, value, submit}])`  | `evaluate`              |
-| Fill a login form             | `fill(fields: [...], submitSelector)`        | Multiple `fill` calls   |
-| Click + wait for result       | `click(selector, waitFor: "...")`            | `click` then `wait_for` |
-| Navigate + wait for content   | `go_to_url(url, waitFor: "...")`             | `go_to_url` then `wait_for`|
-| Check what page I'm on        | `list_tabs(tabId: N)`                        | ~~get_current_url~~     |
-| Clean up my tabs              | `close_tabs(owner: "agent:mine")`            | `stop_browser`          |
-| Debug page errors             | `get_console(level: "error")`                | `evaluate` console scan |
-| Compute/filter/custom extract | `evaluate(expression: "...")`                | —                       |
+| I want to...                          | Use                                                        | Not                          |
+|---------------------------------------|------------------------------------------------------------|------------------------------|
+| Read page content                     | `get_page_text(selector: "main")`                          | `evaluate` (overkill)        |
+| Navigate + read page (1 call)         | `go_to_url(url, readPage: true)`                           | `go_to_url` then `get_page_text` |
+| Read article content cleanly          | `get_page_text(extractContent: true)`                      | `get_page_text` with raw text |
+| Read as markdown                      | `get_page_text(extractContent: true, format: "markdown")`  | evaluate + regex             |
+| Batch-fetch multiple URLs             | `fetch_urls(urls: [...])`                                  | chaining new_tab + get_page_text |
+| Structured data extraction            | `extract(selector, fields)`                                | evaluate with fragile JS     |
+| Get article URLs from a list          | `get_links(selector: "main")`                              | `get_page_text(matchAll)`    |
+| Scrape structured list data           | `get_page_text(matchAll: true)`                            | `evaluate` + loop            |
+| Get data-*, aria-*, src attrs         | `get_attrs(selector, attrs)`                               | `evaluate`                   |
+| Type in a search box                  | `fill(fields: [{selector, value, submit}])`                | `evaluate`                   |
+| Fill a login form                     | `fill(fields: [...], submitSelector)`                      | Multiple `fill` calls        |
+| Click + wait for result               | `click(selector, waitFor: "...")`                          | `click` then `wait_for`      |
+| Navigate + wait for content           | `go_to_url(url, waitFor: "...")`                           | `go_to_url` then `wait_for`  |
+| Scroll + read in one call             | `scroll(direction, readAfterScroll: true)`                 | scroll then get_page_text    |
+| Screenshot to file (default)          | `get_screenshot()` — now defaults to file                  | was inline base64            |
+| Check what page I'm on                | `list_tabs(tabId: N)`                                      | ~~get_current_url~~          |
+| Clean up my tabs                      | `close_tabs(owner: "agent:mine")`                          | `stop_browser`               |
+| Debug page errors                     | `get_console(level: "error")`                              | `evaluate` console scan      |
+| Compute/filter/custom extract         | `evaluate(expression: "...")`                              | —                            |
 
 ## Common Workflows
 
-### Read a page (2 calls)
+### Read a page (1 call)
+```
+go_to_url(url: "https://example.com", readPage: true, maxChars: 3000)
+```
+
+Or with explicit selector (2 calls):
 ```
 go_to_url(url: "https://example.com", waitFor: "main")
 get_page_text(selector: "main", maxChars: 3000)
 ```
+
+### Read article content cleanly
+```
+go_to_url(url: "https://example.com/article", waitFor: "article")
+get_page_text(extractContent: true, format: "markdown", maxChars: 5000)
+```
+
+### Research multiple URLs (1 call)
+```
+fetch_urls(urls: ["https://a.com", "https://b.com"], extractContent: true, maxCharsPerPage: 3000)
+```
+
+Returns one result per URL with extracted article text. Fetches in parallel.
 
 ### Scrape a list page (2 calls)
 ```
@@ -271,6 +296,9 @@ captcha_status()
   with `captcha_status` before large batches.
 - **Google `/sorry` pages.** CapSolver handles these transparently — wait
   a few seconds after the redirect and the page loads with results.
+- **Wait-and-retry built in.** `go_to_url` polls CapSolver for up to 15s when
+  it detects a CAPTCHA wall before returning `isError: true`. You don't need
+  manual retry loops — the tool waits for the solver to complete.
 
 ## Stealth & Fingerprint
 
@@ -348,7 +376,22 @@ If waitFor times out, `go_to_url` returns success with a `TIMED OUT` note in tex
 - Title matches `/just a moment|attention required|access denied|verify you are human/i`
 - URL matches `/cdn-cgi/challenge-platform/`
 
-Error message includes final URL + title. Hand off via `start_browser` Interactive URL (HITL section below). Don't retry.
+Before returning `isError`, the tool polls CapSolver for up to 15s to give the
+solver time to complete. If the CAPTCHA resolves, navigation continues normally.
+If it doesn't, `isError: true` is returned with the final URL + title.
+
+Hand off via `start_browser` Interactive URL (HITL section below). Don't retry.
+
+### Error Loop Detection (automatic)
+
+`ErrorTracker` in `src/helpers.ts` monitors repeated failures to the same URL
+or domain. When the same destination fails multiple times in a session, the tool
+emits a warning in the response. This surfaces patterns like:
+- Repeated 404s to the same path (bad URL construction)
+- Repeated bot-walls from the same domain (IP blocked)
+
+No action required — it's a diagnostic signal. If you see the warning, stop
+iterating and diagnose the root cause.
 
 ## Legacy Wait Pattern
 
@@ -377,7 +420,7 @@ Proves Steel works:
 go_to_url(url: "https://example.com")
 list_tabs()
 get_page_text(selector: "body", maxChars: 500)
-get_screenshot(outputMode: "file")                           # webp default in 0.6.0+
+get_screenshot()                                             # defaults to file mode
 ```
 
 ## Protect Context Window
@@ -385,14 +428,16 @@ get_screenshot(outputMode: "file")                           # webp default in 0
 Page text + screenshots can be huge. Constrain:
 
 - `get_page_text` — `maxChars: 3000`, scoped `selector` (e.g. `"main"`,
-  `"article"`, `"#results"`). Full page only when needed.
-- `get_screenshot` — default format is `"webp"` (0.6.0+), the smallest option.
-  Quality defaults to 80. Use `outputMode: "file"` when not reading inline.
-  Use `scale: 0.5` for large pages. Pass `format: "png"` when you need
-  lossless (diagrams, UI regression shots).
+  `"article"`, `"#results"`). Full page only when needed. Default maxChars is 5K.
+- `get_screenshot` — default `outputMode: "file"` (prevents base64 context bloat).
+  Default format is `"webp"` (smallest). Quality defaults to 80. Use `scale: 0.5`
+  for large pages. Use `maxWidth`/`maxHeight`/`maxFileBytes` to cap output size
+  via post-capture resize/compress. Pass `format: "png"` when you need lossless
+  (diagrams, UI regression shots).
 - `cookies` — default caps at 50 cookies. Prefer `domain: "example.com"`
   over `urls: [...]`; simpler and robust against Playwright's matcher quirks.
-- `evaluate` — return only fields needed; no full DOM trees.
+- `evaluate` — return only fields needed; no full DOM trees. `maxChars` cap
+  (default 10K); use `outputMode: "file"` for large computed results.
 
 ## Extracting Structured Data — Pick the Right Path
 
@@ -420,10 +465,12 @@ Output (compact — one entry per line):
 Flags:
 - `matchAll: true` → querySelectorAll, one entry per match
 - `includeLinks: true` → adds `title`, `primaryLink`, and deduped `links` array
-- `maxChars` — cap text per entry (default 10000)
+- `maxChars` — cap text per entry (default 5000)
 - `maxEntries` — cap array length (default 20; 0 = no cap)
 - `pretty: true` — 2-space indent inline JSON (default false = compact one-per-line)
 - `outputMode: "file"` — save JSON to disk if huge (always pretty on file)
+- `extractContent: true` — Readability article extraction (strips nav/ads)
+- `format: "markdown"` — convert extracted HTML to markdown via turndown
 
 Sanitization in matchAll:
 - `text` has anchor text only; no embedded `[href]` tokens (links are in the separate `links` array)
@@ -433,6 +480,40 @@ Sanitization in matchAll:
 - `title` = text of the link whose href matches `primaryLink` — use directly as article headline
 
 Default (`matchAll: false`) → single-match string behavior preserved; `includeLinks` still embeds `[href]` in text for legacy use.
+
+### Path 1b — `fetch_urls` (batch parallel fetch)
+
+When you have a list of URLs to read, `fetch_urls` fetches them all in parallel
+(up to 10) in a single tool call:
+
+```
+fetch_urls(
+  urls: ["https://a.com/article", "https://b.com/post"],
+  extractContent: true,
+  maxCharsPerPage: 3000
+)
+```
+
+Returns one result per URL. Faster than chaining `new_tab` + `get_page_text` per URL.
+
+### Path 1c — `extract` (declarative field extraction)
+
+When you need structured data from a known page shape, `extract` maps a CSS
+selector to a field schema and returns JSON — no JS required:
+
+```
+extract(
+  selector: "article.product-card",
+  fields: {
+    name: "h2.title",
+    price: ".price",
+    sku: "[data-sku]"
+  }
+)
+```
+
+Returns an array of objects matching the field map. Prefer over `evaluate` when
+the page structure is predictable — less fragile than hand-written JS.
 
 ### Path 2 — `get_links` (URL-only, no text walking)
 
@@ -507,6 +588,10 @@ Returns `{n: 21, sample: ["<article class=\"...\" ...>"]}`. Read the classes + n
 ## Bot-Check / Cloudflare Detection
 
 `go_to_url` auto-detects and returns `isError: true` (see "Nav + Wait in One Call" above). No manual check needed after nav.
+
+Before returning `isError`, the tool waits up to 15s for CapSolver to resolve
+the CAPTCHA. If it resolves, navigation continues normally. If not, `isError: true`
+is returned with the final URL + title.
 
 For bot walls that appear **after** a click (rare — usually on form submits):
 
@@ -671,9 +756,17 @@ These don't surface on `console.*` — previously invisible.
 ## Screenshots — format, scope, output path
 
 Format choices (smallest → largest):
-- `"webp"` — smallest. **Default in 0.6.0+.** Uses CDP directly (requires Chromium ≥ 88).
+- `"webp"` — smallest. **Default.** Uses CDP directly (requires Chromium ≥ 88).
 - `"jpeg"` — widely compatible. Good for photos/screenshots with gradients.
 - `"png"` — lossless. Good for UI regression shots, diagrams with text.
+
+Default `outputMode` is `"file"` — screenshots are saved to disk and the path
+is returned. This prevents base64 blobs from bloating the context window. Pass
+`outputMode: "inline"` only when you need to read the image directly.
+
+Post-capture resize/compress via `@napi-rs/image`:
+- `maxWidth` / `maxHeight` — resize to fit within these dimensions (aspect-ratio preserved)
+- `maxFileBytes` — compress until file is under this size
 
 Scope:
 - `selector: "article.hero"` — capture just that element's bounding box.
@@ -753,10 +846,9 @@ click(selector: "a.download-link", tabId: 7)
 Rough budget for a single scrape task:
 - 1 `list_tabs` (check session)
 - 1 `new_tab` (own tab)
-- 1 `go_to_url`
-- 1 `wait_for` (content loaded)
-- 1 `get_page_text` with `matchAll` (list extraction)
+- 1 `go_to_url` (with `readPage: true` to combine nav + extract)
+- 1 `get_page_text` with `matchAll` (list extraction, if not using readPage)
 - 1 `list_tabs` (verify, optional)
 
-≈ 5–6 calls total per page. If you exceed 8 without new info, stop + probe
+≈ 3–5 calls total per page with `readPage`. If you exceed 8 without new info, stop + probe
 with the selector diagnostic — don't iterate blind.

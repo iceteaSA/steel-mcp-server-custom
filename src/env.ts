@@ -9,8 +9,7 @@ export const EnvSchema = z
       .string()
       .transform((arg) => arg.toLowerCase())
       .refine((arg) => arg === "steel" || arg === "local", {
-        message:
-          "BROWSER_MODE must be either 'steel' or 'local' (case insensitive)",
+        message: "BROWSER_MODE must be either 'steel' or 'local' (case insensitive)",
       })
       .default("steel"),
     STEEL_API_KEY: z.string().optional(),
@@ -88,5 +87,5 @@ export const EnvSchema = z
       message:
         "STEEL_API_KEY must be set when BROWSER_MODE is 'steel' and STEEL_BASE_URL is not set (Steel Cloud mode).",
       path: ["STEEL_API_KEY"],
-    }
+    },
   );

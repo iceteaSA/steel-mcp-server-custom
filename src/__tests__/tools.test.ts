@@ -61,7 +61,9 @@ class MCPTestClient {
             this.waiters.delete(msg.id);
             waiter(msg);
           }
-        } catch { /* non-JSON stderr leak */ }
+        } catch {
+          /* non-JSON stderr leak */
+        }
       }
     });
   }
@@ -74,7 +76,11 @@ class MCPTestClient {
     });
   }
 
-  async call(id: number, method: string, params: Record<string, unknown> = {}): Promise<MCPResponse> {
+  async call(
+    id: number,
+    method: string,
+    params: Record<string, unknown> = {},
+  ): Promise<MCPResponse> {
     return new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.waiters.delete(id);
@@ -124,19 +130,42 @@ describe("non-browser tools", () => {
     client.kill();
   });
 
-  it("tools/list returns 26 tools with correct names", async () => {
+  it("tools/list returns expected tools with correct names", async () => {
     const r = await client.call(100, "tools/list");
     const names = r.result?.tools?.map((t) => t.name).sort() || [];
-    expect(names.length).toBe(27);
+    expect(names.length).toBe(29);
 
     // Verify removed tools are gone
-    const removed = ["get_current_url", "close_tab", "close_tabs_by_owner", "type", "select", "set_cookies", "list_credentials", "fill_form", "get_cookies", "console_log", "store_credential"];
+    const removed = [
+      "get_current_url",
+      "close_tab",
+      "close_tabs_by_owner",
+      "type",
+      "select",
+      "set_cookies",
+      "list_credentials",
+      "fill_form",
+      "get_cookies",
+      "console_log",
+      "store_credential",
+    ];
     for (const old of removed) {
       expect(names).not.toContain(old);
     }
 
     // Verify new/renamed tools exist
-    const expected = ["fill", "cookies", "get_console", "credentials", "close_tabs", "list_tabs", "captcha_status", "create_profile"];
+    const expected = [
+      "fill",
+      "cookies",
+      "get_console",
+      "credentials",
+      "close_tabs",
+      "list_tabs",
+      "captcha_status",
+      "create_profile",
+      "fetch_urls",
+      "extract",
+    ];
     for (const name of expected) {
       expect(names).toContain(name);
     }
@@ -150,7 +179,10 @@ describe("non-browser tools", () => {
   it("credentials store + list + delete lifecycle", async () => {
     // Store
     const store = await client.tool(102, "credentials", {
-      name: "test-site", url: "test.com", username: "alice", password: "secret123",
+      name: "test-site",
+      url: "test.com",
+      username: "alice",
+      password: "secret123",
     });
     expect(client.getText(store)).toContain("stored");
 
@@ -194,7 +226,7 @@ describe("non-browser tools", () => {
     await fs.mkdir(profileDir, { recursive: true });
     await fs.writeFile(
       path.join(profileDir, "fake-profile.json"),
-      JSON.stringify({ cookies: [], localStorage: {}, savedAt: "2026-01-01T00:00:00Z" })
+      JSON.stringify({ cookies: [], localStorage: {}, savedAt: "2026-01-01T00:00:00Z" }),
     );
 
     const r = await client.tool(109, "list_profiles");
@@ -238,12 +270,16 @@ describe("browser tools", () => {
     expect(client.getText(r)).toMatch(/Tab \d+/);
   });
 
-  it.skipIf(!steelAvailable)("go_to_url returns URL + title", async () => {
-    const r = await client.tool(201, "go_to_url", { url: "https://example.com" });
-    const text = client.getText(r);
-    expect(text).toContain("example.com");
-    expect(text).toContain("Title:");
-  }, 15000);
+  it.skipIf(!steelAvailable)(
+    "go_to_url returns URL + title",
+    async () => {
+      const r = await client.tool(201, "go_to_url", { url: "https://example.com" });
+      const text = client.getText(r);
+      expect(text).toContain("example.com");
+      expect(text).toContain("Title:");
+    },
+    15000,
+  );
 
   it.skipIf(!steelAvailable)("get_page_text auto-selects content area", async () => {
     const r = await client.tool(202, "get_page_text", { maxChars: 500 });
@@ -273,26 +309,34 @@ describe("browser tools", () => {
     expect(client.getText(r)).toContain("No tabs");
   });
 
-  it.skipIf(!steelAvailable)("click with waitForText reports result", async () => {
-    // Navigate to example.com first
-    await client.tool(206, "go_to_url", { url: "https://example.com" });
-    const r = await client.tool(207, "click", {
-      selector: "a",
-      waitForText: "RFC 2606",
-      waitTimeout: 10000,
-    });
-    const text = client.getText(r);
-    // Either the text appeared or timed out — both are valid formatted responses
-    expect(text).toMatch(/Clicked: a/);
-  }, 20000);
+  it.skipIf(!steelAvailable)(
+    "click with waitForText reports result",
+    async () => {
+      // Navigate to example.com first
+      await client.tool(206, "go_to_url", { url: "https://example.com" });
+      const r = await client.tool(207, "click", {
+        selector: "a",
+        waitForText: "RFC 2606",
+        waitTimeout: 10000,
+      });
+      const text = client.getText(r);
+      // Either the text appeared or timed out — both are valid formatted responses
+      expect(text).toMatch(/Clicked: a/);
+    },
+    20000,
+  );
 
-  it.skipIf(!steelAvailable)("history(reload) reports URL + title", async () => {
-    const r = await client.tool(208, "history", { action: "reload" });
-    const text = client.getText(r);
-    expect(text).toContain("Reloaded");
-    expect(text).toContain("Current URL:");
-    expect(text).toContain("Title:");
-  }, 15000);
+  it.skipIf(!steelAvailable)(
+    "history(reload) reports URL + title",
+    async () => {
+      const r = await client.tool(208, "history", { action: "reload" });
+      const text = client.getText(r);
+      expect(text).toContain("Reloaded");
+      expect(text).toContain("Current URL:");
+      expect(text).toContain("Title:");
+    },
+    15000,
+  );
 
   it.skipIf(!steelAvailable)("get_console returns formatted messages", async () => {
     const r = await client.tool(209, "get_console", { level: "all" });

@@ -102,7 +102,14 @@ describe("POST /push — cookies", () => {
       profile: "github",
       cookies: [
         { name: "session", value: "abc123", domain: ".github.com", path: "/" },
-        { name: "_gh_sess", value: "xyz", domain: "github.com", path: "/", httpOnly: true, secure: true },
+        {
+          name: "_gh_sess",
+          value: "xyz",
+          domain: "github.com",
+          path: "/",
+          httpOnly: true,
+          secure: true,
+        },
       ],
     });
     expect(res.ok).toBe(true);

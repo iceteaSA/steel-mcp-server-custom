@@ -1,5 +1,7 @@
 // Pure helpers shared by multiple tool handlers. Node-side — safe to unit test
-// without a browser. Keep zero runtime deps so the built bundle stays lean.
+// without a browser.
+
+import mime from "mime-types";
 
 export interface Link {
   text: string;
@@ -16,16 +18,112 @@ export function collapseWhitespace(s: string | null | undefined): string {
 }
 
 /**
- * Detects whether the page is sitting on a Cloudflare / anti-bot wall based
- * on title text and URL. Callers should return isError and hand off to a
- * human via the Interactive URL — do not retry, same IP will fail again.
+ * Detects whether the page is sitting on a CAPTCHA / anti-bot wall based
+ * on title text and URL patterns. Covers Cloudflare, Google sorry/CAPTCHA,
+ * hCaptcha, AWS WAF, DataDome, and generic challenge pages.
+ *
+ * When CapSolver is loaded, these challenges may auto-solve within seconds.
+ * Callers should wait + re-check (see CAPTCHA_WAIT_* constants) before
+ * returning isError to the agent.
  */
 const BOT_WALL_TITLE_RE =
-  /just a moment|attention required|access denied|verify you are human/i;
-const BOT_WALL_URL_RE = /\/cdn-cgi\/challenge-platform\//i;
+  /just a moment|attention required|access denied|verify you are human|unusual traffic|are you a robot|captcha|human verification/i;
+const BOT_WALL_URL_RE =
+  /\/cdn-cgi\/challenge-platform\/|\/sorry\/index|google\.com\/sorry|recaptcha\/api|hcaptcha\.com\/captcha|challenges\.cloudflare\.com/i;
+
+/** How long to wait for CapSolver to auto-solve a detected CAPTCHA (ms). */
+export const CAPTCHA_WAIT_TOTAL_MS = 15_000;
+/** Polling interval while waiting for CAPTCHA solve (ms). */
+export const CAPTCHA_POLL_INTERVAL_MS = 2_000;
 
 export function isBotWall(title: string, url: string): boolean {
   return BOT_WALL_TITLE_RE.test(title) || BOT_WALL_URL_RE.test(url);
+}
+
+/**
+ * Detects common HTTP error pages (404, 5xx) by title heuristics.
+ * Returns the detected status string (e.g. "404") or null if not an error page.
+ */
+const ERROR_PAGE_RE =
+  /^(page not found|404|not found|403 forbidden|500 internal|502 bad gateway|503 service|error \d{3})/i;
+const GITHUB_404_RE = /page not found.*github/i;
+
+export function detectErrorPage(title: string): string | null {
+  if (GITHUB_404_RE.test(title)) return "404";
+  const m = title.match(ERROR_PAGE_RE);
+  if (m) {
+    // Try to extract status code from match
+    const code = m[0].match(/\d{3}/);
+    return code ? code[0] : "404";
+  }
+  return null;
+}
+
+/**
+ * Tracks recent navigation errors (404s, bot walls) to detect agents stuck in
+ * retry loops. Ring buffer keyed by URL origin+pathname (strips query/fragment).
+ *
+ * When the same domain or exact URL has been seen N times recently, returns a
+ * warning message the agent can use to break the loop. The tracker is
+ * intentionally generous — it warns, it doesn't block.
+ */
+export class ErrorTracker {
+  private entries: Array<{ key: string; domain: string; ts: number }> = [];
+  private readonly maxEntries: number;
+  private readonly domainThreshold: number;
+  private readonly urlThreshold: number;
+
+  constructor(opts?: { maxEntries?: number; domainThreshold?: number; urlThreshold?: number }) {
+    this.maxEntries = opts?.maxEntries ?? 30;
+    this.domainThreshold = opts?.domainThreshold ?? 5;
+    this.urlThreshold = opts?.urlThreshold ?? 2;
+  }
+
+  /** Normalise a URL to origin+pathname for dedup (strip query, fragment). */
+  private normalise(url: string): { key: string; domain: string } {
+    try {
+      const u = new URL(url);
+      return { key: `${u.origin}${u.pathname}`, domain: u.hostname };
+    } catch {
+      return { key: url, domain: url };
+    }
+  }
+
+  /** Record a failed navigation. */
+  record(url: string): void {
+    const { key, domain } = this.normalise(url);
+    this.entries.push({ key, domain, ts: Date.now() });
+    if (this.entries.length > this.maxEntries) {
+      this.entries.shift();
+    }
+  }
+
+  /**
+   * Check if a URL would be a repeat error. Returns a warning string if the
+   * agent appears to be looping, or null if the URL looks fresh.
+   */
+  check(url: string): string | null {
+    const { key, domain } = this.normalise(url);
+
+    // Exact URL repeat
+    const urlHits = this.entries.filter((e) => e.key === key).length;
+    if (urlHits >= this.urlThreshold) {
+      return `This exact URL has failed ${urlHits} time(s) recently. Try a different approach (e.g. search instead of guessing URLs).`;
+    }
+
+    // Same domain repeat
+    const domainHits = this.entries.filter((e) => e.domain === domain).length;
+    if (domainHits >= this.domainThreshold) {
+      return `${domainHits} recent errors on ${domain}. The resource may not exist or the domain is blocking requests. Try searching for the correct URL instead.`;
+    }
+
+    return null;
+  }
+
+  /** Clear all entries. */
+  clear(): void {
+    this.entries = [];
+  }
 }
 
 /**
@@ -65,10 +163,7 @@ export function pickPrimaryLink(links: Link[]): string | undefined {
   const articleish = links.find((l) => {
     try {
       const u = new URL(l.href);
-      return (
-        u.pathname.length > 1 &&
-        u.pathname.split("/").filter(Boolean).length >= 2
-      );
+      return u.pathname.length > 1 && u.pathname.split("/").filter(Boolean).length >= 2;
     } catch {
       return false;
     }
@@ -81,10 +176,7 @@ export function pickPrimaryLink(links: Link[]): string | undefined {
  * Given a primaryLink URL and the deduped links list, return the text of the
  * anchor whose href matches (ignoring fragments). Used as the article title.
  */
-export function findTitle(
-  primaryLink: string | undefined,
-  links: Link[]
-): string | undefined {
+export function findTitle(primaryLink: string | undefined, links: Link[]): string | undefined {
   if (!primaryLink) return undefined;
   const key = primaryLink.split("#")[0];
   const match = links.find((l) => l.href.split("#")[0] === key && l.text);
@@ -145,7 +237,7 @@ export type FieldKind = "text" | "check" | "radio" | "select";
 
 export function detectFieldKind(
   tag: string | null | undefined,
-  type: string | null | undefined
+  type: string | null | undefined,
 ): FieldKind {
   const t = (tag ?? "").toUpperCase();
   if (t === "SELECT") return "select";
@@ -169,15 +261,7 @@ export function detectFieldKind(
  *      for HTML checkbox groups like `name=topping value=cheese`.
  */
 const CHECKBOX_TRUTHY = new Set(["true", "1", "on", "yes", "checked", "y"]);
-const CHECKBOX_FALSY = new Set([
-  "false",
-  "0",
-  "off",
-  "no",
-  "unchecked",
-  "n",
-  "",
-]);
+const CHECKBOX_FALSY = new Set(["false", "0", "off", "no", "unchecked", "n", ""]);
 
 export type CheckboxIntent = "check" | "uncheck" | "selectByValue";
 
@@ -223,7 +307,7 @@ export function buildRadioSelector(selector: string, value: string): string {
  */
 export function matchesCookieHost(
   cookieDomain: string | null | undefined,
-  urlHost: string | null | undefined
+  urlHost: string | null | undefined,
 ): boolean {
   if (!cookieDomain || !urlHost) return false;
   const cd = cookieDomain.toLowerCase().replace(/^\./, "");
@@ -238,33 +322,14 @@ export function matchesCookieHost(
 }
 
 /**
- * Map a Content-Type (MIME) string to a plausible file extension for saving
- * downloaded bodies. Strips parameters (`; charset=…`). Returns empty string
- * when unknown — caller can leave the filename extension-less.
+ * Map a Content-Type (MIME) string to a file extension (with leading dot).
+ * Uses the `mime-types` package for comprehensive coverage (1000+ types).
+ * Returns empty string when unknown.
  */
-const MIME_EXT_MAP: Record<string, string> = {
-  "application/pdf": ".pdf",
-  "text/csv": ".csv",
-  "application/json": ".json",
-  "application/zip": ".zip",
-  "application/x-tar": ".tar",
-  "application/gzip": ".gz",
-  "application/xml": ".xml",
-  "text/xml": ".xml",
-  "image/jpeg": ".jpg",
-  "image/png": ".png",
-  "image/webp": ".webp",
-  "image/gif": ".gif",
-  "image/svg+xml": ".svg",
-  "application/octet-stream": ".bin",
-  "text/plain": ".txt",
-  "text/html": ".html",
-};
-
-export function mimeToExt(mime: string | null | undefined): string {
-  if (!mime) return "";
-  const m = mime.toLowerCase().split(";")[0].trim();
-  return MIME_EXT_MAP[m] ?? "";
+export function mimeToExt(contentType: string | null | undefined): string {
+  if (!contentType) return "";
+  const ext = mime.extension(contentType);
+  return ext ? `.${ext}` : "";
 }
 
 /**
@@ -296,6 +361,7 @@ export function deriveDownloadFilename(url: string): string {
  * Leaves meaningful lines (Playwright "Call log:" context, user errors,
  * SyntaxError messages with line/col) intact.
  */
+// eslint-disable-next-line no-control-regex -- intentional: stripping ANSI escape codes
 const ANSI_RE = /\u001b\[[0-9;]*m/g;
 const PLAYWRIGHT_INTERNAL_FRAME_RE =
   /^\s+at (?:UtilityScript\.(?:\w|<)|eval \((?:eval at )?evaluate \(|eval \(<anonymous>)/;

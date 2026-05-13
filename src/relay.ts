@@ -13,7 +13,7 @@
 import http from "http";
 import fs from "fs/promises";
 import path from "path";
-import crypto from "crypto";
+import { encryptJSON, decryptJSON } from "./crypto.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -24,17 +24,18 @@ export interface RelayCookie {
   value: string;
   domain: string;
   path: string;
-  expires?: number;    // epoch seconds (-1 or omitted = session cookie)
+  expires?: number; // epoch seconds (-1 or omitted = session cookie)
   httpOnly?: boolean;
   secure?: boolean;
   sameSite?: "Strict" | "Lax" | "None";
 }
 
 export interface PushPayload {
-  profile: string;                                    // profile name to create/update
-  cookies?: RelayCookie[];                            // from chrome.cookies API
-  localStorage?: Record<string, Record<string, string>>;  // origin → {key: value}
-  credentials?: {                                     // optional login credentials
+  profile: string; // profile name to create/update
+  cookies?: RelayCookie[]; // from chrome.cookies API
+  localStorage?: Record<string, Record<string, string>>; // origin → {key: value}
+  credentials?: {
+    // optional login credentials
     name: string;
     url: string;
     username: string;
@@ -72,32 +73,6 @@ type Credential = {
   createdAt: string;
   updatedAt: string;
 };
-
-function deriveKey(passphrase: string): Buffer {
-  return crypto.scryptSync(passphrase, "steel-mcp-creds", 32);
-}
-
-function encryptJSON(data: unknown, passphrase: string): string {
-  const key = deriveKey(passphrase);
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
-  const plain = JSON.stringify(data);
-  const encrypted = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return Buffer.concat([iv, tag, encrypted]).toString("base64");
-}
-
-function decryptJSON(blob: string, passphrase: string): unknown {
-  const key = deriveKey(passphrase);
-  const buf = Buffer.from(blob, "base64");
-  const iv = buf.subarray(0, 12);
-  const tag = buf.subarray(12, 28);
-  const encrypted = buf.subarray(28);
-  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(tag);
-  const plain = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
-  return JSON.parse(plain);
-}
 
 async function loadCreds(file: string, passphrase?: string): Promise<Credential[]> {
   try {
@@ -151,7 +126,8 @@ async function handlePush(payload: PushPayload, config: RelayConfig): Promise<Pu
   if (cookies?.length) {
     for (const newCookie of cookies) {
       const idx = mergedCookies.findIndex(
-        (c) => c.name === newCookie.name && c.domain === newCookie.domain && c.path === newCookie.path
+        (c) =>
+          c.name === newCookie.name && c.domain === newCookie.domain && c.path === newCookie.path,
       );
       if (idx >= 0) {
         mergedCookies[idx] = newCookie;
@@ -162,10 +138,10 @@ async function handlePush(payload: PushPayload, config: RelayConfig): Promise<Pu
   }
 
   // Merge localStorage: new origins override existing, within an origin new keys override
-  const mergedLS: Record<string, Record<string, string>> = { ...(existingState.localStorage ?? {}) };
+  const mergedLS: Record<string, Record<string, string>> = { ...existingState.localStorage };
   if (localStorage) {
     for (const [origin, entries] of Object.entries(localStorage)) {
-      mergedLS[origin] = { ...(mergedLS[origin] ?? {}), ...entries };
+      mergedLS[origin] = { ...mergedLS[origin], ...entries };
     }
   }
 
@@ -206,7 +182,8 @@ async function handlePush(payload: PushPayload, config: RelayConfig): Promise<Pu
     cookieCount: cookies?.length ?? 0,
     localStorageOrigins: localStorage ? Object.keys(localStorage) : [],
     credentialSaved,
-    message: `Profile "${profileName}" updated with ${cookies?.length ?? 0} cookies` +
+    message:
+      `Profile "${profileName}" updated with ${cookies?.length ?? 0} cookies` +
       (localStorage ? `, localStorage from ${Object.keys(localStorage).length} origin(s)` : "") +
       (credentialSaved ? `, credential "${credentials!.name}" saved` : ""),
   };

@@ -1,0 +1,9 @@
+export { register as registerTabs } from "./tabs.js";
+export { register as registerScreenshots } from "./screenshots.js";
+export { register as registerExtraction } from "./extraction.js";
+export { register as registerInteraction } from "./interaction.js";
+export { register as registerNavigation } from "./navigation.js";
+export { register as registerSession } from "./session.js";
+export { register as registerNetwork } from "./network.js";
+export { register as registerCredentials } from "./credentials.js";
+export { register as registerProfiles } from "./profiles.js";

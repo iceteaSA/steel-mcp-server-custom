@@ -2,6 +2,10 @@ import { describe, it, expect } from "vitest";
 import {
   collapseWhitespace,
   isBotWall,
+  detectErrorPage,
+  ErrorTracker,
+  CAPTCHA_WAIT_TOTAL_MS,
+  CAPTCHA_POLL_INTERVAL_MS,
   dedupeLinks,
   pickPrimaryLink,
   findTitle,
@@ -63,6 +67,163 @@ describe("isBotWall", () => {
   });
   it("is case-insensitive", () => {
     expect(isBotWall("JUST A MOMENT", "https://example.com")).toBe(true);
+  });
+
+  // New patterns added for expanded detection
+  it("detects Google /sorry page by URL", () => {
+    expect(isBotWall("", "https://www.google.com/sorry/index?continue=...")).toBe(true);
+  });
+  it("detects Google sorry redirect", () => {
+    expect(isBotWall("", "https://google.com/sorry/index")).toBe(true);
+  });
+  it("detects 'unusual traffic' title", () => {
+    expect(isBotWall("Our systems have detected unusual traffic", "https://example.com")).toBe(
+      true,
+    );
+  });
+  it("detects 'are you a robot' title", () => {
+    expect(isBotWall("Are you a robot?", "https://example.com")).toBe(true);
+  });
+  it("detects 'captcha' in title", () => {
+    expect(isBotWall("Please complete the CAPTCHA", "https://example.com")).toBe(true);
+  });
+  it("detects 'human verification' title", () => {
+    expect(isBotWall("Human Verification Required", "https://example.com")).toBe(true);
+  });
+  it("detects reCAPTCHA URL", () => {
+    expect(isBotWall("", "https://www.google.com/recaptcha/api/siteverify")).toBe(true);
+  });
+  it("detects hCaptcha URL", () => {
+    expect(isBotWall("", "https://hcaptcha.com/captcha/v1/abc123")).toBe(true);
+  });
+  it("detects Cloudflare challenges URL", () => {
+    expect(isBotWall("", "https://challenges.cloudflare.com/turnstile/v0/abc")).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectErrorPage
+// ---------------------------------------------------------------------------
+describe("detectErrorPage", () => {
+  it("detects GitHub 404", () => {
+    expect(detectErrorPage("Page not found · GitHub · GitHub")).toBe("404");
+  });
+  it("detects generic 'Page not found'", () => {
+    expect(detectErrorPage("Page not found")).toBe("404");
+  });
+  it("detects '404' in title", () => {
+    expect(detectErrorPage("404 - Not Found")).toBe("404");
+  });
+  it("detects '404 Not Found'", () => {
+    expect(detectErrorPage("404 Not Found")).toBe("404");
+  });
+  it("detects '403 Forbidden'", () => {
+    expect(detectErrorPage("403 Forbidden")).toBe("403");
+  });
+  it("detects '500 Internal Server Error'", () => {
+    expect(detectErrorPage("500 Internal Server Error")).toBe("500");
+  });
+  it("detects '502 Bad Gateway'", () => {
+    expect(detectErrorPage("502 Bad Gateway")).toBe("502");
+  });
+  it("returns null for normal page titles", () => {
+    expect(detectErrorPage("Google Search")).toBeNull();
+    expect(detectErrorPage("GitHub - microsoft/playwright")).toBeNull();
+    expect(detectErrorPage("My Cool Website")).toBeNull();
+  });
+  it("is case-insensitive", () => {
+    expect(detectErrorPage("PAGE NOT FOUND")).toBe("404");
+    expect(detectErrorPage("Not Found")).toBe("404");
+  });
+  it("returns null for empty title", () => {
+    expect(detectErrorPage("")).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// CAPTCHA wait constants
+// ---------------------------------------------------------------------------
+describe("CAPTCHA wait constants", () => {
+  it("has reasonable wait total (10-30s)", () => {
+    expect(CAPTCHA_WAIT_TOTAL_MS).toBeGreaterThanOrEqual(10_000);
+    expect(CAPTCHA_WAIT_TOTAL_MS).toBeLessThanOrEqual(30_000);
+  });
+  it("has reasonable poll interval (1-5s)", () => {
+    expect(CAPTCHA_POLL_INTERVAL_MS).toBeGreaterThanOrEqual(1_000);
+    expect(CAPTCHA_POLL_INTERVAL_MS).toBeLessThanOrEqual(5_000);
+  });
+  it("allows multiple polls within total wait", () => {
+    expect(CAPTCHA_WAIT_TOTAL_MS / CAPTCHA_POLL_INTERVAL_MS).toBeGreaterThanOrEqual(3);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// ErrorTracker
+// ---------------------------------------------------------------------------
+describe("ErrorTracker", () => {
+  it("returns null for fresh URLs", () => {
+    const t = new ErrorTracker();
+    expect(t.check("https://github.com/org/repo")).toBeNull();
+  });
+
+  it("warns after exact URL repeated (default threshold 2)", () => {
+    const t = new ErrorTracker();
+    t.record("https://github.com/org/repo");
+    t.record("https://github.com/org/repo");
+    const warn = t.check("https://github.com/org/repo");
+    expect(warn).toContain("failed 2 time(s)");
+  });
+
+  it("warns after same domain repeated (default threshold 5)", () => {
+    const t = new ErrorTracker();
+    t.record("https://github.com/a/1");
+    t.record("https://github.com/a/2");
+    t.record("https://github.com/a/3");
+    t.record("https://github.com/a/4");
+    t.record("https://github.com/a/5");
+    const warn = t.check("https://github.com/a/6");
+    expect(warn).toContain("5 recent errors on github.com");
+  });
+
+  it("normalises URLs — strips query and fragment", () => {
+    const t = new ErrorTracker();
+    t.record("https://example.com/page?q=1#top");
+    t.record("https://example.com/page?q=2#bottom");
+    const warn = t.check("https://example.com/page?q=3");
+    expect(warn).toContain("failed 2 time(s)");
+  });
+
+  it("respects custom thresholds", () => {
+    const t = new ErrorTracker({ urlThreshold: 1, domainThreshold: 2 });
+    t.record("https://example.com/a");
+    expect(t.check("https://example.com/a")).toContain("failed 1 time(s)");
+    expect(t.check("https://example.com/b")).toBeNull(); // only 1 domain hit
+    t.record("https://example.com/b");
+    expect(t.check("https://example.com/c")).toContain("2 recent errors");
+  });
+
+  it("ring buffer evicts old entries", () => {
+    const t = new ErrorTracker({ maxEntries: 3, urlThreshold: 3 });
+    t.record("https://a.com/1");
+    t.record("https://a.com/1");
+    t.record("https://b.com/x"); // pushes oldest a.com/1 out
+    // Now only 1 a.com/1 entry remains + 1 b.com
+    expect(t.check("https://a.com/1")).toBeNull(); // below threshold of 3
+  });
+
+  it("clear() resets state", () => {
+    const t = new ErrorTracker();
+    t.record("https://example.com/x");
+    t.record("https://example.com/x");
+    t.clear();
+    expect(t.check("https://example.com/x")).toBeNull();
+  });
+
+  it("handles malformed URLs gracefully", () => {
+    const t = new ErrorTracker();
+    t.record("not-a-url");
+    t.record("not-a-url");
+    expect(t.check("not-a-url")).toContain("failed 2 time(s)");
   });
 });
 
@@ -143,9 +304,7 @@ describe("findTitle", () => {
   });
 
   it("ignores fragments when matching", () => {
-    const links: Link[] = [
-      { text: "Title", href: "https://a.com/post#top" },
-    ];
+    const links: Link[] = [{ text: "Title", href: "https://a.com/post#top" }];
     expect(findTitle("https://a.com/post#bottom", links)).toBe("Title");
   });
 
@@ -185,7 +344,9 @@ describe("capText", () => {
 // ---------------------------------------------------------------------------
 describe("isBrowserClosedError", () => {
   it("detects 'Target page, context or browser has been closed'", () => {
-    expect(isBrowserClosedError(new Error("Target page, context or browser has been closed"))).toBe(true);
+    expect(isBrowserClosedError(new Error("Target page, context or browser has been closed"))).toBe(
+      true,
+    );
   });
   it("detects 'Browser has been closed'", () => {
     expect(isBrowserClosedError(new Error("Browser has been closed"))).toBe(true);
@@ -210,7 +371,13 @@ describe("isBrowserClosedError", () => {
 // ---------------------------------------------------------------------------
 describe("isSteelSessionStuck", () => {
   it("detects page_refresh failure", () => {
-    expect(isSteelSessionStuck(new Error("500 Failed after 3 attempts. Last error: Browser process error (page_refresh): Failed to refresh primary page when reusing browser"))).toBe(true);
+    expect(
+      isSteelSessionStuck(
+        new Error(
+          "500 Failed after 3 attempts. Last error: Browser process error (page_refresh): Failed to refresh primary page when reusing browser",
+        ),
+      ),
+    ).toBe(true);
   });
   it("passes normal errors", () => {
     expect(isSteelSessionStuck(new Error("Timeout 10000ms exceeded"))).toBe(false);
@@ -282,13 +449,17 @@ describe("isCheckboxTruthy (back-compat)", () => {
 // ---------------------------------------------------------------------------
 describe("buildRadioSelector", () => {
   it("appends [value=...] to selector", () => {
-    expect(buildRadioSelector("input[name=size]", "medium")).toBe('input[name=size][value="medium"]');
+    expect(buildRadioSelector("input[name=size]", "medium")).toBe(
+      'input[name=size][value="medium"]',
+    );
   });
   it("escapes quotes in value", () => {
     expect(buildRadioSelector("input[name=x]", 'a"b')).toBe('input[name=x][value="a\\"b"]');
   });
   it("returns unchanged if value attribute already present", () => {
-    expect(buildRadioSelector("input[name=size][value=xl]", "xl")).toBe("input[name=size][value=xl]");
+    expect(buildRadioSelector("input[name=size][value=xl]", "xl")).toBe(
+      "input[name=size][value=xl]",
+    );
   });
 });
 
@@ -372,10 +543,13 @@ describe("deriveDownloadFilename", () => {
 // ---------------------------------------------------------------------------
 describe("cleanErrorMessage", () => {
   it("strips ANSI escape codes", () => {
-    expect(cleanErrorMessage("Call log:\n\u001b[2m  - waiting\u001b[22m")).toBe("Call log:\n  - waiting");
+    expect(cleanErrorMessage("Call log:\n\u001b[2m  - waiting\u001b[22m")).toBe(
+      "Call log:\n  - waiting",
+    );
   });
   it("strips Playwright internal frames", () => {
-    const msg = "Error: failed\n    at UtilityScript.evaluate (:1:1)\n    at myFunction (file.js:10:5)";
+    const msg =
+      "Error: failed\n    at UtilityScript.evaluate (:1:1)\n    at myFunction (file.js:10:5)";
     const result = cleanErrorMessage(msg);
     expect(result).toContain("Error: failed");
     expect(result).toContain("myFunction");
