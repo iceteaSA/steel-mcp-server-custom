@@ -1,5 +1,7 @@
 ---
 name: steel-browser
+skill-memory:
+  enabled: true
 description: >
   Workflow patterns for using Steel MCP browser tools safely and efficiently for
   navigation, extraction, screenshots, forms, and human handoff.
@@ -9,6 +11,23 @@ description: >
 
 Tool descriptions cover mechanics. This covers non-obvious patterns that prevent
 common failures.
+
+## Calling Convention (CRITICAL — read first)
+
+In **opencode**, Steel is behind **mcp-gateway** — its tools are NOT exposed directly.
+Every Steel tool call goes through `gateway_invoke`:
+
+```
+gateway_invoke({ server: "steel", tool: "<toolName>", arguments: { <args> } })
+```
+
+e.g. `go_to_url(url: "x", readPage: true)` shown below is shorthand for:
+`gateway_invoke({ server: "steel", tool: "go_to_url", arguments: { url: "x", readPage: true } })`.
+
+**All examples in this skill use the bare `toolName(args)` shorthand for readability** —
+wrap each one in `gateway_invoke({ server: "steel", tool, arguments })` when you actually call it.
+Need the tool list/schemas? `gateway_list_tools({ server: "steel" })`. (The mcporter route in
+"Calling Routes" below applies only to OpenClaw agents, a different runtime.)
 
 ## Core Rules
 
@@ -323,9 +342,10 @@ contexts have full JS-level stealth but HTTP headers show the real Chrome UA
 
 Two ways this MCP is reached. Escaping rules differ.
 
-1. **Direct MCP** (opencode / Claude Code tools). Call tools by name; args are
-   native objects. No shell escaping. Preferred when available.
-2. **mcporter + exec** (OpenClaw agents). `mcporter call steel.<tool> key=value
+1. **mcp-gateway** (opencode). Reach every Steel tool via
+   `gateway_invoke({ server: "steel", tool: "<tool>", arguments: { ... } })` — args are
+   native objects, no shell escaping. This is the route for opencode (see Calling Convention at top).
+2. **mcporter + exec** (OpenClaw agents — a different runtime). `mcporter call steel.<tool> key=value
    --output json`. The command is a shell string. Watch quoting (see below).
 
 ## Shell Escaping — mcporter Route
