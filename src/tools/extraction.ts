@@ -378,8 +378,15 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         // Open tab WITHOUT url (avoids leak if goto throws inside _doNewTab),
         // then navigate in our own try/finally where tabId is known.
         const fetchOne = async (url: string): Promise<string> => {
-          const { tabId, page } = await mgr.newTab(undefined);
+          // tabId declared outside try so the finally can close it even when
+          // newTab succeeds but a later non-goto step (parseHTML, Readability,
+          // evaluate) throws — no tab left dangling.
+          let tabId: number | undefined;
           try {
+            const r = await mgr.newTab(undefined);
+            tabId = r.tabId;
+            const page = r.page;
+
             await page.goto(url, { waitUntil: "domcontentloaded" });
             await globalWait(env);
 
@@ -420,7 +427,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
             }
             return `## ${title || url}\nURL: ${url}\n\n${text}`;
           } finally {
-            await mgr.closeTab(tabId).catch(() => {});
+            if (tabId !== undefined) await mgr.closeTab(tabId).catch(() => {});
           }
         };
 

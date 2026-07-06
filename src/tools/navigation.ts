@@ -1,5 +1,6 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { Page } from "playwright";
 import type { BrowserManager, Env } from "../manager.js";
 import { globalWait, sleep } from "../utils.js";
 import {
@@ -14,6 +15,11 @@ import {
 
 // Module-level ErrorTracker instance — persists across tool calls.
 const errorTracker = new ErrorTracker();
+
+// Tracks pages with active media-blocking routes so we can restore media
+// without a tab-id lookup. Page identity survives tab resets better than
+// numeric IDs, and the WeakSet avoids leaking memory when pages close.
+const mediaBlockedTabs = new WeakSet<Page>();
 
 export function register(server: McpServer, mgr: BrowserManager, env: Env): void {
   // go_to_url -----------------------------------------------------------------
@@ -75,8 +81,12 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
 
         const page = await mgr.getPage(tabId);
 
-        // Block heavy resources if requested (images, fonts, CSS, media)
-        if (disableMedia) {
+        // Block heavy resources if requested (images, fonts, CSS, media).
+        // Tracks per-page state so repeated calls don't stack routes and so
+        // disableMedia=false can unblock previously blocked pages.
+        let mediaNote = "";
+        const alreadyBlocked = mediaBlockedTabs.has(page);
+        if (disableMedia && !alreadyBlocked) {
           await page.route("**/*", (route) => {
             const type = route.request().resourceType();
             if (["image", "font", "stylesheet", "media"].includes(type)) {
@@ -84,6 +94,12 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
             }
             return route.continue();
           });
+          mediaBlockedTabs.add(page);
+          mediaNote = "\nMedia blocking enabled.";
+        } else if (!disableMedia && alreadyBlocked) {
+          await page.unrouteAll({ behavior: "ignoreErrors" });
+          mediaBlockedTabs.delete(page);
+          mediaNote = "\nMedia blocking disabled.";
         }
 
         await page.goto(url, { waitUntil: "domcontentloaded" });
@@ -191,7 +207,10 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         const warningPrefix = priorWarning ? `[WARNING: ${priorWarning}]\n` : "";
         return {
           content: [
-            { type: "text", text: warningPrefix + navLine + titleLine + waitMsg + pageText },
+            {
+              type: "text",
+              text: warningPrefix + navLine + titleLine + waitMsg + mediaNote + pageText,
+            },
           ],
         };
       } catch (err) {

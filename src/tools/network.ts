@@ -153,7 +153,9 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({ url, outputPath, timeout = 30000, forceFetch = false, tabId }) => {
+    // tabId is kept in the schema for backward compatibility — downloads now
+    // use a temporary tab so the caller's active tab is never navigated away.
+    async ({ url, outputPath, timeout = 30000, forceFetch = false, tabId: _tabId }) => {
       const saveViaFetch = async (via: string): Promise<string> => {
         const ctx = mgr.context!;
         const resp = await ctx.request.fetch(url, { timeout: timeout + 5000 });
@@ -180,54 +182,67 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           };
         }
 
-        const page = await mgr.getPage(tabId);
+        // Create a temporary tab for the download so the caller's active tab
+        // is never navigated away or left on the download URL on failure.
+        let tmpTabId: number | undefined;
         try {
-          const [download] = await Promise.all([
-            page.waitForEvent("download", { timeout }),
-            page.goto(url).catch((err) => {
-              const msg = (err as Error).message;
-              if (
-                !/ERR_ABORTED|net::ERR_ABORTED|Download is starting|Cannot load download URL/i.test(
-                  msg,
-                )
-              ) {
-                throw err;
-              }
-            }),
-          ]);
-          const suggested = download.suggestedFilename() || deriveDownloadFilename(url);
-          const savePath = outputPath ?? path.join(env.OUTPUT_DIR, suggested);
-          await fs.mkdir(path.dirname(savePath), { recursive: true });
+          const r = await mgr.newTab(undefined);
+          tmpTabId = r.tabId;
+          const page = r.page;
+
           try {
-            await download.saveAs(savePath);
-          } catch (saveErr) {
-            const sMsg = (saveErr as Error).message;
-            if (/ENOENT|no such file or directory|copyfile/i.test(sMsg)) {
-              return {
-                content: [
-                  { type: "text", text: await saveViaFetch("fetch-fallback-after-saveAs-ENOENT") },
-                ],
-              };
+            const [download] = await Promise.all([
+              page.waitForEvent("download", { timeout }),
+              page.goto(url).catch((err) => {
+                const msg = (err as Error).message;
+                if (
+                  !/ERR_ABORTED|net::ERR_ABORTED|Download is starting|Cannot load download URL/i.test(
+                    msg,
+                  )
+                ) {
+                  throw err;
+                }
+              }),
+            ]);
+            const suggested = download.suggestedFilename() || deriveDownloadFilename(url);
+            const savePath = outputPath ?? path.join(env.OUTPUT_DIR, suggested);
+            await fs.mkdir(path.dirname(savePath), { recursive: true });
+            try {
+              await download.saveAs(savePath);
+            } catch (saveErr) {
+              const sMsg = (saveErr as Error).message;
+              if (/ENOENT|no such file or directory|copyfile/i.test(sMsg)) {
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: await saveViaFetch("fetch-fallback-after-saveAs-ENOENT"),
+                    },
+                  ],
+                };
+              }
+              throw saveErr;
             }
-            throw saveErr;
+            const stat = await fs.stat(savePath);
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Downloaded ${suggested} [via download-event]\nSaved to: ${savePath}\nSize: ${stat.size.toLocaleString()} bytes`,
+                },
+              ],
+            };
+          } catch (err) {
+            const msg = (err as Error).message;
+            if (!/waitForEvent.*[Tt]imeout|Timeout.*waitForEvent|Timeout.*download/.test(msg)) {
+              throw err;
+            }
+            return {
+              content: [{ type: "text", text: await saveViaFetch("fetch-fallback") }],
+            };
           }
-          const stat = await fs.stat(savePath);
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Downloaded ${suggested} [via download-event]\nSaved to: ${savePath}\nSize: ${stat.size.toLocaleString()} bytes`,
-              },
-            ],
-          };
-        } catch (err) {
-          const msg = (err as Error).message;
-          if (!/waitForEvent.*[Tt]imeout|Timeout.*waitForEvent|Timeout.*download/.test(msg)) {
-            throw err;
-          }
-          return {
-            content: [{ type: "text", text: await saveViaFetch("fetch-fallback") }],
-          };
+        } finally {
+          if (tmpTabId !== undefined) await mgr.closeTab(tmpTabId).catch(() => {});
         }
       } catch (err) {
         const error = err as Error;
