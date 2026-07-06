@@ -10,7 +10,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "credentials",
     title: "Manage Credentials",
-    description: `Manage stored credentials: list all (passwords masked), store a new credential, update an existing one, or delete by name. Call with no arguments to list. Pass name+url+username+password to store/update. Pass name+remove=true to delete (destructive — cannot be undone). Use for managing login credentials used by use_credential. Do NOT use to fill login forms directly — use use_credential for that.`,
+    description: `Manage stored credentials: list all (passwords masked), store, update, or delete by name. Call with no arguments to list; pass name+url+username+password to store/update; pass name+remove=true to delete (destructive, cannot be undone). Use for managing credentials consumed by use_credential. Do NOT use to fill login forms directly — use use_credential for that.`,
     toolset: "auth",
     inputSchema: {
       name: z.string().optional().describe("Credential name. Omit to list all."),
@@ -141,7 +141,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "use_credential",
     title: "Use Credential",
-    description: `Retrieve a stored credential by name and optionally auto-fill a login form on the current page. Without selectors: returns the credential info (username + masked password + extra fields). With selectors: fills the form fields and optionally clicks submit. Use for logging into sites where you've stored credentials via the credentials tool. Do NOT use for sites where you don't have saved credentials — use fill with manual values instead.`,
+    description: `Retrieve a stored credential by name and optionally auto-fill a login form on the current page. Without selectors: returns the credential info (username + masked password + extra fields). With selectors: fills the form fields and optionally clicks submit — use for logging into sites where you've stored credentials via the credentials tool. Do NOT use for sites where you don't have saved credentials — use fill with manual values instead.`,
     toolset: "auth",
     inputSchema: {
       name: z.string().describe("Name of the stored credential to use."),

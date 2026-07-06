@@ -223,6 +223,8 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
     title: "Get Console Logs",
     description: `Get browser console messages captured since the session started. Filter by severity level (error/warning/info/log) and optionally clear the buffer after reading. Use to debug JavaScript errors or verify page behavior. Do NOT use to check if a page loaded — use wait_for or go_to_url with waitFor instead.
 
+CONTEXT BUDGET — output capped at maxEntries (default 50). The buffer holds up to 500 messages total.
+
 NOTE: when clear=true with a level filter, ALL entries captured up to read time are removed (not just the filtered level). Messages arriving during the read survive.`,
     toolset: "debug",
     inputSchema: {

@@ -26,7 +26,9 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "go_to_url",
     title: "Navigate to URL",
-    description: `Navigate the current tab to a URL and return the final URL + page title. Auto-detects bot walls (waits up to 15s for CapSolver auto-solve) and HTTP error pages (404/5xx). Combine with readPage to extract text in the same call, or waitFor to pause until a selector appears. Use this as the primary navigation tool — do NOT use new_tab just to change pages.`,
+    description: `Navigate the current tab to a URL and return the final URL + page title. Auto-detects bot walls (waits up to 15s for CapSolver auto-solve) and HTTP error pages (404/5xx). Combine with readPage to extract text in the same call, or waitFor to pause until a selector appears. Use this as the primary navigation tool — do NOT use new_tab just to change pages.
+
+CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (default 5K).`,
     toolset: "core",
     inputSchema: {
       url: z.string().describe("The URL to navigate to."),

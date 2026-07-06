@@ -12,6 +12,37 @@ import {
   type Toolset,
 } from "../tools/shared.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+
+// Tool registrations (in-process, no browser needed).
+import { register as registerTabs } from "../tools/tabs.js";
+import { register as registerScreenshots } from "../tools/screenshots.js";
+import { register as registerExtraction } from "../tools/extraction.js";
+import { register as registerInteraction } from "../tools/interaction.js";
+import { register as registerNavigation } from "../tools/navigation.js";
+import { register as registerSession } from "../tools/session.js";
+import { register as registerNetwork } from "../tools/network.js";
+import { register as registerCredentials } from "../tools/credentials.js";
+import { register as registerProfiles } from "../tools/profiles.js";
+
+// Tools with outputSchema (structured output).
+const JSON_TOOLS = new Set([
+  "list_tabs",
+  "get_links",
+  "get_attrs",
+  "extract",
+  "fetch_urls",
+  "cookies",
+  "list_profiles",
+  "credentials",
+  "captcha_status",
+]);
+
+// Stub BrowserManager — tools that call mgr methods will throw, but
+// registration and tools/list don't invoke handlers.
+const stubMgr = {} as any;
+const stubEnv = {} as any;
 
 // ---------------------------------------------------------------------------
 // resolveToolsets
@@ -162,6 +193,87 @@ describe("ALL_TOOLSETS", () => {
     const expected: Toolset[] = ["core", "tabs", "extract", "media", "network", "auth", "debug"];
     for (const t of expected) {
       expect(ALL_TOOLSETS.includes(t)).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Wire-level completeness test (S1) — verify annotations + structured output
+// via real tools/list over InMemoryTransport.
+// ---------------------------------------------------------------------------
+
+describe("tools/list wire-level completeness", () => {
+  it("all 29 tools have title, description, annotations; 9 have outputSchema", async () => {
+    const server = new McpServer(
+      { name: "test", version: "0.0.0" },
+      { capabilities: { tools: {} } },
+    );
+
+    const allToolsets = new Set(ALL_TOOLSETS);
+    const { register, toolCount } = makeRegistrar(server, allToolsets);
+
+    // Register all tools (handlers will throw if called — registration is the
+    // only thing that matters here).
+    registerSession(register, stubMgr, stubEnv);
+    registerTabs(register, stubMgr, stubEnv);
+    registerNavigation(register, stubMgr, stubEnv);
+    registerInteraction(register, stubMgr, stubEnv);
+    registerExtraction(register, stubMgr, stubEnv);
+    registerScreenshots(register, stubMgr, stubEnv);
+    registerNetwork(register, stubMgr, stubEnv);
+    registerCredentials(register, stubMgr, stubEnv);
+    registerProfiles(register, stubMgr, stubEnv);
+
+    // 29 tools total
+    expect(toolCount()).toBe(29);
+
+    // Create client-server pair
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+
+    const client = new Client({ name: "test-client", version: "0.0.0" }, { capabilities: {} });
+    await client.connect(clientTransport);
+
+    const result = await client.listTools();
+    const tools = result.tools;
+
+    // Exact tool count on the wire
+    expect(tools.length).toBe(29);
+
+    for (const tool of tools) {
+      const name = tool.name;
+
+      // Non-empty title
+      expect(tool.annotations?.title, `${name}: title missing or empty`).toBeTruthy();
+      expect((tool.annotations?.title ?? "").length, `${name}: title empty`).toBeGreaterThan(0);
+
+      // Non-empty description
+      expect(tool.description, `${name}: description missing`).toBeTruthy();
+      expect((tool.description ?? "").length, `${name}: description empty`).toBeGreaterThan(0);
+
+      // Annotations object present
+      expect(tool.annotations, `${name}: annotations missing`).toBeTruthy();
+      expect(
+        typeof tool.annotations?.readOnlyHint,
+        `${name}: annotations.readOnlyHint not boolean`,
+      ).toBe("boolean");
+      expect(
+        typeof tool.annotations?.destructiveHint,
+        `${name}: annotations.destructiveHint not boolean`,
+      ).toBe("boolean");
+      expect(
+        typeof tool.annotations?.idempotentHint,
+        `${name}: annotations.idempotentHint not boolean`,
+      ).toBe("boolean");
+      expect(
+        typeof tool.annotations?.openWorldHint,
+        `${name}: annotations.openWorldHint not boolean`,
+      ).toBe("boolean");
+
+      // outputSchema for JSON-shaped tools
+      if (JSON_TOOLS.has(name)) {
+        expect(tool.outputSchema, `${name}: outputSchema missing`).toBeTruthy();
+      }
     }
   });
 });

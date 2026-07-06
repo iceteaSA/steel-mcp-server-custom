@@ -80,7 +80,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "get_screenshot",
     title: "Take Screenshot",
-    description: `Capture a screenshot of the current page or a specific element. Saves to file by default to avoid base64 context bloat. Use outputMode: "inline" for base64 (auto-downgrades to file if too large). Supports full-page capture, element-level capture via selector, and post-capture resize/compression. Use to visually verify page state, inspect layout, or capture evidence. Do NOT use to read page content — use get_page_text for text extraction.
+    description: `Capture a screenshot of the current page or a specific element, saving to file by default (inline base64 auto-downgrades above MAX_INLINE_BYTES). Supports full-page, element-level, and clipped captures with post-capture resize/compression. Use to visually verify page state, inspect layout, or capture evidence. Do NOT use to read page content — use get_page_text for text extraction.
 
 CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-downgrades above MAX_INLINE_BYTES.`,
     toolset: "media",

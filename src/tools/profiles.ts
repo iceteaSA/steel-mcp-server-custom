@@ -8,7 +8,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, _env: Env
   register({
     name: "create_profile",
     title: "Create Profile",
-    description: `Create an isolated browser profile with its own cookies and localStorage. Auto-restores previously saved state if available. Returns a tab ID for the profile's initial page. Use new_tab(profile: name) to open additional tabs in this profile. Use for multi-account workflows or isolating sessions by identity. Do NOT use for simple tab management — new_tab without a profile is sufficient for that.`,
+    description: `Create an isolated browser profile with its own cookies and localStorage. Auto-restores previously saved state if available. Returns a tab ID for the profile's initial page — use new_tab(profile: name) for additional tabs. Best for multi-account workflows or isolating sessions by identity — do NOT use for simple tab management (new_tab without a profile is sufficient).`,
     toolset: "auth",
     inputSchema: {
       name: z
@@ -137,7 +137,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, _env: Env
   register({
     name: "delete_profile",
     title: "Delete Profile",
-    description: `Delete a browser profile: closes its BrowserContext and all associated tabs. Optionally remove the saved state from disk. This is destructive — all cookies, localStorage, and session data for the profile are lost unless you saved them first. Use for cleanup after a multi-account workflow. Do NOT use to close individual tabs — use close_tabs for that.`,
+    description: `Delete a browser profile: closes its BrowserContext and all associated tabs. Optionally remove the saved state from disk. This is destructive — all cookies, localStorage, and session data for the profile are lost unless you saved them first. Use for cleanup after a multi-account workflow — do NOT use to close individual tabs (use close_tabs for that).`,
     toolset: "auth",
     inputSchema: {
       name: z

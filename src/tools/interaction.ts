@@ -16,7 +16,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "click",
     title: "Click Element",
-    description: `Click a page element identified by CSS selector. Reports navigation if the URL changes. Optionally wait for a selector or text to appear after clicking (saves a separate wait_for call). Use for buttons, links, and any interactive element. Do NOT use to type text into inputs — use fill for form fields.`,
+    description: `Click a page element identified by CSS selector. Reports navigation if the URL changes. Optionally wait for a selector or text to appear after clicking (saves a separate wait_for call). Use for buttons, links, and interactive elements — do NOT use for form inputs (use fill instead).`,
     toolset: "core",
     inputSchema: {
       selector: z
@@ -114,7 +114,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "fill",
     title: "Fill Form",
-    description: `Fill one or more form fields on the page. Auto-detects field types (text, select, checkbox, radio). Pass submitSelector to click a submit button after filling. Use for any form interaction — login, search, registration, checkout. Do NOT use click to interact with form elements; fill handles all input types correctly.`,
+    description: `Fill one or more form fields on the page. Auto-detects field types (text, select, checkbox, radio). Pass submitSelector to click a submit button after filling. Use for any form interaction (login, search, registration, checkout) — do NOT use click on form elements; fill handles all input types correctly.`,
     toolset: "core",
     inputSchema: {
       fields: z
@@ -310,7 +310,9 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "scroll",
     title: "Scroll Page",
-    description: `Scroll the page up or down by a pixel amount. Optionally extract visible text after scrolling with readAfterScroll (saves a follow-up get_page_text call). Use to reveal lazy-loaded content or read long pages in segments. Do NOT use as a substitute for navigation — use go_to_url to load a new page.`,
+    description: `Scroll the page up or down by a pixel amount. Optionally extract visible text after scrolling with readAfterScroll (saves a follow-up get_page_text call). Use to reveal lazy-loaded content or read long pages in segments. Do NOT use as a substitute for navigation — use go_to_url to load a new page.
+
+CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars (default 3K).`,
     toolset: "core",
     inputSchema: {
       direction: z.enum(["up", "down"]).describe("Scroll direction: 'up' or 'down'."),

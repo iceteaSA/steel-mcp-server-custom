@@ -29,7 +29,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "get_page_text",
     title: "Get Page Text",
-    description: `Extract text from the current page. Auto-detects the main content area. Use extractContent for Readability-based article extraction (strips nav/ads/footer). Use matchAll for structured list scraping. Use as the primary content-reading tool after navigation. Do NOT use to read URLs or links — use get_links for structured link extraction.
+    description: `Extract text from the current page, auto-detecting the main content area. Use extractContent for Readability-based article extraction (strips nav/ads/footer), or matchAll for structured list scraping. Use as the primary content-reading tool after navigation. Do NOT use to read URLs or links — use get_links for structured link extraction.
 
 CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file" for large pages.`,
     toolset: "core",
@@ -600,7 +600,9 @@ CONTEXT BUDGET — output capped at limit (default 50).`,
   register({
     name: "get_attrs",
     title: "Get Attributes",
-    description: `Extract specific attributes from elements matching a CSS selector. Special attrs: "text" = innerText, "html" = outerHTML. Use for data-*, aria-*, src, alt, href, or structured data extraction. Returns a JSON array of objects. Do NOT use for simple link lists — get_links is faster and deduplicates.`,
+    description: `Extract specific attributes from elements matching a CSS selector. Special attrs: "text" = innerText, "html" = outerHTML. Use for data-*, aria-*, src, alt, href, or structured data extraction. Returns a JSON array of objects. Do NOT use for simple link lists — get_links is faster and deduplicates.
+
+CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPerAttr to bound long values.`,
     toolset: "extract",
     inputSchema: {
       selector: z
@@ -839,7 +841,9 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
   register({
     name: "extract",
     title: "Declarative Extract",
-    description: `Declarative structured extraction from repeating elements. Pass a CSS selector and a field map (field name → sub-selector or sub-selector@attribute) to produce a JSON array of records. Replaces fragile evaluate() patterns for scraping product lists, search results, tables, or any repeating DOM structures. Use "." as the field spec to extract the root element's own text. Do NOT use for single-element extraction — use get_attrs or get_page_text instead.`,
+    description: `Declarative structured extraction from repeating elements. Pass a CSS selector and a field map (field name → sub-selector or sub-selector@attribute) to produce a JSON array of records. Replaces fragile evaluate() patterns for scraping product lists, search results, tables, or any repeating DOM structures. Use "." as the field spec to extract the root element's own text. Do NOT use for single-element extraction — use get_attrs or get_page_text instead.
+
+CONTEXT BUDGET — output capped at limit (default 20 items).`,
     toolset: "extract",
     inputSchema: {
       selector: z

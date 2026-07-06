@@ -86,7 +86,10 @@ export function makeRegistrar(
         description: spec.description,
         inputSchema: spec.inputSchema,
         outputSchema: spec.outputSchema,
-        annotations: spec.annotations,
+        annotations: {
+          title: spec.title,
+          ...spec.annotations,
+        },
       },
       // Handler type is intentionally loose — the SDK validates args at
       // runtime against inputSchema; compile-time narrowing would need

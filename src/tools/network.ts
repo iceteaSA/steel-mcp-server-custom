@@ -166,7 +166,7 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
   register({
     name: "download_file",
     title: "Download File",
-    description: `Download a URL to disk using browser cookies for authentication. Handles both Content-Disposition attachment downloads and inline binary files (auto-fallback to fetch). Use for downloading PDFs, images, spreadsheets, or any file behind authentication. Uses a temporary background tab so the caller's active tab is never navigated away. Do NOT use for small text responses — use fetch_urls for web page content.`,
+    description: `Download a URL to disk using browser cookies for authentication. Handles both Content-Disposition attachment downloads and inline binary files (auto-fallback to fetch). Use for downloading PDFs, images, spreadsheets, or any file behind authentication. Uses a temporary background tab so the caller's active tab is never navigated away — do NOT use for small text responses (use fetch_urls instead).`,
     toolset: "media",
     inputSchema: {
       url: z.string().describe("The download URL to fetch."),

@@ -9,7 +9,9 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "list_tabs",
     title: "List Tabs",
-    description: `List open browser tabs with URL, title, and metadata. Filter by owner, profile, or look up a single tab by ID. Use to check tab state before interacting with a specific tab — every page-operating tool accepts an optional tabId. Do NOT use to get the current page content; use get_page_text instead.`,
+    description: `List open browser tabs with URL, title, and metadata. Filter by owner, profile, or look up a single tab by ID. Use to check tab state before interacting with a specific tab — every page-operating tool accepts an optional tabId. Do NOT use to get the current page content; use get_page_text instead.
+
+CONTEXT BUDGET — tab list grows with session activity. Filter with owner or profile to narrow results.`,
     toolset: "tabs",
     inputSchema: {
       tabId: z
