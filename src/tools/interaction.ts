@@ -7,6 +7,7 @@ import {
   buildRadioSelector,
   cleanErrorMessage,
   detectFieldKind,
+  extractPageContent,
   interpretCheckboxValue,
 } from "../helpers.js";
 
@@ -314,18 +315,14 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         let pageText = "";
         if (readAfterScroll) {
           try {
-            const rawText: string = await page.evaluate(() => {
-              let root: Element | null = null;
-              for (const s of ["main", "article", "[role=main]"]) {
-                const el = document.querySelector(s);
-                if (el && (el.textContent?.trim().length ?? 0) > 100) {
-                  root = el;
-                  break;
-                }
-              }
-              if (!root) root = document.body;
-              return (root as HTMLElement)?.innerText ?? "";
-            });
+            const rawText: string =
+              (
+                await page.evaluate(extractPageContent, {
+                  selector: null,
+                  includeLinks: false,
+                  mode: "innerText" as const,
+                })
+              ).text ?? "";
             let cleaned = rawText
               .replace(/[^\S\n]+/g, " ")
               .replace(/\n{3,}/g, "\n\n")

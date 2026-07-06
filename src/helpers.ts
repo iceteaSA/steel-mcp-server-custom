@@ -349,6 +349,132 @@ export function deriveDownloadFilename(url: string): string {
   return `download_${Date.now()}`;
 }
 
+// -----------------------------------------------------------------------------
+// Content-area extraction — shared logic for get_page_text, go_to_url readPage,
+// scroll readAfterScroll, and fetch_urls fallback.
+//
+// The extraction function is designed to be passed to page.evaluate() (runs in
+// the browser) AND usable under linkedom in tests. It must be self-contained
+// (no closure over module scope) because evaluate() serializes it.
+// -----------------------------------------------------------------------------
+
+/**
+ * Self-contained content-area extraction function designed to be passed to
+ * page.evaluate() (Playwright serializes it to the browser) AND run under
+ * linkedom in tests. Contains all dependencies inline — no module closure.
+ *
+ * Two modes:
+ *   mode="walk" (default) — walk-based extraction with block-tag awareness.
+ *     When includeLinks is true, anchor text gets [href] appended and links
+ *     are collected separately. Anchor text uses textContent?.trim() (preserves
+ *     internal whitespace like "A\n B") matching the original get_page_text
+ *     includeLinks behavior.
+ *   mode="innerText" — uses HTMLElement.innerText (simpler, matches the
+ *     go_to_url readPage / scroll readAfterScroll / fetch_urls fallback path).
+ *
+ * Returns { text, links?, __noMatch? }.
+ */
+export function extractPageContent(
+  opts: {
+    selector?: string | null;
+    includeLinks?: boolean;
+    mode?: "walk" | "innerText";
+  },
+  doc?: Document,
+): { text: string; links?: Array<{ text: string; href: string }>; __noMatch?: boolean } {
+  // Self-contained: all constants inlined so the function works when
+  // serialized to the browser via page.evaluate().
+  const CONTENT_AREA_SELECTORS = ["main", "article", '[role="main"]', "body"] as const;
+  const BLOCK_TAGS = new Set([
+    "P",
+    "DIV",
+    "LI",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6",
+    "TR",
+    "BLOCKQUOTE",
+    "PRE",
+    "SECTION",
+    "ARTICLE",
+    "HEADER",
+    "FOOTER",
+    "NAV",
+    "ASIDE",
+    "MAIN",
+    "DETAILS",
+    "SUMMARY",
+    "FIGCAPTION",
+    "DT",
+    "DD",
+  ]);
+
+  const d = doc || document;
+  const sel = opts.selector ?? null;
+  const includeLinks = opts.includeLinks ?? false;
+  const mode = opts.mode ?? "walk";
+
+  // Find content root
+  let root: Element | null = null;
+  if (sel) {
+    root = d.querySelector(sel);
+  } else {
+    for (const s of CONTENT_AREA_SELECTORS) {
+      if (s === "body") {
+        root = d.body;
+        break;
+      }
+      const el = d.querySelector(s);
+      if (el && (el.textContent?.trim().length ?? 0) > 100) {
+        root = el;
+        break;
+      }
+    }
+    if (!root) root = d.body;
+  }
+  if (!root) return sel ? { text: "", __noMatch: true } : { text: "" };
+
+  if (mode === "innerText") {
+    const text = ((root as HTMLElement)?.innerText ?? "")
+      .replace(/[^\S\n]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    return { text };
+  }
+
+  // Walk-based extraction — matches original get_page_text includeLinks behavior.
+  // Anchor text uses textContent?.trim() (preserves internal whitespace like
+  // "A\n B" — the outer normalizer only collapses non-newline whitespace).
+  const rawLinks: Array<{ text: string; href: string }> = [];
+
+  const walk = (node: Element): string => {
+    if (node.tagName === "BR") return "\n";
+    if (node.tagName === "A") {
+      const href = (node as HTMLAnchorElement).href;
+      const txt = (node.textContent ?? "").trim();
+      if (includeLinks && href) rawLinks.push({ text: txt, href });
+      return includeLinks ? `${txt} [${href}]` : txt;
+    }
+    const inner = Array.from(node.childNodes)
+      .map((n) => (n.nodeType === 3 ? (n.textContent ?? "") : walk(n as Element)))
+      .join("");
+    return BLOCK_TAGS.has(node.tagName) ? "\n" + inner + "\n" : inner;
+  };
+
+  const text = walk(root)
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (includeLinks) {
+    return { text, links: rawLinks };
+  }
+  return { text };
+}
+
 /**
  * Clean Playwright error messages for LLM consumption:
  *   - Strip ANSI colour escapes (ESC + `[` + digits + `m`) that Playwright

@@ -20,6 +20,7 @@ import {
   mimeToExt,
   deriveDownloadFilename,
   cleanErrorMessage,
+  extractPageContent,
   type Link,
 } from "../helpers.js";
 
@@ -535,6 +536,70 @@ describe("deriveDownloadFilename", () => {
   it("falls back for malformed URL", () => {
     const result = deriveDownloadFilename("not a url");
     expect(result).toMatch(/^download_\d+$/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// contentAreaExtract — golden test for shared content-area helper
+// ---------------------------------------------------------------------------
+describe("contentAreaExtract", () => {
+  // Build a fixture HTML that exercises the full extraction logic:
+  // content-area detection (main > article > [role=main] > body fallback),
+  // block-tag wrapping, anchor [href] appending, whitespace collapse.
+  const fixtureHTML = `<!DOCTYPE html>
+<html><body>
+<nav>Nav links here</nav>
+<main>
+  <h1>Main Title</h1>
+  <p>First paragraph with <a href="https://example.com/link1">a link</a> inside.</p>
+  <article>
+    <h2>Article Heading</h2>
+    <p>Article body text with <a href="https://example.com/link2">another link</a> and more content.</p>
+    <footer>Article footer</footer>
+  </article>
+  <script>var x = 1;</script>
+  <div>Extra div content</div>
+</main>
+<footer>Site footer</footer>
+</body></html>`;
+
+  // Golden values derived from the pre-refactor extraction code
+  // (git show 536a0e1:src/tools/extraction.ts lines 299-369) run against
+  // the fixture above via linkedom. Locks exact output so the refactored
+  // helper must produce identical results.
+  const goldenWalkOutput =
+    "Main Title\n\n \nFirst paragraph with a link [https://example.com/link1] inside.\n\n \n\n \nArticle Heading\n\n \nArticle body text with another link [https://example.com/link2] and more content.\n\n \nArticle footer\n\n \n\n var x = 1;\n \nExtra div content";
+  const goldenInnerTextOutput =
+    "Main Title \nFirst paragraph with a link inside. \n \nArticle Heading \nArticle body text with another link and more content. \nArticle footer var x = 1; \nExtra div content";
+
+  it("walk mode matches pre-refactor includeLinks output", async () => {
+    const { parseHTML } = await import("linkedom");
+    const { document } = parseHTML(fixtureHTML);
+    const result = extractPageContent(
+      { selector: null, includeLinks: true, mode: "walk" },
+      document,
+    );
+    expect(result.text).toBe(goldenWalkOutput);
+  });
+
+  it("innerText mode matches pre-refactor no-link output", async () => {
+    const { parseHTML } = await import("linkedom");
+    const { document } = parseHTML(fixtureHTML);
+    const result = extractPageContent(
+      { selector: null, includeLinks: false, mode: "innerText" },
+      document,
+    );
+    expect(result.text).toBe(goldenInnerTextOutput);
+  });
+
+  it("__noMatch when selector has no match", async () => {
+    const { parseHTML } = await import("linkedom");
+    const { document } = parseHTML(fixtureHTML);
+    const result = extractPageContent(
+      { selector: "#nonexistent", includeLinks: false, mode: "innerText" },
+      document,
+    );
+    expect(result.__noMatch).toBe(true);
   });
 });
 
