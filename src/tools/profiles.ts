@@ -1,7 +1,7 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
-import { cleanErrorMessage } from "../helpers.js";
+import { cleanErrorMessage, isValidProfileName } from "../helpers.js";
 
 export function register(server: McpServer, mgr: BrowserManager, _env: Env): void {
   // create_profile ------------------------------------------------------------
@@ -11,6 +11,9 @@ export function register(server: McpServer, mgr: BrowserManager, _env: Env): voi
     {
       name: z
         .string()
+        .refine((n) => isValidProfileName(n), {
+          message: "Must be 1-64 alphanumeric characters, hyphens, or underscores.",
+        })
         .describe(
           "Profile name (e.g., 'shopping', 'research', 'agent-1'). Must be unique among active profiles.",
         ),
@@ -66,7 +69,12 @@ export function register(server: McpServer, mgr: BrowserManager, _env: Env): voi
     "save_profile",
     `Persist a profile's cookies and localStorage to disk as JSON. The saved state can be restored later by create_profile with the same name. Useful for preserving login sessions across browser restarts.`,
     {
-      name: z.string().describe("Name of the active profile to save."),
+      name: z
+        .string()
+        .refine((n) => isValidProfileName(n), {
+          message: "Must be 1-64 alphanumeric characters, hyphens, or underscores.",
+        })
+        .describe("Name of the active profile to save."),
     },
     async ({ name }) => {
       try {
@@ -84,7 +92,12 @@ export function register(server: McpServer, mgr: BrowserManager, _env: Env): voi
     "delete_profile",
     `Delete a browser profile. Closes its BrowserContext and all tabs. Optionally removes the saved state from disk.`,
     {
-      name: z.string().describe("Name of the profile to delete."),
+      name: z
+        .string()
+        .refine((n) => isValidProfileName(n), {
+          message: "Must be 1-64 alphanumeric characters, hyphens, or underscores.",
+        })
+        .describe("Name of the profile to delete."),
       removeSaved: z
         .boolean()
         .optional()

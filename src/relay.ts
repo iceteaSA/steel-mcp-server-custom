@@ -15,6 +15,7 @@ import http from "http";
 import fs from "fs/promises";
 import path from "path";
 import { encryptJSON, decryptJSON } from "./crypto.js";
+import { assertSafeProfilePath, isValidProfileName } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -105,9 +106,18 @@ async function handlePush(payload: PushPayload, config: RelayConfig): Promise<Pu
   if (!profileName || typeof profileName !== "string") {
     throw new Error("profile name is required");
   }
+  // Reject path-traversal payloads before constructing any file path.
+  // Also validates name length (1–64) and character set.
+  if (!isValidProfileName(profileName)) {
+    throw new Error(
+      `Invalid profile name "${profileName}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
+    );
+  }
 
   // --- Cookies + localStorage → profile JSON ---
-  const profilePath = path.join(config.profilesDir, `${profileName}.json`);
+  // Defense in depth: assertSafeProfilePath validates the name AND confirms
+  // the resolved path stays under profilesDir (catches bugs in the regex).
+  const profilePath = assertSafeProfilePath(profileName, config.profilesDir);
   await fs.mkdir(config.profilesDir, { recursive: true });
 
   // Load existing profile state if it exists, merge new data

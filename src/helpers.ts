@@ -1,6 +1,8 @@
 // Pure helpers shared by multiple tool handlers. Node-side — safe to unit test
 // without a browser.
 
+import path from "path";
+
 import mime from "mime-types";
 
 export interface Link {
@@ -580,4 +582,39 @@ export function cleanErrorMessage(msg: unknown): string {
     .join("\n")
     .trimEnd();
   return filtered;
+}
+
+// ---------------------------------------------------------------------------
+// Profile name validation — prevents path traversal in profilesDir file paths.
+// Matches the same pattern that relay /push and profile tools accept.
+// ---------------------------------------------------------------------------
+
+const PROFILE_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/**
+ * Returns true if the name is safe to use as a profile filename component.
+ * Rejects traversal attempts (../), separators (a/b), absolute paths,
+ * empty strings, and names longer than 64 characters.
+ */
+export function isValidProfileName(name: string): boolean {
+  return PROFILE_NAME_RE.test(name);
+}
+
+/**
+ * Validates that the resolved path for a profile name stays under the given
+ * profiles directory. Throws if the name is invalid or if the resolved path
+ * escapes the directory (defense in depth — even if the validator has a bug).
+ */
+export function assertSafeProfilePath(name: string, profilesDir: string): string {
+  if (!isValidProfileName(name)) {
+    throw new Error(
+      `Invalid profile name "${name}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
+    );
+  }
+  const resolvedDir = path.resolve(profilesDir);
+  const resolvedPath = path.resolve(path.join(resolvedDir, `${name}.json`));
+  if (!resolvedPath.startsWith(resolvedDir + path.sep)) {
+    throw new Error(`Profile path "${resolvedPath}" escapes profiles directory "${resolvedDir}".`);
+  }
+  return resolvedPath;
 }

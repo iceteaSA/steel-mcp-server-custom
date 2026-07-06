@@ -295,6 +295,46 @@ describe("POST /push — validation", () => {
   });
 });
 
+describe("POST /push — profile name traversal prevention", () => {
+  it("rejects ../ path traversal", async () => {
+    const res = await postPush({ profile: "../etc-passwd" });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects path with slash separator", async () => {
+    const res = await postPush({ profile: "a/b" });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects absolute path", async () => {
+    const res = await postPush({ profile: "/etc/passwd" });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects names longer than 64 characters", async () => {
+    const res = await postPush({ profile: "x".repeat(65) });
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts valid name with hyphens and underscores", async () => {
+    const res = await postPush({
+      profile: "my-profile_1",
+      cookies: [{ name: "a", value: "1", domain: "example.com", path: "/" }],
+    });
+    expect(res.ok).toBe(true);
+    const data = await res.json();
+    expect(data.profile).toBe("my-profile_1");
+  });
+
+  it("accepts valid single-char name", async () => {
+    const res = await postPush({
+      profile: "x",
+      cookies: [{ name: "a", value: "1", domain: "example.com", path: "/" }],
+    });
+    expect(res.ok).toBe(true);
+  });
+});
+
 describe("404", () => {
   it("returns 404 for unknown routes", async () => {
     const res = await fetch_(`http://127.0.0.1:${config.port}/unknown`);

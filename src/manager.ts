@@ -18,6 +18,7 @@ import { Steel } from "steel-sdk";
 import { z } from "zod";
 import { EnvSchema } from "./env";
 import { isBrowserClosedError, isSteelSessionStuck } from "./helpers";
+import { isValidProfileName, assertSafeProfilePath } from "./helpers";
 
 // Inferred type of the parsed env object.
 export type Env = z.infer<typeof EnvSchema>;
@@ -762,6 +763,11 @@ export class BrowserManager {
 
   async createProfile(name: string, url?: string): Promise<{ tabId: number; restored: boolean }> {
     await this.initialize();
+    if (!isValidProfileName(name)) {
+      throw new Error(
+        `Invalid profile name "${name}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
+      );
+    }
     if (this.profiles.has(name)) {
       throw new Error(`Profile "${name}" already exists. Use delete_profile first.`);
     }
@@ -797,7 +803,7 @@ export class BrowserManager {
 
     // Restore saved state if it exists
     let restored = false;
-    const savedPath = path.join(this.env.PROFILES_DIR, `${name}.json`);
+    const savedPath = assertSafeProfilePath(name, this.env.PROFILES_DIR);
     try {
       const raw = await fs.readFile(savedPath, "utf8");
       const state = JSON.parse(raw) as {
@@ -845,6 +851,11 @@ export class BrowserManager {
    * localStorage is captured from all origins the profile has visited.
    */
   async saveProfile(name: string): Promise<string> {
+    if (!isValidProfileName(name)) {
+      throw new Error(
+        `Invalid profile name "${name}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
+      );
+    }
     const profile = this.profiles.get(name);
     if (!profile) throw new Error(`Profile "${name}" is not active.`);
 
@@ -875,7 +886,7 @@ export class BrowserManager {
     }
 
     const state = { cookies, localStorage, savedAt: new Date().toISOString() };
-    const savedPath = path.join(this.env.PROFILES_DIR, `${name}.json`);
+    const savedPath = assertSafeProfilePath(name, this.env.PROFILES_DIR);
     await fs.mkdir(path.dirname(savedPath), { recursive: true });
     await fs.writeFile(savedPath, JSON.stringify(state, null, 2));
 
@@ -949,6 +960,11 @@ export class BrowserManager {
    * Delete a profile: close its context + all tabs, optionally remove saved state.
    */
   async deleteProfile(name: string, removeSaved = false): Promise<void> {
+    if (!isValidProfileName(name)) {
+      throw new Error(
+        `Invalid profile name "${name}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
+      );
+    }
     const profile = this.profiles.get(name);
     if (profile) {
       // Close all tabs in this profile
@@ -970,7 +986,7 @@ export class BrowserManager {
     }
 
     if (removeSaved) {
-      const savedPath = path.join(this.env.PROFILES_DIR, `${name}.json`);
+      const savedPath = assertSafeProfilePath(name, this.env.PROFILES_DIR);
       await fs.unlink(savedPath).catch(() => {});
     }
   }
