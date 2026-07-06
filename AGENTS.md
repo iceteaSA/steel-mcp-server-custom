@@ -10,20 +10,17 @@ for what diverged from upstream.
 ## Build / Run Commands
 
 ```bash
-# Install dependencies (pnpm is required)
-pnpm install
+# Install dependencies (bun is required)
+bun install
 
 # Compile TypeScript to dist/index.cjs
-pnpm build
+bun run build
 
-# Run from source without building (tsx watch)
-pnpm dev
+# Run from source without building (bun --watch)
+bun run dev
 
 # Type-check without emitting (run before committing)
-pnpm exec tsc --noEmit
-
-# Watch mode (rebuilds on file changes via tsup)
-pnpm watch
+bun x tsc --noEmit
 
 # Run the built server directly
 BROWSER_MODE=steel STEEL_BASE_URL=http://your-steel-host:3000 node dist/index.cjs
@@ -32,25 +29,26 @@ BROWSER_MODE=steel STEEL_BASE_URL=http://your-steel-host:3000 node dist/index.cj
 BROWSER_MODE=local node dist/index.cjs
 
 # Inspect tools via MCP inspector
-pnpm inspector
+bun run inspector
 
 # Lint / format (oxlint + oxfmt, NOT eslint/prettier)
-pnpm lint
-pnpm format:check   # or `pnpm format` to write
+bun run lint
+bun run format:check   # or `bun run format` to write
 
-# Run tests (vitest — src/__tests__/ only)
-pnpm test
+# Run tests (bun test — src/__tests__/ only)
+bun run test
 ```
 
-**Tests:** `pnpm test` runs vitest over `src/__tests__/*.test.ts` only (see vitest.config.ts —
-5 files: helpers, env, relay, encryption, tools; 146 passed + 10 skipped). The root `test/`
-directory is a stale leftover and is NOT picked up by vitest — don't add tests there. Full
-browser flows are still validated manually via mcporter or the MCP inspector.
+**Tests:** `bun test` runs over `src/__tests__/*.test.ts` only (5 files: helpers, env, relay,
+encryption, tools; 146 passed + 10 skipped). The root `test/` directory has been deleted
+(stale leftover from an earlier version). Full browser flows are still validated manually
+via mcporter or the MCP inspector.
 
-**Deploy (homelab):** `pnpm build`, then copy `dist/index.cjs` to
+**Deploy (homelab):** `bun run build`, then copy `dist/index.cjs` to
 `~/mcp-servers/steel-mcp-server-custom/dist/` and `skill/SKILL.md` to
-`~/.agents/skills/steel-browser/` on the OpenClaw LXC. The `skill/` directory holds the
-agent-facing usage skill — keep it in sync with tool changes.
+`~/.agents/skills/steel-browser/` on the OpenClaw LXC. The artifact runs under `node` on
+the LXC — bun is not needed there. The `skill/` directory holds the agent-facing usage
+skill — keep it in sync with tool changes.
 
 ---
 

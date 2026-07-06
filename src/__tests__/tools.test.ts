@@ -8,7 +8,7 @@
  * Tests for non-browser tools (credentials, captcha_status, list_profiles)
  * work without Steel.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { spawn, type ChildProcess } from "child_process";
 import path from "path";
 import fs from "fs/promises";
@@ -265,12 +265,12 @@ describe("browser tools", () => {
     if (client) client.kill();
   });
 
-  it.skipIf(!steelAvailable)("list_tabs returns at least one tab", async () => {
+  (steelAvailable ? it : it.skip)("list_tabs returns at least one tab", async () => {
     const r = await client.tool(200, "list_tabs");
     expect(client.getText(r)).toMatch(/Tab \d+/);
   });
 
-  it.skipIf(!steelAvailable)(
+  (steelAvailable ? it : it.skip)(
     "go_to_url returns URL + title",
     async () => {
       const r = await client.tool(201, "go_to_url", { url: "https://example.com" });
@@ -281,7 +281,7 @@ describe("browser tools", () => {
     15000,
   );
 
-  it.skipIf(!steelAvailable)("get_page_text auto-selects content area", async () => {
+  (steelAvailable ? it : it.skip)("get_page_text auto-selects content area", async () => {
     const r = await client.tool(202, "get_page_text", { maxChars: 500 });
     const text = client.getText(r);
     expect(text).toContain("Example Domain");
@@ -289,7 +289,7 @@ describe("browser tools", () => {
     expect(text).toContain("\n");
   });
 
-  it.skipIf(!steelAvailable)("scroll reports position and page height", async () => {
+  (steelAvailable ? it : it.skip)("scroll reports position and page height", async () => {
     const r = await client.tool(203, "scroll", { direction: "down", pixels: 100 });
     const text = client.getText(r);
     expect(text).toContain("Position:");
@@ -297,19 +297,19 @@ describe("browser tools", () => {
     expect(text).toMatch(/\d+% through page/);
   });
 
-  it.skipIf(!steelAvailable)("list_tabs with tabId filter returns single tab info", async () => {
+  (steelAvailable ? it : it.skip)("list_tabs with tabId filter returns single tab info", async () => {
     const r = await client.tool(204, "list_tabs", { tabId: 1 });
     const text = client.getText(r);
     expect(text).toMatch(/Tab 1:/);
     expect(text).toContain("Title:");
   });
 
-  it.skipIf(!steelAvailable)("close_tabs with nonexistent owner returns empty", async () => {
+  (steelAvailable ? it : it.skip)("close_tabs with nonexistent owner returns empty", async () => {
     const r = await client.tool(205, "close_tabs", { owner: "agent:nonexistent-12345" });
     expect(client.getText(r)).toContain("No tabs");
   });
 
-  it.skipIf(!steelAvailable)(
+  (steelAvailable ? it : it.skip)(
     "click with waitForText reports result",
     async () => {
       // Navigate to example.com first
@@ -326,7 +326,7 @@ describe("browser tools", () => {
     20000,
   );
 
-  it.skipIf(!steelAvailable)(
+  (steelAvailable ? it : it.skip)(
     "history(reload) reports URL + title",
     async () => {
       const r = await client.tool(208, "history", { action: "reload" });
@@ -338,14 +338,14 @@ describe("browser tools", () => {
     15000,
   );
 
-  it.skipIf(!steelAvailable)("get_console returns formatted messages", async () => {
+  (steelAvailable ? it : it.skip)("get_console returns formatted messages", async () => {
     const r = await client.tool(209, "get_console", { level: "all" });
     // May have messages or not — both are valid
     const text = client.getText(r);
     expect(text).toBeTruthy();
   });
 
-  it.skipIf(!steelAvailable)("cookies with no filter returns cookies or empty", async () => {
+  (steelAvailable ? it : it.skip)("cookies with no filter returns cookies or empty", async () => {
     const r = await client.tool(210, "cookies");
     const text = client.getText(r);
     // Either cookies or "No cookies" — both valid

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "bun:test";
 import { z } from "zod";
 
 // Test the env schema validation logic in isolation.
