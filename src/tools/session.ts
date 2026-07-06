@@ -193,7 +193,9 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
   // get_console ---------------------------------------------------------------
   server.tool(
     "get_console",
-    `Get browser console messages. Filter by level (error/warning/info/log). Use clear: true to reset buffer after reading.`,
+    `Get browser console messages. Filter by level (error/warning/info/log). Use clear: true to reset buffer after reading.
+
+NOTE: when clear=true with a level filter, ALL entries captured up to read time are removed (not just the filtered level). Messages arriving during the read survive.`,
     {
       level: z
         .enum(["all", "error", "warning", "info", "log"])

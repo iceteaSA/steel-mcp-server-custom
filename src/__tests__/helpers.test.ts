@@ -251,15 +251,16 @@ describe("ErrorTracker", () => {
 
   it("enforces 200-entry cap (evicts oldest)", () => {
     let now = 1000000;
-    const t = new ErrorTracker({ now: () => now, urlThreshold: 1, domainThreshold: 1 });
-    // Record 201 entries on different domains so domain threshold doesn't fire
+    // Default-constructed tracker — real default cap of 200
+    const t = new ErrorTracker({ now: () => now });
+    // Record the same URL 201 times. The cap evicts the oldest entry,
+    // leaving 200. With default urlThreshold=2, check() reports the count.
     for (let i = 0; i < 201; i++) {
-      t.record(`https://site${i}.example/page`);
+      t.record("https://example.com/page");
     }
-    // page0 should be gone (evicted by cap)
-    expect(t.check("https://site0.example/page")).toBeNull();
-    // site200 should be present
-    expect(t.check("https://site200.example/page")).toContain("failed 1 time(s)");
+    // After eviction, 200 entries remain for this URL
+    const warn = t.check("https://example.com/page");
+    expect(warn).toContain("failed 200 time(s)");
   });
 });
 

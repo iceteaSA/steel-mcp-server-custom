@@ -63,7 +63,7 @@ export function detectErrorPage(title: string): string | null {
 export const ERROR_TRACKER_TTL_MS = 30 * 60 * 1000;
 
 /** Hard cap on ErrorTracker entries (evict oldest when exceeded). */
-const ERROR_TRACKER_CAP = 200;
+export const ERROR_TRACKER_MAX_ENTRIES = 200;
 
 /**
  * Tracks recent navigation errors (404s, bot walls) to detect agents stuck in
@@ -86,7 +86,7 @@ export class ErrorTracker {
     urlThreshold?: number;
     now?: () => number;
   }) {
-    this.maxEntries = opts?.maxEntries ?? 30;
+    this.maxEntries = opts?.maxEntries ?? ERROR_TRACKER_MAX_ENTRIES;
     this.domainThreshold = opts?.domainThreshold ?? 5;
     this.urlThreshold = opts?.urlThreshold ?? 2;
     this.now = opts?.now ?? Date.now;
@@ -96,8 +96,8 @@ export class ErrorTracker {
   private evict(): void {
     const cutoff = this.now() - ERROR_TRACKER_TTL_MS;
     this.entries = this.entries.filter((e) => e.ts >= cutoff);
-    if (this.entries.length > ERROR_TRACKER_CAP) {
-      this.entries.splice(0, this.entries.length - ERROR_TRACKER_CAP);
+    if (this.entries.length > ERROR_TRACKER_MAX_ENTRIES) {
+      this.entries.splice(0, this.entries.length - ERROR_TRACKER_MAX_ENTRIES);
     }
   }
 
