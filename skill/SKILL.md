@@ -3,8 +3,10 @@ name: steel-browser
 skill-memory:
   enabled: true
 description: >
-  Workflow patterns for using Steel MCP browser tools safely and efficiently for
-  navigation, extraction, screenshots, forms, and human handoff.
+  Use when driving a browser through the Steel MCP backend (gateway server "steel") — load BEFORE
+  the first steel invoke of a session. Workflow patterns for navigation, page extraction,
+  screenshots, forms, and human handoff, safely and efficiently. Trigger — browse a site, scrape a
+  page, fill a form, screenshot a page, drive the browser.
 ---
 
 # Steel Browser — Workflow Patterns
@@ -15,18 +17,18 @@ common failures.
 ## Calling Convention (CRITICAL — read first)
 
 In **opencode**, Steel is behind **mcp-gateway** — its tools are NOT exposed directly.
-Every Steel tool call goes through `gateway_invoke`:
+Every Steel tool call goes through `mcp-gateway_gateway_invoke`:
 
 ```
-gateway_invoke({ server: "steel", tool: "<toolName>", arguments: { <args> } })
+mcp-gateway_gateway_invoke({ server: "steel", tool: "<toolName>", arguments: { <args> } })
 ```
 
 e.g. `go_to_url(url: "x", readPage: true)` shown below is shorthand for:
-`gateway_invoke({ server: "steel", tool: "go_to_url", arguments: { url: "x", readPage: true } })`.
+`mcp-gateway_gateway_invoke({ server: "steel", tool: "go_to_url", arguments: { url: "x", readPage: true } })`.
 
 **All examples in this skill use the bare `toolName(args)` shorthand for readability** —
-wrap each one in `gateway_invoke({ server: "steel", tool, arguments })` when you actually call it.
-Need the tool list/schemas? `gateway_list_tools({ server: "steel" })`. (The mcporter route in
+wrap each one in `mcp-gateway_gateway_invoke({ server: "steel", tool, arguments })` when you actually call it.
+Need the tool list/schemas? `mcp-gateway_gateway_list_tools({ server: "steel" })`. (The mcporter route in
 "Calling Routes" below applies only to OpenClaw agents, a different runtime.)
 
 ## Core Rules
@@ -343,7 +345,7 @@ contexts have full JS-level stealth but HTTP headers show the real Chrome UA
 Two ways this MCP is reached. Escaping rules differ.
 
 1. **mcp-gateway** (opencode). Reach every Steel tool via
-   `gateway_invoke({ server: "steel", tool: "<tool>", arguments: { ... } })` — args are
+   `mcp-gateway_gateway_invoke({ server: "steel", tool: "<tool>", arguments: { ... } })` — args are
    native objects, no shell escaping. This is the route for opencode (see Calling Convention at top).
 2. **mcporter + exec** (OpenClaw agents — a different runtime). `mcporter call steel.<tool> key=value
    --output json`. The command is a shell string. Watch quoting (see below).

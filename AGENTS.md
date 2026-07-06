@@ -2,7 +2,8 @@
 
 Custom fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-server) for
 self-hosted Steel Browser. Provides direct Playwright browser tools for LLM agents — no internal
-LLM required. See `steel-mcp-changes.md` for the original customisation spec.
+LLM required. See `IMPROVEMENTS.md` for the prioritized improvement plan and `CHANGELOG.md`
+for what diverged from upstream.
 
 ---
 
@@ -14,6 +15,9 @@ pnpm install
 
 # Compile TypeScript to dist/index.cjs
 pnpm build
+
+# Run from source without building (tsx watch)
+pnpm dev
 
 # Type-check without emitting (run before committing)
 pnpm exec tsc --noEmit
@@ -30,16 +34,23 @@ BROWSER_MODE=local node dist/index.cjs
 # Inspect tools via MCP inspector
 pnpm inspector
 
-# Lint source files
-npx oxlint src/
+# Lint / format (oxlint + oxfmt, NOT eslint/prettier)
+pnpm lint
+pnpm format:check   # or `pnpm format` to write
 
-# Check formatting
-npx oxfmt --check src/
+# Run tests (vitest — src/__tests__/ only)
+pnpm test
 ```
 
-**Tests:** `pnpm test` runs vitest (`test/*.test.ts`) — covers the pure helpers shared by
-`get_page_text(matchAll)`, `get_links`, `get_attrs`, and the bot-check detector. Full
+**Tests:** `pnpm test` runs vitest over `src/__tests__/*.test.ts` only (see vitest.config.ts —
+5 files: helpers, env, relay, encryption, tools; 146 passed + 10 skipped). The root `test/`
+directory is a stale leftover and is NOT picked up by vitest — don't add tests there. Full
 browser flows are still validated manually via mcporter or the MCP inspector.
+
+**Deploy (homelab):** `pnpm build`, then copy `dist/index.cjs` to
+`~/mcp-servers/steel-mcp-server-custom/dist/` and `skill/SKILL.md` to
+`~/.agents/skills/steel-browser/` on the OpenClaw LXC. The `skill/` directory holds the
+agent-facing usage skill — keep it in sync with tool changes.
 
 ---
 
@@ -79,15 +90,15 @@ The design principles:
 - **Owner-tagged tabs.** `new_tab(url, owner)` records an owner string on the
   tab. Agents use their own unique owner (e.g. `agent:<id>-<timestamp>`).
 - **Tab-scoped operations.** All page-interacting tools accept an optional
-  `tabId`. Agents pass their own tab ID on every call so another agent's
-  `switch_tab` doesn't pull the active-tab pointer out from under them.
-- **Scoped cleanup.** `close_tabs_by_owner(owner)` closes only that agent's
-  tabs. `stop_browser` destroys the whole session — do not use for per-agent
+  `tabId`. Agents pass their own tab ID on every call so another agent's tab
+  activity doesn't pull the active-tab pointer out from under them.
+- **Scoped cleanup.** `close_tabs({ owner })` closes only that agent's tabs.
+  `stop_browser` destroys the whole session — do not use for per-agent
   cleanup.
 - **Idle sweeper.** Every page-targeted call refreshes the tab's
   `lastActivity` timestamp. Tabs untouched for `TAB_IDLE_TIMEOUT_MS` are
   auto-closed. Safety net for abandoned tabs — not a substitute for
-  `close_tabs_by_owner`.
+  `close_tabs({ owner })`.
 - **Browser-closed retry.** `newTab` / `getPage` catch Playwright
   "Target/context/browser has been closed" errors, soft-reset, wait 2 s,
   retry once. Fixes the race between `start_browser` returning and the
@@ -270,8 +281,8 @@ Use `writeToFile(data, defaultName, env, outputPath?)` — takes `env` param, cr
 
 ### Global wait
 Call `await globalWait(env)` after every action tool (navigation, scroll, click, type, select, etc.).
-Do **not** call it in read-only tools (get_screenshot, get_page_text, get_current_url,
-console_log, wait_for). Controlled by `GLOBAL_WAIT_SECONDS` env var (default 0).
+Do **not** call it in read-only tools (get_screenshot, get_page_text, get_links,
+get_console, wait_for). Controlled by `GLOBAL_WAIT_SECONDS` env var (default 0).
 
 ### Section comments
 
