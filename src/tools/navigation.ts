@@ -265,7 +265,7 @@ Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back"
           navResult === null &&
           beforeUrl === afterUrl;
         const suffix = noOp
-          ? ` (no-op — no ${action === "back" ? "previous" : "next"} entry in tab history; URL unchanged)`
+          ? ` — no history entry to go ${action === "back" ? "back" : "forward"} to. URL unchanged: ${beforeUrl}`
           : "";
         const pageTitle = await page.title().catch(() => "");
         const titlePart = pageTitle ? `\nTitle: ${pageTitle}` : "";

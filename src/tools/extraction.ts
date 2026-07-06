@@ -13,6 +13,7 @@ import {
   extractPageContent,
   findTitle,
   pickPrimaryLink,
+  validateExpression,
   type Link,
 } from "../helpers.js";
 
@@ -553,6 +554,13 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .default(50)
         .optional()
         .describe("Max elements to return. Default: 50. 0 = no cap."),
+      maxCharsPerAttr: z
+        .number()
+        .default(2000)
+        .optional()
+        .describe(
+          "Max characters per attribute value before truncation with '…[truncated]'. Default: 2000. Applies to all attrs including 'html' (outerHTML).",
+        ),
       tabId: z
         .number()
         .int()
@@ -560,31 +568,46 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({ selector, attrs, limit = 50, tabId }) => {
+    async ({ selector, attrs, limit = 50, maxCharsPerAttr = 2000, tabId }) => {
       try {
         const page = await mgr.getPage(tabId);
         const results = await page.evaluate(
-          ({ sel, attrNames }: { sel: string; attrNames: string[] }) => {
+          ({
+            sel,
+            attrNames,
+            maxChars,
+          }: {
+            sel: string;
+            attrNames: string[];
+            maxChars: number;
+          }) => {
             const nodes = Array.from(document.querySelectorAll(sel));
+            const trunc = (s: string | null): string | null => {
+              if (s === null) return null;
+              if (maxChars <= 0 || s.length <= maxChars) return s;
+              return s.slice(0, maxChars) + "…[truncated]";
+            };
             return nodes.map((el) => {
               const out: Record<string, string | null> = {};
               for (const name of attrNames) {
                 if (name === "text") {
                   const raw = (el as HTMLElement).innerText ?? el.textContent ?? "";
-                  out[name] = raw
-                    .replace(/[^\S\n]+/g, " ")
-                    .replace(/\n{3,}/g, "\n\n")
-                    .trim();
+                  out[name] = trunc(
+                    raw
+                      .replace(/[^\S\n]+/g, " ")
+                      .replace(/\n{3,}/g, "\n\n")
+                      .trim(),
+                  );
                 } else if (name === "html") {
-                  out[name] = (el as HTMLElement).outerHTML ?? null;
+                  out[name] = trunc((el as HTMLElement).outerHTML ?? null);
                 } else {
-                  out[name] = (el as Element).getAttribute(name);
+                  out[name] = trunc((el as Element).getAttribute(name));
                 }
               }
               return out;
             });
           },
-          { sel: selector, attrNames: attrs },
+          { sel: selector, attrNames: attrs, maxChars: maxCharsPerAttr },
         );
 
         const capped = limit > 0 ? results.slice(0, limit) : results;
@@ -670,6 +693,15 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
       tabId,
     }) => {
       try {
+        // Syntax-check the expression before sending to the browser.
+        const syntaxError = validateExpression(expression);
+        if (syntaxError) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: syntaxError }],
+          };
+        }
+
         const page = await mgr.getPage(tabId);
         let result: unknown;
         if (selector) {

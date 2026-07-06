@@ -24,6 +24,8 @@ import {
   deriveDownloadFilename,
   cleanErrorMessage,
   extractPageContent,
+  validateCookies,
+  validateExpression,
   type Link,
 } from "../helpers.js";
 
@@ -778,5 +780,80 @@ describe("withBackgroundTab", () => {
 
     expect(closeCalled).toBe(false);
     expect(mockMgr.activeTabId).toBe(1); // unchanged
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateCookies (A6 — cookie set validation)
+// ---------------------------------------------------------------------------
+describe("validateCookies", () => {
+  it("accepts cookies with url", () => {
+    expect(validateCookies([{ name: "a", value: "1", url: "https://example.com" }])).toEqual([]);
+  });
+
+  it("accepts cookies with domain+path", () => {
+    expect(validateCookies([{ name: "a", value: "1", domain: "example.com", path: "/" }])).toEqual(
+      [],
+    );
+  });
+
+  it("rejects cookies missing both url and domain+path", () => {
+    const violations = validateCookies([{ name: "bad", value: "1" }]);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain('Cookie "bad"');
+    expect(violations[0]).toContain("needs url, or domain+path");
+  });
+
+  it("rejects cookies with domain but no path", () => {
+    const violations = validateCookies([{ name: "partial", value: "1", domain: "example.com" }]);
+    expect(violations).toHaveLength(1);
+  });
+
+  it("rejects cookies with path but no domain", () => {
+    const violations = validateCookies([{ name: "partial", value: "1", path: "/" }]);
+    expect(violations).toHaveLength(1);
+  });
+
+  it("reports all violations, not just the first", () => {
+    const violations = validateCookies([
+      { name: "good", value: "1", url: "https://example.com" },
+      { name: "bad1", value: "2" },
+      { name: "bad2", value: "3" },
+    ]);
+    expect(violations).toHaveLength(2);
+    expect(violations[0]).toContain('Cookie "bad1"');
+    expect(violations[1]).toContain('Cookie "bad2"');
+  });
+
+  it("returns empty for empty array", () => {
+    expect(validateCookies([])).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateExpression (A6 — evaluate syntax precheck)
+// ---------------------------------------------------------------------------
+describe("validateExpression", () => {
+  it("accepts valid expressions", () => {
+    expect(validateExpression("1 + 1")).toBeNull();
+    expect(validateExpression("document.title")).toBeNull();
+    expect(validateExpression("(() => { return 42; })()")).toBeNull();
+    expect(validateExpression("[1, 2, 3].map(x => x * 2)")).toBeNull();
+  });
+
+  it("rejects invalid syntax", () => {
+    const err = validateExpression("1 +++ 2");
+    expect(err).toContain("not valid JavaScript");
+  });
+
+  it("rejects statements (not expressions)", () => {
+    const err = validateExpression("let x = 1; x");
+    expect(err).toContain("not valid JavaScript");
+    expect(err).toContain("single expression");
+  });
+
+  it("rejects empty expression", () => {
+    const err = validateExpression("");
+    expect(err).toContain("not valid JavaScript");
   });
 });

@@ -523,6 +523,38 @@ export function extractPageContent(
 }
 
 /**
+ * Validate that each cookie in a set has either `url` or (`domain` AND `path`).
+ * Returns an array of violation messages (empty = all valid).
+ */
+export function validateCookies(
+  cookies: Array<{ name: string; value?: string; url?: string; domain?: string; path?: string }>,
+): string[] {
+  const violations: string[] = [];
+  for (const c of cookies) {
+    if (!c.url && !(c.domain && c.path)) {
+      violations.push(`Cookie "${c.name}": needs url, or domain+path.`);
+    }
+  }
+  return violations;
+}
+
+/**
+ * Validate a JavaScript expression before sending it to page.evaluate().
+ * Uses new Function() to syntax-check — statements like `let x=1; x` will
+ * fail because the tool contract requires a single expression.
+ * Returns an error message string, or null if valid.
+ */
+export function validateExpression(expression: string): string | null {
+  try {
+    new Function(`return (${expression})`);
+  } catch (e) {
+    const msg = (e as Error).message;
+    return `Expression is not valid JavaScript: ${msg}. The expression must be a single expression (not a statement). Wrap multi-line logic in an IIFE: (() => { ... })()`;
+  }
+  return null;
+}
+
+/**
  * Clean Playwright error messages for LLM consumption:
  *   - Strip ANSI colour escapes (ESC + `[` + digits + `m`) that Playwright
  *     embeds in its `Call log:` sections (visible as `[2m` / `[22m` in MCP

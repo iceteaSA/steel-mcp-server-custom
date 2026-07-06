@@ -9,6 +9,7 @@ import {
   deriveDownloadFilename,
   matchesCookieHost,
   mimeToExt,
+  validateCookies,
 } from "../helpers.js";
 import { withBackgroundTab } from "../utils.js";
 
@@ -55,6 +56,13 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
 
         // Set mode — inject cookies and return
         if (setCookies && setCookies.length > 0) {
+          const violations = validateCookies(setCookies);
+          if (violations.length > 0) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: violations.join("\n") }],
+            };
+          }
           await ctx.addCookies(setCookies as Parameters<BrowserContext["addCookies"]>[0]);
           return { content: [{ type: "text", text: `Set ${setCookies.length} cookie(s).` }] };
         }
