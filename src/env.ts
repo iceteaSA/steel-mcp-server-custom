@@ -67,6 +67,11 @@ export const EnvSchema = z
     // http://localhost:<RELAY_PORT>. Set when the MCP server runs on a
     // remote machine (e.g. http://your-host:3001).
     RELAY_PUBLIC_URL: z.string().optional(),
+    // Address the relay HTTP server binds to. Defaults to localhost-only.
+    // Use 0.0.0.0 to accept connections from other machines (only when the
+    // relay is behind a reverse proxy or firewall, since auth is Bearer-token
+    // based and not TLS-wrapped at the HTTP layer).
+    RELAY_BIND_ADDR: z.string().default("127.0.0.1"),
   })
   .transform((env) => ({
     ...env,

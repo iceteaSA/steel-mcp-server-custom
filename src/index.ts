@@ -68,6 +68,7 @@ async function runServer() {
     } else {
       startRelayServer({
         port: env.RELAY_PORT,
+        bindAddr: env.RELAY_BIND_ADDR,
         secret: env.RELAY_SECRET,
         profilesDir: env.PROFILES_DIR,
         credentialsFile: env.CREDENTIALS_FILE,

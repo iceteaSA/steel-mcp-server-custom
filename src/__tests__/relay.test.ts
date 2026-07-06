@@ -36,6 +36,7 @@ beforeAll(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "relay-test-"));
   config = {
     port: 0, // will pick a random available port
+    bindAddr: "127.0.0.1",
     secret: "test-secret",
     profilesDir: path.join(tmpDir, "profiles"),
     credentialsFile: path.join(tmpDir, "credentials.json"),
@@ -235,6 +236,7 @@ describe("POST /push — encrypted credentials", () => {
   it("encrypts and decrypts credentials with passphrase", async () => {
     const encConfig: RelayConfig = {
       port: 0, // random port — must NOT inherit config.port which is already bound
+      bindAddr: "127.0.0.1",
       secret: "test-secret",
       profilesDir: config.profilesDir,
       credentialsFile: path.join(tmpDir, "encrypted-creds.json"),
