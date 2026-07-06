@@ -63,9 +63,7 @@ describe("resolveToolsets", () => {
   });
 
   it("throws with valid list when an unknown toolset is passed", () => {
-    expect(() => resolveToolsets("tabs,foobar", undefined)).toThrow(
-      /Invalid toolset\(s\): foobar/,
-    );
+    expect(() => resolveToolsets("tabs,foobar", undefined)).toThrow(/Invalid toolset\(s\): foobar/);
   });
 
   it("handles whitespace in comma-separated input", () => {
@@ -90,10 +88,7 @@ describe("resolveToolsets", () => {
 
 describe("makeRegistrar", () => {
   function makeStubServer(): McpServer {
-    return new McpServer(
-      { name: "test", version: "0.0.0" },
-      { capabilities: { tools: {} } },
-    );
+    return new McpServer({ name: "test", version: "0.0.0" }, { capabilities: { tools: {} } });
   }
 
   function stubSpec(overrides: Partial<ToolSpec> = {}): ToolSpec {
@@ -164,15 +159,7 @@ describe("makeRegistrar", () => {
 describe("ALL_TOOLSETS", () => {
   it("includes all 7 toolset values", () => {
     expect(ALL_TOOLSETS.length).toBe(7);
-    const expected: Toolset[] = [
-      "core",
-      "tabs",
-      "extract",
-      "media",
-      "network",
-      "auth",
-      "debug",
-    ];
+    const expected: Toolset[] = ["core", "tabs", "extract", "media", "network", "auth", "debug"];
     for (const t of expected) {
       expect(ALL_TOOLSETS.includes(t)).toBe(true);
     }

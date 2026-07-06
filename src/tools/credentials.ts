@@ -1,16 +1,18 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
 import { globalWait } from "../utils.js";
 import { loadCredentials, saveCredentials, type Credential } from "../credentials-store.js";
 import { cleanErrorMessage } from "../helpers.js";
+import type { ToolRegistrar } from "./shared.js";
 
-export function register(server: McpServer, mgr: BrowserManager, env: Env): void {
+export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // credentials ---------------------------------------------------------------
-  server.tool(
-    "credentials",
-    `Manage stored credentials. Call with no args to list all (passwords masked). Provide name+url+username+password to store/update. Set remove=true to delete.`,
-    {
+  register({
+    name: "credentials",
+    title: "Manage Credentials",
+    description: `Manage stored credentials: list all (passwords masked), store a new credential, update an existing one, or delete by name. Call with no arguments to list. Pass name+url+username+password to store/update. Pass name+remove=true to delete (destructive — cannot be undone). Use for managing login credentials used by use_credential. Do NOT use to fill login forms directly — use use_credential for that.`,
+    toolset: "auth",
+    inputSchema: {
       name: z.string().optional().describe("Credential name. Omit to list all."),
       url: z
         .string()
@@ -31,28 +33,58 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Set true to delete this credential instead of storing/updating it."),
     },
-    async ({ name, url, username, password, extra, remove }) => {
+    outputSchema: {
+      credentials: z
+        .array(z.object({ name: z.string(), username: z.string(), url: z.string() }))
+        .optional(),
+      message: z.string().optional(),
+    },
+    annotations: {
+      readOnlyHint: false, // store/update/delete modes mutate
+      destructiveHint: true, // delete mode is destructive
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+    handler: async ({ name, url, username, password, extra, remove }) => {
       try {
         const creds = await loadCredentials(env);
 
         // List mode — no name provided
         if (!name) {
-          if (creds.length === 0)
-            return { content: [{ type: "text", text: "No stored credentials." }] };
+          if (creds.length === 0) {
+            return {
+              content: [{ type: "text", text: "No stored credentials." }],
+              structuredContent: { credentials: [] },
+            };
+          }
           const lines = creds.map(
             (c) =>
               `  ${c.name}: ${c.username} @ ${c.url}${c.extra ? ` (+${Object.keys(c.extra).length} extra)` : ""}`,
           );
-          return { content: [{ type: "text", text: "Credentials:\n" + lines.join("\n") }] };
+          const structured = creds.map((c) => ({
+            name: c.name,
+            username: c.username,
+            url: c.url,
+          }));
+          return {
+            content: [{ type: "text", text: "Credentials:\n" + lines.join("\n") }],
+            structuredContent: { credentials: structured },
+          };
         }
 
         if (remove) {
           const idx = creds.findIndex((c) => c.name === name);
           if (idx === -1)
-            return { content: [{ type: "text", text: `Credential "${name}" not found.` }] };
+            return {
+              content: [{ type: "text", text: `Credential "${name}" not found.` }],
+              structuredContent: { message: `Credential "${name}" not found.` },
+            };
           creds.splice(idx, 1);
           await saveCredentials(creds, env);
-          return { content: [{ type: "text", text: `Credential "${name}" deleted.` }] };
+          return {
+            content: [{ type: "text", text: `Credential "${name}" deleted.` }],
+            structuredContent: { message: `Credential "${name}" deleted.` },
+          };
         }
 
         if (!url || !username || !password) {
@@ -93,29 +125,25 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           creds.push(cred);
         }
         await saveCredentials(creds, env);
+        const msg = `Credential "${name}" ${existing >= 0 ? "updated" : "stored"} for ${url}.`;
         return {
-          content: [
-            {
-              type: "text",
-              text: `Credential "${name}" ${existing >= 0 ? "updated" : "stored"} for ${url}.`,
-            },
-          ],
+          content: [{ type: "text", text: msg }],
+          structuredContent: { message: msg },
         };
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // use_credential ------------------------------------------------------------
-  server.tool(
-    "use_credential",
-    `Retrieve a stored credential by name and optionally auto-fill a login form on the current page.
-
-Without selectors: returns the credential (username + password + any extra fields).
-With selectors: fills the form fields on the page and optionally clicks submit.`,
-    {
+  register({
+    name: "use_credential",
+    title: "Use Credential",
+    description: `Retrieve a stored credential by name and optionally auto-fill a login form on the current page. Without selectors: returns the credential info (username + masked password + extra fields). With selectors: fills the form fields and optionally clicks submit. Use for logging into sites where you've stored credentials via the credentials tool. Do NOT use for sites where you don't have saved credentials — use fill with manual values instead.`,
+    toolset: "auth",
+    inputSchema: {
       name: z.string().describe("Name of the stored credential to use."),
       usernameSelector: z
         .string()
@@ -133,7 +161,13 @@ With selectors: fills the form fields on the page and optionally clicks submit.`
         ),
       tabId: z.number().int().min(1).optional().describe("Optional tab ID for the page to fill."),
     },
-    async ({ name, usernameSelector, passwordSelector, submitSelector, tabId }) => {
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ name, usernameSelector, passwordSelector, submitSelector, tabId }) => {
       try {
         const creds = await loadCredentials(env);
         const cred = creds.find((c) => c.name === name);
@@ -187,5 +221,5 @@ With selectors: fills the form fields on the page and optionally clicks submit.`
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 }

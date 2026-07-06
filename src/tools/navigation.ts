@@ -1,4 +1,3 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { Page } from "playwright";
 import type { BrowserManager, Env } from "../manager.js";
@@ -12,6 +11,7 @@ import {
   extractPageContent,
   isBotWall,
 } from "../helpers.js";
+import type { ToolRegistrar } from "./shared.js";
 
 // Module-level ErrorTracker instance — persists across tool calls.
 const errorTracker = new ErrorTracker();
@@ -21,12 +21,14 @@ const errorTracker = new ErrorTracker();
 // numeric IDs, and the WeakSet avoids leaking memory when pages close.
 const mediaBlockedTabs = new WeakSet<Page>();
 
-export function register(server: McpServer, mgr: BrowserManager, env: Env): void {
+export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // go_to_url -----------------------------------------------------------------
-  server.tool(
-    "go_to_url",
-    `Navigate to a URL. Returns final URL + title. Auto-detects bot walls (waits up to 15s for CapSolver) and HTTP error pages (404/5xx). Use readPage to extract text in the same call.`,
-    {
+  register({
+    name: "go_to_url",
+    title: "Navigate to URL",
+    description: `Navigate the current tab to a URL and return the final URL + page title. Auto-detects bot walls (waits up to 15s for CapSolver auto-solve) and HTTP error pages (404/5xx). Combine with readPage to extract text in the same call, or waitFor to pause until a selector appears. Use this as the primary navigation tool — do NOT use new_tab just to change pages.`,
+    toolset: "core",
+    inputSchema: {
       url: z.string().describe("The URL to navigate to."),
       readPage: z
         .boolean()
@@ -65,7 +67,13 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({
       url,
       readPage = false,
       maxChars = 5000,
@@ -223,15 +231,15 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // history -------------------------------------------------------------------
-  server.tool(
-    "history",
-    `Navigate the current (or specified) tab through its browser history.
-
-Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back", "forward", or "reload".`,
-    {
+  register({
+    name: "history",
+    title: "Navigate History",
+    description: `Navigate the current tab through its browser history: back (previous page), forward (next page), or reload (refresh). Use after clicking a link to go back, or to reload a stale page. Do NOT use for initial navigation — use go_to_url to load a URL for the first time.`,
+    toolset: "core",
+    inputSchema: {
       action: z
         .enum(["back", "forward", "reload"])
         .describe(
@@ -244,7 +252,13 @@ Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back"
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({ action, tabId }) => {
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ action, tabId }) => {
       try {
         const page = await mgr.getPage(tabId);
         const beforeUrl = page.url();
@@ -279,5 +293,5 @@ Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back"
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 }

@@ -1,4 +1,3 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
 import { globalWait } from "../utils.js";
@@ -10,13 +9,16 @@ import {
   extractPageContent,
   interpretCheckboxValue,
 } from "../helpers.js";
+import type { ToolRegistrar } from "./shared.js";
 
-export function register(server: McpServer, mgr: BrowserManager, env: Env): void {
+export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // click ---------------------------------------------------------------------
-  server.tool(
-    "click",
-    `Click an element. Reports navigation if URL changes. Optional waitFor/waitForText to confirm result in one call (saves a separate wait_for).`,
-    {
+  register({
+    name: "click",
+    title: "Click Element",
+    description: `Click a page element identified by CSS selector. Reports navigation if the URL changes. Optionally wait for a selector or text to appear after clicking (saves a separate wait_for call). Use for buttons, links, and any interactive element. Do NOT use to type text into inputs — use fill for form fields.`,
+    toolset: "core",
+    inputSchema: {
       selector: z
         .string()
         .describe(
@@ -55,7 +57,20 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({ selector, waitFor, waitForText, waitTimeout = 10000, timeout = 10000, tabId }) => {
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({
+      selector,
+      waitFor,
+      waitForText,
+      waitTimeout = 10000,
+      timeout = 10000,
+      tabId,
+    }) => {
       try {
         const page = await mgr.getPage(tabId);
         const beforeUrl = page.url();
@@ -93,13 +108,15 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // fill ----------------------------------------------------------------------
-  server.tool(
-    "fill",
-    `Fill form fields. Auto-detects input types (text, select, checkbox, radio). Pass submitSelector to submit after filling.`,
-    {
+  register({
+    name: "fill",
+    title: "Fill Form",
+    description: `Fill one or more form fields on the page. Auto-detects field types (text, select, checkbox, radio). Pass submitSelector to click a submit button after filling. Use for any form interaction — login, search, registration, checkout. Do NOT use click to interact with form elements; fill handles all input types correctly.`,
+    toolset: "core",
+    inputSchema: {
       fields: z
         .array(
           z.object({
@@ -152,7 +169,13 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({ fields, submitSelector, skipMissing = false, timeout = 10000, tabId }) => {
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ fields, submitSelector, skipMissing = false, timeout = 10000, tabId }) => {
       // Batched kind-detection: one evaluate call checks existence for ALL
       // fields and auto-detects kinds for fields lacking an explicit `kind`.
       // This avoids N per-field round-trips, eliminates TOCTOU, and means
@@ -164,7 +187,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         const page = await mgr.getPage(tabId);
 
         // One batch existence check for every selector (explicit + implicit).
-        const allSelectors = fields.map((f) => f.selector);
+        const allSelectors = fields.map((f: { selector: string }) => f.selector);
         const infoMap: Record<string, { tag: string; type: string } | null> =
           allSelectors.length > 0 ? await page.evaluate(detectFieldsInPage, allSelectors) : {};
 
@@ -181,7 +204,9 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         }
 
         // Validate: report ALL missing selectors before mutating anything.
-        const missing = fields.filter((f) => infoMap[f.selector] === null).map((f) => f.selector);
+        const missing = fields
+          .filter((f: { selector: string }) => infoMap[f.selector] === null)
+          .map((f: { selector: string }) => f.selector);
         if (missing.length > 0 && !skipMissing) {
           return {
             isError: true,
@@ -279,13 +304,15 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // scroll --------------------------------------------------------------------
-  server.tool(
-    "scroll",
-    `Scroll the page. Use readAfterScroll to get visible text in the same call (saves a follow-up get_page_text).`,
-    {
+  register({
+    name: "scroll",
+    title: "Scroll Page",
+    description: `Scroll the page up or down by a pixel amount. Optionally extract visible text after scrolling with readAfterScroll (saves a follow-up get_page_text call). Use to reveal lazy-loaded content or read long pages in segments. Do NOT use as a substitute for navigation — use go_to_url to load a new page.`,
+    toolset: "core",
+    inputSchema: {
       direction: z.enum(["up", "down"]).describe("Scroll direction: 'up' or 'down'."),
       pixels: z
         .number()
@@ -311,7 +338,19 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({ direction, pixels = 500, readAfterScroll = false, maxChars = 3000, tabId }) => {
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({
+      direction,
+      pixels = 500,
+      readAfterScroll = false,
+      maxChars = 3000,
+      tabId,
+    }) => {
       try {
         const page = await mgr.getPage(tabId);
         const dy = direction === "up" ? -pixels : pixels;
@@ -382,13 +421,15 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // wait_for ------------------------------------------------------------------
-  server.tool(
-    "wait_for",
-    `Wait for a condition before proceeding. Pass selector (CSS), text (appears), or textGone (disappears). On timeout, reports current page URL+title for diagnosis.`,
-    {
+  register({
+    name: "wait_for",
+    title: "Wait for Condition",
+    description: `Wait for a condition before proceeding: a CSS selector to appear, text to appear on the page, or text to disappear. On timeout, reports the current page URL and title for diagnosis. Use after navigation or clicks to wait for dynamic content to load. Do NOT use as a sleep substitute — the timeout is a should-not-happen guard, not a pacing mechanism.`,
+    toolset: "core",
+    inputSchema: {
       selector: z
         .string()
         .optional()
@@ -412,7 +453,13 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({ selector, text, textGone, timeout = 10000, tabId }) => {
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({ selector, text, textGone, timeout = 10000, tabId }) => {
       try {
         const page = await mgr.getPage(tabId);
 
@@ -463,7 +510,10 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
 
         return {
           content: [
-            { type: "text", text: `Condition met: ${parts.join(", ")} — elapsed ${elapsed}ms.` },
+            {
+              type: "text",
+              text: `Condition met: ${parts.join(", ")} — elapsed ${elapsed}ms.`,
+            },
           ],
         };
       } catch (err) {
@@ -488,5 +538,5 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         };
       }
     },
-  );
+  });
 }

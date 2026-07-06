@@ -1,15 +1,23 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
 import { cleanErrorMessage } from "../helpers.js";
+import type { ToolRegistrar } from "./shared.js";
 
-export function register(server: McpServer, mgr: BrowserManager, env: Env): void {
+export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // start_browser -------------------------------------------------------------
-  server.tool(
-    "start_browser",
-    `Start the browser. Returns Session Viewer (read-only) and Interactive URL (human takeover for CAPTCHA/login/2FA). Auto-starts on first tool call — only needed for the URLs.`,
-    {},
-    async () => {
+  register({
+    name: "start_browser",
+    title: "Start Browser",
+    description: `Start the browser and return Session Viewer (read-only) and Interactive URL for human takeover (CAPTCHA, login, 2FA). The browser auto-starts on first tool call — call this only when you need the Interactive URL for a human-in-the-loop step. Do NOT use for routine navigation; tools like go_to_url auto-initialize.`,
+    toolset: "core",
+    inputSchema: {},
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async () => {
       try {
         await mgr.initialize();
         const lines: string[] = ["Browser started."];
@@ -29,14 +37,22 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // stop_browser --------------------------------------------------------------
-  server.tool(
-    "stop_browser",
-    "Stop the browser and clean up resources. Releases the Steel session if one is active.",
-    {},
-    async () => {
+  register({
+    name: "stop_browser",
+    title: "Stop Browser",
+    description: `Stop the browser and release all resources (Steel session, tabs, profiles). Destroys the entire session — use close_tabs for per-agent cleanup instead. Do NOT call this unless you want to end the entire browser session for all agents.`,
+    toolset: "core",
+    inputSchema: {},
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+    handler: async () => {
       try {
         await mgr.stop();
         return { content: [{ type: "text", text: "Browser stopped." }] };
@@ -45,14 +61,22 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // smoke_test ----------------------------------------------------------------
-  server.tool(
-    "smoke_test",
-    `Self-test: navigates to example.com, checks fingerprint consistency, verifies stealth properties, and reports pass/fail for each check. Use to verify the browser is working correctly after restarts or config changes.`,
-    {},
-    async () => {
+  register({
+    name: "smoke_test",
+    title: "Smoke Test",
+    description: `Self-test: navigates to example.com, checks fingerprint consistency, verifies stealth properties (canvas noise, WebGL spoofing, webdriver hidden), and reports CapSolver balance. Use after browser restarts or config changes to verify the browser is working correctly. Creates and cleans up its own test tab — does not affect your active tabs.`,
+    toolset: "debug",
+    inputSchema: {},
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async () => {
       try {
         const { tabId, page } = await mgr.newTab("https://example.com");
         const results: Array<{ check: string; pass: boolean; detail: string }> = [];
@@ -183,20 +207,25 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return {
           isError: true,
           content: [
-            { type: "text", text: `Smoke test failed to run: ${cleanErrorMessage(error)}` },
+            {
+              type: "text",
+              text: `Smoke test failed to run: ${cleanErrorMessage(error)}`,
+            },
           ],
         };
       }
     },
-  );
+  });
 
   // get_console ---------------------------------------------------------------
-  server.tool(
-    "get_console",
-    `Get browser console messages. Filter by level (error/warning/info/log). Use clear: true to reset buffer after reading.
+  register({
+    name: "get_console",
+    title: "Get Console Logs",
+    description: `Get browser console messages captured since the session started. Filter by severity level (error/warning/info/log) and optionally clear the buffer after reading. Use to debug JavaScript errors or verify page behavior. Do NOT use to check if a page loaded — use wait_for or go_to_url with waitFor instead.
 
 NOTE: when clear=true with a level filter, ALL entries captured up to read time are removed (not just the filtered level). Messages arriving during the read survive.`,
-    {
+    toolset: "debug",
+    inputSchema: {
       level: z
         .enum(["all", "error", "warning", "info", "log"])
         .default("all")
@@ -215,7 +244,13 @@ NOTE: when clear=true with a level filter, ALL entries captured up to read time 
         .optional()
         .describe("Clear the captured log buffer after returning results. Default: false."),
     },
-    async ({ level = "all", maxEntries = 50, clear = false }) => {
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async ({ level = "all", maxEntries = 50, clear = false }) => {
       try {
         await mgr.initialize();
 
@@ -229,9 +264,6 @@ NOTE: when clear=true with a level filter, ALL entries captured up to read time 
 
         if (clear) {
           // Remove everything up to snapshotLength regardless of filter.
-          // This is intentionally simple: filtered reads with clear=true
-          // remove all entries present at read time, not just the filtered
-          // subset. Messages arriving after the snapshot survive.
           mgr.consoleLogs.splice(0, snapshotLength);
         }
 
@@ -270,18 +302,32 @@ NOTE: when clear=true with a level filter, ALL entries captured up to read time 
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // captcha_status ------------------------------------------------------------
-  server.tool(
-    "captcha_status",
-    `Check CapSolver CAPTCHA solving status: API balance and whether the extension is loaded. Useful before tasks that may encounter CAPTCHAs.`,
-    {},
-    async () => {
+  register({
+    name: "captcha_status",
+    title: "CAPTCHA Solver Status",
+    description: `Check whether CapSolver CAPTCHA auto-solving is available: API key configured, balance, and supported CAPTCHA types. Use before tasks that may encounter CAPTCHAs (Cloudflare, reCAPTCHA, hCaptcha). The solver runs automatically during go_to_url — this tool is for pre-flight checks, not for solving.`,
+    toolset: "debug",
+    inputSchema: {},
+    outputSchema: {
+      apiKeyConfigured: z.boolean(),
+      balance: z.number().nullable(),
+      apiError: z.string().nullable(),
+      supported: z.string(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async () => {
       try {
         const apiKey = process.env.CAPSOLVER_API_KEY;
         let balance: number | null = null;
-        let apiError: string | undefined;
+        let apiError: string | null = null;
 
         if (apiKey) {
           try {
@@ -305,20 +351,29 @@ NOTE: when clear=true with a level filter, ALL entries captured up to read time 
           }
         }
 
+        const supported =
+          "reCAPTCHA v2/v3, hCaptcha, Cloudflare Turnstile, AWS WAF, GeeTest, DataDome, ImageToText";
+
         const lines: string[] = [];
         lines.push(`CapSolver API key: ${apiKey ? "configured" : "NOT SET"}`);
         if (balance !== null) lines.push(`Balance: $${balance.toFixed(2)}`);
         if (apiError) lines.push(`API error: ${apiError}`);
         lines.push(`Extension: loaded in Steel container (token mode)`);
-        lines.push(
-          `Supported: reCAPTCHA v2/v3, hCaptcha, Cloudflare Turnstile, AWS WAF, GeeTest, DataDome, ImageToText`,
-        );
+        lines.push(`Supported: ${supported}`);
 
-        return { content: [{ type: "text", text: lines.join("\n") }] };
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          structuredContent: {
+            apiKeyConfigured: !!apiKey,
+            balance,
+            apiError,
+            supported,
+          },
+        };
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 }

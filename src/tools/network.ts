@@ -1,6 +1,5 @@
 import fs from "fs/promises";
 import path from "path";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { BrowserContext } from "playwright";
 import type { BrowserManager, Env } from "../manager.js";
@@ -12,13 +11,18 @@ import {
   validateCookies,
 } from "../helpers.js";
 import { withBackgroundTab } from "../utils.js";
+import type { ToolRegistrar } from "./shared.js";
 
-export function register(server: McpServer, mgr: BrowserManager, env: Env): void {
+export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // cookies -------------------------------------------------------------------
-  server.tool(
-    "cookies",
-    `Get or set browser cookies. Default: return cookies (filter by domain). Pass setCookies to inject cookies (e.g. restore a saved session). Cap: 50 cookies unless limit=0.`,
-    {
+  register({
+    name: "cookies",
+    title: "Browser Cookies",
+    description: `Get or set browser cookies for the current session. Default: return all cookies (filter by domain or URL). Pass setCookies to inject cookies (e.g. restore a saved session from a previous run). The set mode does NOT persist across browser restarts — use save_profile for durable session storage. Do NOT use to transfer cookies between profiles; each profile has its own isolated cookie jar.
+
+CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
+    toolset: "network",
+    inputSchema: {
       domain: z
         .union([z.string(), z.array(z.string())])
         .optional()
@@ -49,7 +53,26 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           "Inject cookies into the browser context. Each needs name+value and either url or domain+path.",
         ),
     },
-    async ({ urls, domain, limit, setCookies }) => {
+    outputSchema: {
+      cookies: z
+        .array(
+          z.object({
+            name: z.string(),
+            value: z.string(),
+            domain: z.string(),
+            path: z.string(),
+          }),
+        )
+        .optional(),
+      count: z.number().optional(),
+    },
+    annotations: {
+      readOnlyHint: false, // set mode mutates
+      destructiveHint: false,
+      idempotentHint: true, // get is idempotent; set is also safe to repeat
+      openWorldHint: false,
+    },
+    handler: async ({ urls, domain, limit, setCookies }) => {
       try {
         await mgr.initialize();
         const ctx = mgr.context!;
@@ -64,7 +87,10 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
             };
           }
           await ctx.addCookies(setCookies as Parameters<BrowserContext["addCookies"]>[0]);
-          return { content: [{ type: "text", text: `Set ${setCookies.length} cookie(s).` }] };
+          return {
+            content: [{ type: "text", text: `Set ${setCookies.length} cookie(s).` }],
+            structuredContent: { count: setCookies.length },
+          };
         }
 
         // Get mode
@@ -75,7 +101,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         if (urls && urls.length > 0 && cookies.length === 0) {
           const all = await ctx.cookies();
           const hosts = urls
-            .map((u) => {
+            .map((u: string) => {
               try {
                 return new URL(u).hostname;
               } catch {
@@ -83,7 +109,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
               }
             })
             .filter(Boolean);
-          cookies = all.filter((c) => hosts.some((h) => matchesCookieHost(c.domain, h)));
+          cookies = all.filter((c) => hosts.some((h: string) => matchesCookieHost(c.domain, h)));
         }
 
         // Domain filter (substring match — handles leading-dot + subdomain quirks)
@@ -109,6 +135,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
               : "";
           return {
             content: [{ type: "text", text: `No cookies in the browser context.${hint}` }],
+            structuredContent: { cookies: [] },
           };
         }
 
@@ -117,21 +144,31 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           ? `\n\n[CAPPED — ${total} total cookies in context, returning first ${cap}. Set limit=0 or use domain/urls filter for full list.]`
           : "";
 
+        const structured = cookies.map((c) => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path,
+        }));
+
         return {
           content: [{ type: "text", text: body + footer }],
+          structuredContent: { cookies: structured },
         };
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // download_file -------------------------------------------------------------
-  server.tool(
-    "download_file",
-    `Download a URL to disk. Handles both attachment downloads and inline binaries (auto-fallback to fetch). Uses browser cookies for auth. Pass forceFetch: true to skip download-event detection.`,
-    {
+  register({
+    name: "download_file",
+    title: "Download File",
+    description: `Download a URL to disk using browser cookies for authentication. Handles both Content-Disposition attachment downloads and inline binary files (auto-fallback to fetch). Use for downloading PDFs, images, spreadsheets, or any file behind authentication. Uses a temporary background tab so the caller's active tab is never navigated away. Do NOT use for small text responses — use fetch_urls for web page content.`,
+    toolset: "media",
+    inputSchema: {
       url: z.string().describe("The download URL to fetch."),
       outputPath: z
         .string()
@@ -162,9 +199,15 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
     // tabId is kept in the schema for backward compatibility — downloads now
     // use a temporary tab so the caller's active tab is never navigated away.
-    async ({ url, outputPath, timeout = 30000, forceFetch = false, tabId: _tabId }) => {
+    handler: async ({ url, outputPath, timeout = 30000, forceFetch = false, tabId: _tabId }) => {
       const saveViaFetch = async (via: string): Promise<string> => {
         const ctx = mgr.context!;
         const resp = await ctx.request.fetch(url, { timeout: timeout + 5000 });
@@ -237,5 +280,5 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 }

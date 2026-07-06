@@ -1,4 +1,3 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
@@ -16,6 +15,7 @@ import {
   validateExpression,
   type Link,
 } from "../helpers.js";
+import type { ToolRegistrar } from "./shared.js";
 
 // Singleton — configured once, reused across calls.
 const turndown = new TurndownService({
@@ -24,12 +24,16 @@ const turndown = new TurndownService({
   bulletListMarker: "-",
 });
 
-export function register(server: McpServer, mgr: BrowserManager, env: Env): void {
+export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // get_page_text -------------------------------------------------------------
-  server.tool(
-    "get_page_text",
-    `Extract text from page. Auto-detects main content. Use extractContent for Readability-based article extraction (strips nav/ads/footer). Use matchAll for structured list scraping.`,
-    {
+  register({
+    name: "get_page_text",
+    title: "Get Page Text",
+    description: `Extract text from the current page. Auto-detects the main content area. Use extractContent for Readability-based article extraction (strips nav/ads/footer). Use matchAll for structured list scraping. Use as the primary content-reading tool after navigation. Do NOT use to read URLs or links — use get_links for structured link extraction.
+
+CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file" for large pages.`,
+    toolset: "core",
+    inputSchema: {
       selector: z
         .string()
         .optional()
@@ -101,7 +105,13 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({
       selector,
       extractContent = false,
       format = "text",
@@ -125,7 +135,6 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           const article = reader.parse();
           let text: string;
           if (format === "markdown" && article?.content) {
-            // Convert Readability's clean HTML to markdown via turndown
             text = turndown.turndown(article.content).trim();
             if (article.title) text = `# ${article.title}\n\n${text}`;
           } else {
@@ -354,13 +363,17 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // fetch_urls ----------------------------------------------------------------
-  server.tool(
-    "fetch_urls",
-    `Batch-fetch multiple URLs in parallel. Returns combined text for each URL. Ideal for research workflows instead of chaining new_tab + get_page_text.`,
-    {
+  register({
+    name: "fetch_urls",
+    title: "Fetch URLs",
+    description: `Batch-fetch 1-10 URLs in parallel with Readability article extraction. Returns combined text per URL — ideal for research workflows without the overhead of chaining new_tab + get_page_text per URL. Uses background tabs that are auto-cleaned up. Do NOT use for interactive pages (login, forms) — use go_to_url + fill for those.
+
+CONTEXT BUDGET — output capped at maxCharsPerPage per URL (default 3K per URL).`,
+    toolset: "extract",
+    inputSchema: {
       urls: z.array(z.string()).min(1).max(10).describe("Array of URLs to fetch (1-10)."),
       extractContent: z
         .boolean()
@@ -373,13 +386,32 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Max chars per page. Default: 3000."),
     },
-    async ({ urls, extractContent = true, maxCharsPerPage = 3000 }) => {
+    outputSchema: {
+      results: z.array(
+        z.object({
+          url: z.string(),
+          title: z.string(),
+          text: z.string(),
+        }),
+      ),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({ urls, extractContent = true, maxCharsPerPage = 3000 }) => {
       try {
+        interface FetchResult {
+          url: string;
+          title: string;
+          text: string;
+        }
         const results: string[] = [];
-        // Open tab WITHOUT url (avoids leak if goto throws inside _doNewTab),
-        // then navigate in our own try/finally where tabId is known.
-        const fetchOne = async (url: string): Promise<string> => {
-          // Background tab — no pointer leak, always cleaned up.
+        const structured: FetchResult[] = [];
+
+        const fetchOne = async (url: string): Promise<FetchResult> => {
           return withBackgroundTab(mgr, async (page) => {
             await page.goto(url, { waitUntil: "domcontentloaded" });
             await globalWait(env);
@@ -388,7 +420,8 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
 
             const errorStatus = detectErrorPage(title);
             if (errorStatus) {
-              return `## ${url}\n[HTTP ${errorStatus} — ${title}]`;
+              const msg = `## ${url}\n[HTTP ${errorStatus} — ${title}]`;
+              return { url, title, text: msg };
             }
 
             let text = "";
@@ -419,7 +452,8 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
                 text.slice(0, maxCharsPerPage) +
                 `\n[TRUNCATED — ${text.length.toLocaleString()} total]`;
             }
-            return `## ${title || url}\nURL: ${url}\n\n${text}`;
+            const contentText = `## ${title || url}\nURL: ${url}\n\n${text}`;
+            return { url, title: title || url, text: contentText };
           });
         };
 
@@ -427,24 +461,34 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         for (let i = 0; i < settled.length; i++) {
           const r = settled[i];
           if (r.status === "fulfilled") {
-            results.push(r.value);
+            results.push(r.value.text);
+            structured.push({ url: r.value.url, title: r.value.title, text: r.value.text });
           } else {
-            results.push(`## ${urls[i]}\n[ERROR: ${cleanErrorMessage(r.reason)}]`);
+            const errText = `## ${urls[i]}\n[ERROR: ${cleanErrorMessage(r.reason)}]`;
+            results.push(errText);
+            structured.push({ url: urls[i], title: urls[i], text: errText });
           }
         }
 
-        return { content: [{ type: "text", text: results.join("\n\n---\n\n") }] };
+        return {
+          content: [{ type: "text", text: results.join("\n\n---\n\n") }],
+          structuredContent: { results: structured },
+        };
       } catch (err) {
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(err) }] };
       }
     },
-  );
+  });
 
   // get_links -----------------------------------------------------------------
-  server.tool(
-    "get_links",
-    `Extract links from page as [{text, href}]. Deduped by href. Use urlPattern to filter.`,
-    {
+  register({
+    name: "get_links",
+    title: "Get Links",
+    description: `Extract all links from the page as a structured [{text, href}] array. Deduped by href (first non-empty text wins). Filter with urlPattern (JS regex) to narrow results. Use to discover navigation targets, API endpoints, or downloadable files. Do NOT use for page text — use get_page_text for content extraction.
+
+CONTEXT BUDGET — output capped at limit (default 50).`,
+    toolset: "extract",
+    inputSchema: {
       selector: z
         .string()
         .optional()
@@ -469,7 +513,21 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({ selector, urlPattern, limit = 50, tabId }) => {
+    outputSchema: {
+      links: z.array(
+        z.object({
+          text: z.string(),
+          href: z.string(),
+        }),
+      ),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({ selector, urlPattern, limit = 50, tabId }) => {
       try {
         if (urlPattern) {
           try {
@@ -517,6 +575,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           capped.length === 0
             ? `[]${selector ? `\n(no anchors found in elements matching "${selector}"${urlPattern ? ` for pattern /${urlPattern}/i` : ""})` : urlPattern ? `\n(no anchors matched pattern /${urlPattern}/i)` : ""}`
             : "[\n" + capped.map((l) => JSON.stringify(l)).join(",\n") + "\n]";
+        const structured = capped.map((l) => ({ text: l.text, href: l.href }));
         return {
           content: [
             {
@@ -528,19 +587,22 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
                   : ""),
             },
           ],
+          structuredContent: { links: structured },
         };
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // get_attrs -----------------------------------------------------------------
-  server.tool(
-    "get_attrs",
-    `Extract specific attributes from matched elements as JSON array. Special attrs: "text" = innerText, "html" = outerHTML. Use for data-*, aria-*, src, alt, or structured data.`,
-    {
+  register({
+    name: "get_attrs",
+    title: "Get Attributes",
+    description: `Extract specific attributes from elements matching a CSS selector. Special attrs: "text" = innerText, "html" = outerHTML. Use for data-*, aria-*, src, alt, href, or structured data extraction. Returns a JSON array of objects. Do NOT use for simple link lists — get_links is faster and deduplicates.`,
+    toolset: "extract",
+    inputSchema: {
       selector: z
         .string()
         .describe("CSS selector for elements to extract from (e.g. 'article', '.product-card')."),
@@ -568,7 +630,16 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({ selector, attrs, limit = 50, maxCharsPerAttr = 2000, tabId }) => {
+    outputSchema: {
+      results: z.array(z.record(z.string(), z.string().nullable())),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({ selector, attrs, limit = 50, maxCharsPerAttr = 2000, tabId }) => {
       try {
         const page = await mgr.getPage(tabId);
         const results = await page.evaluate(
@@ -627,19 +698,24 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
                   : ""),
             },
           ],
+          structuredContent: { results: capped },
         };
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // evaluate ------------------------------------------------------------------
-  server.tool(
-    "evaluate",
-    `Run JavaScript in the page and return the result as JSON. Escape hatch for anything other tools don't cover. With selector: expression gets \`el\` bound to first match (null if none). Must be an expression, not a statement — wrap multi-line in IIFE: (() => { ... })()`,
-    {
+  register({
+    name: "evaluate",
+    title: "Evaluate JavaScript",
+    description: `Run arbitrary JavaScript in the page context and return the result as JSON. An escape hatch when other tools don't cover a use case. Must be an expression — wrap multi-line logic in an IIFE: (() => { ... })(). With selector, the expression gets \`el\` bound to the first match. Do NOT use for routine scraping — use get_page_text, get_links, get_attrs, or extract instead. This bypasses all safety guards.
+
+CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "file" for large results.`,
+    toolset: "extract",
+    inputSchema: {
       expression: z
         .string()
         .describe(
@@ -683,7 +759,13 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({
       expression,
       selector,
       maxChars = 10000,
@@ -751,13 +833,15 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // extract -------------------------------------------------------------------
-  server.tool(
-    "extract",
-    `Declarative structured extraction. Pass a CSS selector and a field map — returns JSON array of objects. Replaces fragile evaluate() patterns for scraping.`,
-    {
+  register({
+    name: "extract",
+    title: "Declarative Extract",
+    description: `Declarative structured extraction from repeating elements. Pass a CSS selector and a field map (field name → sub-selector or sub-selector@attribute) to produce a JSON array of records. Replaces fragile evaluate() patterns for scraping product lists, search results, tables, or any repeating DOM structures. Use "." as the field spec to extract the root element's own text. Do NOT use for single-element extraction — use get_attrs or get_page_text instead.`,
+    toolset: "extract",
+    inputSchema: {
       selector: z
         .string()
         .describe("CSS selector for the repeating elements (e.g. '.product-card', 'tr.result')."),
@@ -778,13 +862,19 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .describe("Max items to return. Default: 20."),
       tabId: z.number().int().min(1).optional().describe("Optional tab ID."),
     },
-    async ({ selector, fields, limit = 20, tabId }) => {
+    outputSchema: {
+      results: z.array(z.record(z.string(), z.string().nullable())),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({ selector, fields, limit = 20, tabId }) => {
       try {
         const page = await mgr.getPage(tabId);
 
-        // Evaluate in browser — returns raw array of record objects.
-        // Playwright's evaluate() typing requires the arg object shape to be
-        // declared in the function signature, not inferred.
         const evalArg = {
           sel: selector,
           fieldMap: fields as Record<string, string>,
@@ -823,11 +913,15 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         if (results.length === 0) {
           return {
             content: [{ type: "text", text: `[]\n(selector "${selector}" matched no elements)` }],
+            structuredContent: { results: [] },
           };
         }
 
         const json = "[\n" + results.map((r) => JSON.stringify(r)).join(",\n") + "\n]";
-        return { content: [{ type: "text", text: json }] };
+        return {
+          content: [{ type: "text", text: json }],
+          structuredContent: { results },
+        };
       } catch (err) {
         return {
           isError: true,
@@ -835,5 +929,5 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         };
       }
     },
-  );
+  });
 }
