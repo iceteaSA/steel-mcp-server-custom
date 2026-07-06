@@ -1,6 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { Page } from "playwright";
 import type { BrowserManager, Env } from "../manager.js";
 import { globalWait } from "../utils.js";
 import {
@@ -154,37 +153,35 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
     async ({ fields, submitSelector, skipMissing = false, timeout = 10000, tabId }) => {
-      // Batched kind-detection: one evaluate call detects all fields that
-      // lack an explicit `kind`, avoiding N per-field round-trips and the
-      // TOCTOU risk of re-querying the DOM between fills.
-      const detectBatchKinds = async (
-        page: Page,
-        selectors: string[],
-      ): Promise<Record<string, FieldKind | null>> => {
-        const infoMap = await page.evaluate(detectFieldsInPage, selectors);
-        const kinds: Record<string, FieldKind | null> = {};
-        for (const [sel, info] of Object.entries(infoMap)) {
-          if (!info) {
-            kinds[sel] = null;
-          } else {
-            kinds[sel] = detectFieldKind(info.tag, info.type);
-          }
-        }
-        return kinds;
-      };
+      // Batched kind-detection: one evaluate call checks existence for ALL
+      // fields and auto-detects kinds for fields lacking an explicit `kind`.
+      // This avoids N per-field round-trips, eliminates TOCTOU, and means
+      // explicit-kind missing selectors are also caught before any mutation.
 
       type FieldKind = "text" | "check" | "radio" | "select";
 
       try {
         const page = await mgr.getPage(tabId);
 
-        // Collect selectors that need detection (no explicit kind).
-        const toDetect = fields.filter((f) => !f.kind).map((f) => f.selector);
-        const detectedKinds: Record<string, FieldKind | null> =
-          toDetect.length > 0 ? await detectBatchKinds(page, toDetect) : {};
+        // One batch existence check for every selector (explicit + implicit).
+        const allSelectors = fields.map((f) => f.selector);
+        const infoMap: Record<string, { tag: string; type: string } | null> =
+          allSelectors.length > 0 ? await page.evaluate(detectFieldsInPage, allSelectors) : {};
 
-        // Validate: report all missing selectors before filling anything.
-        const missing = toDetect.filter((sel) => detectedKinds[sel] === null);
+        // Derive kinds for implicit-kind fields; explicit fields skip this.
+        const detectedKinds: Record<string, FieldKind | null> = {};
+        for (const f of fields) {
+          if (f.kind) continue;
+          const info = infoMap[f.selector];
+          if (!info) {
+            detectedKinds[f.selector] = null;
+          } else {
+            detectedKinds[f.selector] = detectFieldKind(info.tag, info.type);
+          }
+        }
+
+        // Validate: report ALL missing selectors before mutating anything.
+        const missing = fields.filter((f) => infoMap[f.selector] === null).map((f) => f.selector);
         if (missing.length > 0 && !skipMissing) {
           return {
             isError: true,
