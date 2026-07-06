@@ -77,6 +77,11 @@ export class BrowserManager {
     return this.browserContext;
   }
 
+  /** Expose the active tab id for tests and tool-side pointer checks. */
+  get activeTabId(): number {
+    return this.currentTabId;
+  }
+
   /** Mark a tab as recently used. Called on every page-interacting tool. */
   touchTab(tabId: number): void {
     if (this.tabs.has(tabId)) this.tabLastActivity.set(tabId, Date.now());
@@ -392,24 +397,32 @@ export class BrowserManager {
   }
 
   /**
-   * Open a new tab, register it, switch to it, and return its ID and page.
+   * Open a new tab, register it, and return its ID and page.
+   * When `activate` is true (the default), the new tab becomes the active
+   * tab (currentTabId is updated).  When false, the tab is created in the
+   * background — the caller's active tab pointer is unchanged.  This is
+   * the right choice for temporary tabs that are created and immediately
+   * closed (e.g. download_file, fetch_urls) so they don't silently move
+   * the active pointer out from under the caller.
+   *
    * `owner` tag lets concurrent agents clean up only their own tabs later
-   * via close_tabs_by_owner. Auto-retries on transient browser-closed errors.
+   * via close_tabs_by_owner.  Auto-retries on transient browser-closed errors.
    */
   async newTab(
     url?: string,
     owner?: string,
     profileName?: string,
+    activate = true,
   ): Promise<{ tabId: number; page: Page }> {
     await this.initialize();
     try {
-      return await this._doNewTab(url, owner, profileName);
+      return await this._doNewTab(url, owner, profileName, activate);
     } catch (err) {
       if (!isBrowserClosedError(err)) throw err;
       await this.softReset();
       await sleep(2000);
       await this.initialize();
-      return await this._doNewTab(url, owner, profileName);
+      return await this._doNewTab(url, owner, profileName, activate);
     }
   }
 
@@ -417,6 +430,7 @@ export class BrowserManager {
     url?: string,
     owner?: string,
     profileName?: string,
+    activate = true,
   ): Promise<{ tabId: number; page: Page }> {
     // If a profile is specified, open the tab in that profile's context
     let context = this.browserContext!;
@@ -430,7 +444,7 @@ export class BrowserManager {
     // Profile tabs get JS-level stealth via addInitScript (set on context creation).
     // HTTP UA in profiles shows HeadlessChrome — acceptable, see createProfile comment.
     const tabId = this.allocateTab(page, owner);
-    this.currentTabId = tabId;
+    if (activate) this.currentTabId = tabId;
     // Track profile membership
     if (profileName) {
       const profile = this.profiles.get(profileName)!;

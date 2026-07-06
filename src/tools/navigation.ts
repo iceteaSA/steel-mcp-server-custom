@@ -99,7 +99,12 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         } else if (!disableMedia && alreadyBlocked) {
           await page.unrouteAll({ behavior: "ignoreErrors" });
           mediaBlockedTabs.delete(page);
-          mediaNote = "\nMedia blocking disabled.";
+          if (env.OPTIMIZE_BANDWIDTH) {
+            mediaNote =
+              "\nRoute-level media blocking disabled (session-level OPTIMIZE_BANDWIDTH still active).";
+          } else {
+            mediaNote = "\nMedia blocking disabled.";
+          }
         }
 
         await page.goto(url, { waitUntil: "domcontentloaded" });

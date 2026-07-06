@@ -10,6 +10,7 @@ import {
   matchesCookieHost,
   mimeToExt,
 } from "../helpers.js";
+import { withBackgroundTab } from "../utils.js";
 
 export function register(server: McpServer, mgr: BrowserManager, env: Env): void {
   // cookies -------------------------------------------------------------------
@@ -182,14 +183,9 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           };
         }
 
-        // Create a temporary tab for the download so the caller's active tab
-        // is never navigated away or left on the download URL on failure.
-        let tmpTabId: number | undefined;
-        try {
-          const r = await mgr.newTab(undefined);
-          tmpTabId = r.tabId;
-          const page = r.page;
-
+        // Use a temporary background tab so the caller's active tab is
+        // never navigated away and the active-tab pointer is preserved.
+        const resultText = await withBackgroundTab(mgr, async (page) => {
           try {
             const [download] = await Promise.all([
               page.waitForEvent("download", { timeout }),
@@ -212,38 +208,22 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
             } catch (saveErr) {
               const sMsg = (saveErr as Error).message;
               if (/ENOENT|no such file or directory|copyfile/i.test(sMsg)) {
-                return {
-                  content: [
-                    {
-                      type: "text",
-                      text: await saveViaFetch("fetch-fallback-after-saveAs-ENOENT"),
-                    },
-                  ],
-                };
+                return await saveViaFetch("fetch-fallback-after-saveAs-ENOENT");
               }
               throw saveErr;
             }
             const stat = await fs.stat(savePath);
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Downloaded ${suggested} [via download-event]\nSaved to: ${savePath}\nSize: ${stat.size.toLocaleString()} bytes`,
-                },
-              ],
-            };
+            return `Downloaded ${suggested} [via download-event]\nSaved to: ${savePath}\nSize: ${stat.size.toLocaleString()} bytes`;
           } catch (err) {
             const msg = (err as Error).message;
             if (!/waitForEvent.*[Tt]imeout|Timeout.*waitForEvent|Timeout.*download/.test(msg)) {
               throw err;
             }
-            return {
-              content: [{ type: "text", text: await saveViaFetch("fetch-fallback") }],
-            };
+            return await saveViaFetch("fetch-fallback");
           }
-        } finally {
-          if (tmpTabId !== undefined) await mgr.closeTab(tmpTabId).catch(() => {});
-        }
+        });
+
+        return { content: [{ type: "text", text: resultText }] };
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };

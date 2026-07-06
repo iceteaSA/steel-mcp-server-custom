@@ -681,67 +681,19 @@ describe("detectFieldsInPage", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tab cleanup patterns (A4b / A4c — mock-based)
+// withBackgroundTab (A4b / A4c — the real helper used by both handlers)
 // ---------------------------------------------------------------------------
-describe("tab cleanup", () => {
-  it("fetchOne pattern closes tab even when work throws", async () => {
+import { withBackgroundTab } from "../utils.js";
+
+describe("withBackgroundTab", () => {
+  it("closes tab and preserves activeTabId when the inner fn throws", async () => {
     let closedTabId: number | undefined;
+    let activeAfter = -1;
     const mockMgr = {
-      newTab: async (_url?: string) => {
-        return { tabId: 42, page: {} as any };
-      },
-      closeTab: async (id: number) => {
-        closedTabId = id;
-      },
-    };
-
-    // Simulate the fetchOne pattern: tabId declared before try, assigned
-    // inside, finally closes it regardless of errors. The error propagates
-    // up (like Promise.allSettled would), but the finally always runs.
-    await (async () => {
-      let tabId: number | undefined;
-      try {
-        const r = await mockMgr.newTab(undefined);
-        tabId = r.tabId;
-        throw new Error("simulated failure after newTab");
-      } finally {
-        if (tabId !== undefined) await mockMgr.closeTab(tabId).catch(() => {});
-      }
-    })().catch(() => {});
-
-    expect(closedTabId).toBe(42);
-  });
-
-  it("fetchOne pattern does not try to close if newTab throws", async () => {
-    let closeCalled = false;
-    const mockMgr = {
-      newTab: async (_url?: string): Promise<{ tabId: number; page: unknown }> => {
-        throw new Error("browser closed");
-      },
-      closeTab: async (_id: number): Promise<void> => {
-        closeCalled = true;
-      },
-    };
-
-    let tabId: number | undefined;
-    // The pattern we test: if newTab throws, tabId stays undefined so
-    // the finally block should not call closeTab.
-    try {
-      const r = await mockMgr.newTab(undefined);
-      tabId = r.tabId;
-    } catch {
-      // newTab threw — expected, tabId stays undefined
-    } finally {
-      if (tabId !== undefined) await mockMgr.closeTab(tabId).catch(() => {});
-    }
-
-    expect(closeCalled).toBe(false);
-  });
-
-  it("download_file pattern closes temp tab on failure", async () => {
-    let closedTabId: number | undefined;
-    const mockMgr = {
-      newTab: async (_url?: string) => {
+      activeTabId: 1,
+      newTab: async (_url?: string, _owner?: string, _profileName?: string, activate?: boolean) => {
+        // Background tab — should NOT be activated.
+        expect(activate).toBe(false);
         return { tabId: 99, page: {} as any };
       },
       closeTab: async (id: number) => {
@@ -749,19 +701,51 @@ describe("tab cleanup", () => {
       },
     };
 
-    // Simulate the download_file temp-tab pattern: error propagates, but
-    // the finally block closes the temp tab first.
-    await (async () => {
-      let tmpTabId: number | undefined;
-      try {
-        const r = await mockMgr.newTab(undefined);
-        tmpTabId = r.tabId;
-        throw new Error("download failed");
-      } finally {
-        if (tmpTabId !== undefined) await mockMgr.closeTab(tmpTabId).catch(() => {});
-      }
-    })().catch(() => {});
+    await withBackgroundTab(mockMgr as any, async () => {
+      throw new Error("simulated failure");
+    }).catch(() => {
+      activeAfter = mockMgr.activeTabId;
+    });
 
     expect(closedTabId).toBe(99);
+    expect(activeAfter).toBe(1); // unchanged
+  });
+
+  it("closes tab on success and preserves activeTabId", async () => {
+    let closedTabId: number | undefined;
+    const mockMgr = {
+      activeTabId: 5,
+      newTab: async (_url?: string, _owner?: string, _profileName?: string, activate?: boolean) => {
+        expect(activate).toBe(false);
+        return { tabId: 42, page: {} as any };
+      },
+      closeTab: async (id: number) => {
+        closedTabId = id;
+      },
+    };
+
+    const result = await withBackgroundTab(mockMgr as any, async () => "done");
+
+    expect(result).toBe("done");
+    expect(closedTabId).toBe(42);
+    expect(mockMgr.activeTabId).toBe(5); // unchanged
+  });
+
+  it("does not call closeTab if newTab throws", async () => {
+    let closeCalled = false;
+    const mockMgr = {
+      activeTabId: 1,
+      newTab: async () => {
+        throw new Error("browser closed");
+      },
+      closeTab: async () => {
+        closeCalled = true;
+      },
+    };
+
+    await withBackgroundTab(mockMgr as any, async () => "unreachable").catch(() => {});
+
+    expect(closeCalled).toBe(false);
+    expect(mockMgr.activeTabId).toBe(1); // unchanged
   });
 });

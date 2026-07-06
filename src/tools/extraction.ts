@@ -4,7 +4,7 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
 import type { BrowserManager, Env } from "../manager.js";
-import { globalWait, writeToFile } from "../utils.js";
+import { globalWait, withBackgroundTab, writeToFile } from "../utils.js";
 import {
   capText,
   cleanErrorMessage,
@@ -378,15 +378,8 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         // Open tab WITHOUT url (avoids leak if goto throws inside _doNewTab),
         // then navigate in our own try/finally where tabId is known.
         const fetchOne = async (url: string): Promise<string> => {
-          // tabId declared outside try so the finally can close it even when
-          // newTab succeeds but a later non-goto step (parseHTML, Readability,
-          // evaluate) throws — no tab left dangling.
-          let tabId: number | undefined;
-          try {
-            const r = await mgr.newTab(undefined);
-            tabId = r.tabId;
-            const page = r.page;
-
+          // Background tab — no pointer leak, always cleaned up.
+          return withBackgroundTab(mgr, async (page) => {
             await page.goto(url, { waitUntil: "domcontentloaded" });
             await globalWait(env);
 
@@ -426,9 +419,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
                 `\n[TRUNCATED — ${text.length.toLocaleString()} total]`;
             }
             return `## ${title || url}\nURL: ${url}\n\n${text}`;
-          } finally {
-            if (tabId !== undefined) await mgr.closeTab(tabId).catch(() => {});
-          }
+          });
         };
 
         const settled = await Promise.allSettled(urls.map(fetchOne));
