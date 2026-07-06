@@ -297,12 +297,15 @@ describe("browser tools", () => {
     expect(text).toMatch(/\d+% through page/);
   });
 
-  (steelAvailable ? it : it.skip)("list_tabs with tabId filter returns single tab info", async () => {
-    const r = await client.tool(204, "list_tabs", { tabId: 1 });
-    const text = client.getText(r);
-    expect(text).toMatch(/Tab 1:/);
-    expect(text).toContain("Title:");
-  });
+  (steelAvailable ? it : it.skip)(
+    "list_tabs with tabId filter returns single tab info",
+    async () => {
+      const r = await client.tool(204, "list_tabs", { tabId: 1 });
+      const text = client.getText(r);
+      expect(text).toMatch(/Tab 1:/);
+      expect(text).toContain("Title:");
+    },
+  );
 
   (steelAvailable ? it : it.skip)("close_tabs with nonexistent owner returns empty", async () => {
     const r = await client.tool(205, "close_tabs", { owner: "agent:nonexistent-12345" });

@@ -81,16 +81,17 @@ describe("stdout cleanliness", () => {
     // the response to stdout. We use node's spawnSync (Bun.spawnSync has a bug
     // with stdin piping in bun 1.3.14).
     const proc = spawnSync("node", ["dist/index.cjs"], {
-      input: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2024-11-05",
-          capabilities: {},
-          clientInfo: { name: "t", version: "0" },
-        },
-      }) + "\n",
+      input:
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "t", version: "0" },
+          },
+        }) + "\n",
       env: {
         ...process.env,
         BROWSER_MODE: "steel",
