@@ -14,7 +14,7 @@
         "dist"
     ],
     "scripts": {
-        "build": "bun build src/index.ts --outdir dist --target=node --format=cjs --entry-naming='[name].cjs'",
+        "build": "bun build src/index.ts --outfile dist/index.cjs --target=node --format=cjs --external @napi-rs/image --external playwright",
         "dev": "bun --watch src/index.ts",
         "start": "node dist/index.cjs",
         "lint": "oxlint src/",
