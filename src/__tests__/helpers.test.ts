@@ -5,6 +5,7 @@ import {
   isBotWall,
   detectErrorPage,
   ErrorTracker,
+  ERROR_TRACKER_TTL_MS,
   CAPTCHA_WAIT_TOTAL_MS,
   CAPTCHA_POLL_INTERVAL_MS,
   dedupeLinks,
@@ -227,6 +228,36 @@ describe("ErrorTracker", () => {
     t.record("not-a-url");
     t.record("not-a-url");
     expect(t.check("not-a-url")).toContain("failed 2 time(s)");
+  });
+
+  it("evicts entries older than TTL (fake clock)", () => {
+    let now = 1000000;
+    const t = new ErrorTracker({ now: () => now });
+    t.record("https://example.com/old");
+    now += ERROR_TRACKER_TTL_MS + 1;
+    // After advancing past TTL, the old entry should be evicted
+    expect(t.check("https://example.com/old")).toBeNull();
+  });
+
+  it("keeps entries within TTL", () => {
+    let now = 1000000;
+    const t = new ErrorTracker({ now: () => now, urlThreshold: 1, domainThreshold: 1 });
+    t.record("https://example.com/fresh");
+    now += 1000; // 1 second later — well within TTL
+    expect(t.check("https://example.com/fresh")).toContain("failed 1 time(s)");
+  });
+
+  it("enforces 200-entry cap (evicts oldest)", () => {
+    let now = 1000000;
+    const t = new ErrorTracker({ now: () => now, urlThreshold: 1, domainThreshold: 1 });
+    // Record 201 entries on different domains so domain threshold doesn't fire
+    for (let i = 0; i < 201; i++) {
+      t.record(`https://site${i}.example/page`);
+    }
+    // page0 should be gone (evicted by cap)
+    expect(t.check("https://site0.example/page")).toBeNull();
+    // site200 should be present
+    expect(t.check("https://site200.example/page")).toContain("failed 1 time(s)");
   });
 });
 

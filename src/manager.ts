@@ -549,6 +549,12 @@ export class BrowserManager {
     }[]
   > {
     await this.initialize();
+    const openTabs = Array.from(this.tabs).filter(([, page]) => !page.isClosed());
+
+    // Fetch all titles in parallel — each wrapped to handle closed pages.
+    const titlePromises = openTabs.map(([, page]) => page.title().catch(() => "<unavailable>"));
+    const titles = await Promise.all(titlePromises);
+
     const result: {
       tabId: number;
       url: string;
@@ -557,8 +563,8 @@ export class BrowserManager {
       owner?: string;
       profile?: string;
     }[] = [];
-    for (const [id, page] of this.tabs) {
-      if (page.isClosed()) continue;
+    for (let i = 0; i < openTabs.length; i++) {
+      const [id, page] = openTabs[i];
       const row: {
         tabId: number;
         url: string;
@@ -569,7 +575,7 @@ export class BrowserManager {
       } = {
         tabId: id,
         url: page.url(),
-        title: await page.title(),
+        title: titles[i],
         active: id === this.currentTabId,
       };
       const o = this.tabOwners.get(id);

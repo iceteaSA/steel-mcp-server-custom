@@ -217,11 +217,21 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
       try {
         await mgr.initialize();
 
+        // Snapshot the array length at read start so splice removes only
+        // entries that existed at that moment. Messages arriving between
+        // snapshot and splice survive the clear.
+        const snapshotLength = mgr.consoleLogs.length;
         let logs = mgr.consoleLogs;
         if (level !== "all") logs = logs.filter((m) => m.level === level);
         const slice = logs.slice(-maxEntries);
 
-        if (clear) mgr.consoleLogs = [];
+        if (clear) {
+          // Remove everything up to snapshotLength regardless of filter.
+          // This is intentionally simple: filtered reads with clear=true
+          // remove all entries present at read time, not just the filtered
+          // subset. Messages arriving after the snapshot survive.
+          mgr.consoleLogs.splice(0, snapshotLength);
+        }
 
         if (slice.length === 0) {
           return {

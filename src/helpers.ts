@@ -59,6 +59,12 @@ export function detectErrorPage(title: string): string | null {
   return null;
 }
 
+/** TTL for ErrorTracker entries — entries older than this are evicted. */
+export const ERROR_TRACKER_TTL_MS = 30 * 60 * 1000;
+
+/** Hard cap on ErrorTracker entries (evict oldest when exceeded). */
+const ERROR_TRACKER_CAP = 200;
+
 /**
  * Tracks recent navigation errors (404s, bot walls) to detect agents stuck in
  * retry loops. Ring buffer keyed by URL origin+pathname (strips query/fragment).
@@ -72,11 +78,27 @@ export class ErrorTracker {
   private readonly maxEntries: number;
   private readonly domainThreshold: number;
   private readonly urlThreshold: number;
+  private readonly now: () => number;
 
-  constructor(opts?: { maxEntries?: number; domainThreshold?: number; urlThreshold?: number }) {
+  constructor(opts?: {
+    maxEntries?: number;
+    domainThreshold?: number;
+    urlThreshold?: number;
+    now?: () => number;
+  }) {
     this.maxEntries = opts?.maxEntries ?? 30;
     this.domainThreshold = opts?.domainThreshold ?? 5;
     this.urlThreshold = opts?.urlThreshold ?? 2;
+    this.now = opts?.now ?? Date.now;
+  }
+
+  /** Evict entries older than TTL and enforce the hard cap. */
+  private evict(): void {
+    const cutoff = this.now() - ERROR_TRACKER_TTL_MS;
+    this.entries = this.entries.filter((e) => e.ts >= cutoff);
+    if (this.entries.length > ERROR_TRACKER_CAP) {
+      this.entries.splice(0, this.entries.length - ERROR_TRACKER_CAP);
+    }
   }
 
   /** Normalise a URL to origin+pathname for dedup (strip query, fragment). */
@@ -91,8 +113,9 @@ export class ErrorTracker {
 
   /** Record a failed navigation. */
   record(url: string): void {
+    this.evict();
     const { key, domain } = this.normalise(url);
-    this.entries.push({ key, domain, ts: Date.now() });
+    this.entries.push({ key, domain, ts: this.now() });
     if (this.entries.length > this.maxEntries) {
       this.entries.shift();
     }
@@ -103,6 +126,7 @@ export class ErrorTracker {
    * agent appears to be looping, or null if the URL looks fresh.
    */
   check(url: string): string | null {
+    this.evict();
     const { key, domain } = this.normalise(url);
 
     // Exact URL repeat
