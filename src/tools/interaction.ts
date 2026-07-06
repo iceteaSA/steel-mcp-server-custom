@@ -7,6 +7,7 @@ import {
   buildRadioSelector,
   cleanErrorMessage,
   detectFieldKind,
+  detectFieldsInPage,
   extractPageContent,
   interpretCheckboxValue,
 } from "../helpers.js";
@@ -153,29 +154,62 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
     async ({ fields, submitSelector, skipMissing = false, timeout = 10000, tabId }) => {
-      const detectKind = async (
+      // Batched kind-detection: one evaluate call detects all fields that
+      // lack an explicit `kind`, avoiding N per-field round-trips and the
+      // TOCTOU risk of re-querying the DOM between fills.
+      const detectBatchKinds = async (
         page: Page,
-        selector: string,
-      ): Promise<"text" | "check" | "radio" | "select"> => {
-        const info = await page.evaluate((sel: string) => {
-          const el = document.querySelector(sel) as HTMLElement | null;
-          if (!el) return null;
-          const tag = el.tagName;
-          const type = (el as HTMLInputElement).type ?? "";
-          return { tag, type };
-        }, selector);
-        if (!info) return "text";
-        return detectFieldKind(info.tag, info.type);
+        selectors: string[],
+      ): Promise<Record<string, FieldKind | null>> => {
+        const infoMap = await page.evaluate(detectFieldsInPage, selectors);
+        const kinds: Record<string, FieldKind | null> = {};
+        for (const [sel, info] of Object.entries(infoMap)) {
+          if (!info) {
+            kinds[sel] = null;
+          } else {
+            kinds[sel] = detectFieldKind(info.tag, info.type);
+          }
+        }
+        return kinds;
       };
+
+      type FieldKind = "text" | "check" | "radio" | "select";
 
       try {
         const page = await mgr.getPage(tabId);
+
+        // Collect selectors that need detection (no explicit kind).
+        const toDetect = fields.filter((f) => !f.kind).map((f) => f.selector);
+        const detectedKinds: Record<string, FieldKind | null> =
+          toDetect.length > 0 ? await detectBatchKinds(page, toDetect) : {};
+
+        // Validate: report all missing selectors before filling anything.
+        const missing = toDetect.filter((sel) => detectedKinds[sel] === null);
+        if (missing.length > 0 && !skipMissing) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `Selector(s) not found: ${missing.join(", ")}. Use skipMissing=true to ignore missing fields.`,
+              },
+            ],
+          };
+        }
+
         const filled: Array<{ selector: string; kind: string }> = [];
         const skipped: string[] = [];
 
         for (const f of fields) {
           try {
-            const kind = f.kind ?? (await detectKind(page, f.selector));
+            // f.kind takes priority; otherwise use batched-detection result.
+            // null means the element wasn't found (only reachable when
+            // skipMissing=true — missing selectors abort earlier otherwise).
+            const kind = f.kind ?? detectedKinds[f.selector];
+            if (kind === null) {
+              skipped.push(f.selector);
+              continue;
+            }
             if (kind === "select" || kind === "selectLabel" || kind === "selectIndex") {
               if (kind === "selectLabel") {
                 await page.selectOption(f.selector, { label: f.value }, { timeout });

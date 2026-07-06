@@ -1,4 +1,5 @@
 import { describe, it, expect } from "bun:test";
+import { parseHTML } from "linkedom";
 import {
   collapseWhitespace,
   isBotWall,
@@ -13,6 +14,7 @@ import {
   isBrowserClosedError,
   isSteelSessionStuck,
   detectFieldKind,
+  detectFieldsInPage,
   interpretCheckboxValue,
   isCheckboxTruthy,
   buildRadioSelector,
@@ -626,5 +628,140 @@ describe("cleanErrorMessage", () => {
   it("handles null/undefined", () => {
     expect(cleanErrorMessage(null)).toBe("");
     expect(cleanErrorMessage(undefined)).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectFieldsInPage (batched kind-detection)
+// ---------------------------------------------------------------------------
+describe("detectFieldsInPage", () => {
+  it("detects mixed form fields and returns null for missing selectors", () => {
+    const html = `<!DOCTYPE html><html><body><form>
+      <input type="text" id="name" />
+      <select id="country"><option>US</option></select>
+      <input type="checkbox" id="agree" />
+      <input type="radio" name="size" value="m" id="size-m" />
+    </form></body></html>`;
+    const { document: doc } = parseHTML(html);
+    const origDoc = (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).document = doc;
+    try {
+      const result = detectFieldsInPage(["#name", "#country", "#agree", "#size-m", "#missing"]);
+
+      // Element info maps
+      expect(result["#name"]).toEqual({ tag: "INPUT", type: "text" });
+      expect(result["#country"]).toEqual({ tag: "SELECT", type: "" });
+      expect(result["#agree"]).toEqual({ tag: "INPUT", type: "checkbox" });
+      expect(result["#size-m"]).toEqual({ tag: "INPUT", type: "radio" });
+      expect(result["#missing"]).toBeNull();
+
+      // detectFieldKind integration
+      expect(detectFieldKind(result["#name"]!.tag, result["#name"]!.type)).toBe("text");
+      expect(detectFieldKind(result["#country"]!.tag, result["#country"]!.type)).toBe("select");
+      expect(detectFieldKind(result["#agree"]!.tag, result["#agree"]!.type)).toBe("check");
+      expect(detectFieldKind(result["#size-m"]!.tag, result["#size-m"]!.type)).toBe("radio");
+      expect(detectFieldKind(null, null)).toBe("text");
+    } finally {
+      (globalThis as Record<string, unknown>).document = origDoc;
+    }
+  });
+
+  it("returns all-null for entirely missing selectors", () => {
+    const { document: doc } = parseHTML("<div></div>");
+    const origDoc = (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).document = doc;
+    try {
+      const result = detectFieldsInPage(["#x", ".y"]);
+      expect(result["#x"]).toBeNull();
+      expect(result[".y"]).toBeNull();
+    } finally {
+      (globalThis as Record<string, unknown>).document = origDoc;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tab cleanup patterns (A4b / A4c — mock-based)
+// ---------------------------------------------------------------------------
+describe("tab cleanup", () => {
+  it("fetchOne pattern closes tab even when work throws", async () => {
+    let closedTabId: number | undefined;
+    const mockMgr = {
+      newTab: async (_url?: string) => {
+        return { tabId: 42, page: {} as any };
+      },
+      closeTab: async (id: number) => {
+        closedTabId = id;
+      },
+    };
+
+    // Simulate the fetchOne pattern: tabId declared before try, assigned
+    // inside, finally closes it regardless of errors. The error propagates
+    // up (like Promise.allSettled would), but the finally always runs.
+    await (async () => {
+      let tabId: number | undefined;
+      try {
+        const r = await mockMgr.newTab(undefined);
+        tabId = r.tabId;
+        throw new Error("simulated failure after newTab");
+      } finally {
+        if (tabId !== undefined) await mockMgr.closeTab(tabId).catch(() => {});
+      }
+    })().catch(() => {});
+
+    expect(closedTabId).toBe(42);
+  });
+
+  it("fetchOne pattern does not try to close if newTab throws", async () => {
+    let closeCalled = false;
+    const mockMgr = {
+      newTab: async (_url?: string): Promise<{ tabId: number; page: unknown }> => {
+        throw new Error("browser closed");
+      },
+      closeTab: async (_id: number): Promise<void> => {
+        closeCalled = true;
+      },
+    };
+
+    let tabId: number | undefined;
+    // The pattern we test: if newTab throws, tabId stays undefined so
+    // the finally block should not call closeTab.
+    try {
+      const r = await mockMgr.newTab(undefined);
+      tabId = r.tabId;
+    } catch {
+      // newTab threw — expected, tabId stays undefined
+    } finally {
+      if (tabId !== undefined) await mockMgr.closeTab(tabId).catch(() => {});
+    }
+
+    expect(closeCalled).toBe(false);
+  });
+
+  it("download_file pattern closes temp tab on failure", async () => {
+    let closedTabId: number | undefined;
+    const mockMgr = {
+      newTab: async (_url?: string) => {
+        return { tabId: 99, page: {} as any };
+      },
+      closeTab: async (id: number) => {
+        closedTabId = id;
+      },
+    };
+
+    // Simulate the download_file temp-tab pattern: error propagates, but
+    // the finally block closes the temp tab first.
+    await (async () => {
+      let tmpTabId: number | undefined;
+      try {
+        const r = await mockMgr.newTab(undefined);
+        tmpTabId = r.tabId;
+        throw new Error("download failed");
+      } finally {
+        if (tmpTabId !== undefined) await mockMgr.closeTab(tmpTabId).catch(() => {});
+      }
+    })().catch(() => {});
+
+    expect(closedTabId).toBe(99);
   });
 });

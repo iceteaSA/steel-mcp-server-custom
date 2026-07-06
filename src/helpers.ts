@@ -250,6 +250,29 @@ export function detectFieldKind(
 }
 
 /**
+ * In-page function: takes an array of CSS selectors and returns a map of
+ * selector → { tag, type } or null (element not found). Designed to be
+ * serialized and run via page.evaluate so that kind-detection for an
+ * entire form is a single round-trip instead of N per-field evaluates.
+ */
+export function detectFieldsInPage(
+  selectors: string[],
+): Record<string, { tag: string; type: string } | null> {
+  const out: Record<string, { tag: string; type: string } | null> = {};
+  for (const sel of selectors) {
+    const el = document.querySelector(sel) as HTMLElement | null;
+    if (!el) {
+      out[sel] = null;
+      continue;
+    }
+    const tag = el.tagName;
+    const type = (el as HTMLInputElement).type ?? "";
+    out[sel] = { tag, type };
+  }
+  return out;
+}
+
+/**
  * Checkbox truthy/falsy token sets. fill_form accepts a string `value` for
  * every field; for checkboxes the value has two possible meanings:
  *
