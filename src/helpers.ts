@@ -536,32 +536,37 @@ export function deriveDownloadFilename(url: string): string {
 // -----------------------------------------------------------------------------
 
 /**
- * Self-contained content-area extraction function designed to be passed to
- * page.evaluate() (Playwright serializes it to the browser) AND run under
- * linkedom in tests. Contains all dependencies inline — no module closure.
+ * The shared block-tag-aware content walker. Returns the plain-text content
+ * of `root` plus the list of anchor links found (when `includeLinks` is set).
  *
- * Two modes:
- *   mode="walk" (default) — walk-based extraction with block-tag awareness.
- *     When includeLinks is true, anchor text gets [href] appended and links
- *     are collected separately. Anchor text uses textContent?.trim() (preserves
- *     internal whitespace like "A\n B") matching the original get_page_text
- *     includeLinks behavior.
- *   mode="innerText" — uses HTMLElement.innerText (simpler, matches the
- *     go_to_url readPage / scroll readAfterScroll / fetch_urls fallback path).
+ * Two output behaviors are exposed via options so the same walker serves
+ * both extractPageContent (single-root, returns text with `[href]` markers
+ * inline) and get_page_text matchAll (multi-root, returns structured
+ * {text, links} where the text is clean — links are surfaced separately):
  *
- * Returns { text, links?, __noMatch? }.
+ *   markHrefsInText (default true)   → append " [href]" to anchor text.
+ *   markHrefsInText (false)          → return anchor text without markers.
+ *
+ *   collapseWhitespaceInAnchors      → matchAll's behavior; collapses
+ *                                       internal whitespace (incl. newlines)
+ *                                       inside anchor text.
+ *   (default false)                  → preserve internal newlines inside
+ *                                       anchor text (extractPageContent
+ *                                       walk-mode behavior).
+ *
+ * Self-contained: references only browser globals (Element, Set, Array). Safe
+ * to serialize via Function.prototype.toString() and re-evaluate in any
+ * context — this is how matchAll's page.evaluate callback avoids leaking
+ * module-scope references into the browser.
  */
-export function extractPageContent(
+export function walkContentBlock(
+  root: Element,
   opts: {
-    selector?: string | null;
     includeLinks?: boolean;
-    mode?: "walk" | "innerText";
-  },
-  doc?: Document,
-): { text: string; links?: Array<{ text: string; href: string }>; __noMatch?: boolean } {
-  // Self-contained: all constants inlined so the function works when
-  // serialized to the browser via page.evaluate().
-  const CONTENT_AREA_SELECTORS = ["main", "article", '[role="main"]', "body"] as const;
+    markHrefsInText?: boolean;
+    collapseWhitespaceInAnchors?: boolean;
+  } = {},
+): { text: string; rawLinks: Array<{ text: string; href: string }> } {
   const BLOCK_TAGS = new Set([
     "P",
     "DIV",
@@ -588,52 +593,19 @@ export function extractPageContent(
     "DT",
     "DD",
   ]);
-
-  const d = doc || document;
-  const sel = opts.selector ?? null;
   const includeLinks = opts.includeLinks ?? false;
-  const mode = opts.mode ?? "walk";
-
-  // Find content root
-  let root: Element | null = null;
-  if (sel) {
-    root = d.querySelector(sel);
-  } else {
-    for (const s of CONTENT_AREA_SELECTORS) {
-      if (s === "body") {
-        root = d.body;
-        break;
-      }
-      const el = d.querySelector(s);
-      if (el && (el.textContent?.trim().length ?? 0) > 100) {
-        root = el;
-        break;
-      }
-    }
-    if (!root) root = d.body;
-  }
-  if (!root) return sel ? { text: "", __noMatch: true } : { text: "" };
-
-  if (mode === "innerText") {
-    const text = ((root as HTMLElement)?.innerText ?? "")
-      .replace(/[^\S\n]+/g, " ")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
-    return { text };
-  }
-
-  // Walk-based extraction — matches original get_page_text includeLinks behavior.
-  // Anchor text uses textContent?.trim() (preserves internal whitespace like
-  // "A\n B" — the outer normalizer only collapses non-newline whitespace).
+  const markHrefs = opts.markHrefsInText ?? true;
+  const collapseWs = opts.collapseWhitespaceInAnchors ?? false;
   const rawLinks: Array<{ text: string; href: string }> = [];
 
   const walk = (node: Element): string => {
     if (node.tagName === "BR") return "\n";
     if (node.tagName === "A") {
       const href = (node as HTMLAnchorElement).href;
-      const txt = (node.textContent ?? "").trim();
+      const txtRaw = node.textContent ?? "";
+      const txt = collapseWs ? txtRaw.replace(/\s+/g, " ").trim() : txtRaw.trim();
       if (includeLinks && href) rawLinks.push({ text: txt, href });
-      return includeLinks ? `${txt} [${href}]` : txt;
+      return markHrefs && includeLinks && href ? `${txt} [${href}]` : txt;
     }
     const inner = Array.from(node.childNodes)
       .map((n) => (n.nodeType === 3 ? (n.textContent ?? "") : walk(n as Element)))
@@ -646,11 +618,121 @@ export function extractPageContent(
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 
-  if (includeLinks) {
-    return { text, links: rawLinks };
-  }
-  return { text };
+  return { text, rawLinks };
 }
+
+// Captured at module load. Callers passing functions to page.evaluate can
+// inline this source string so the browser-side execution has no module
+// references to resolve.
+export const WALK_CONTENT_BLOCK_SRC = walkContentBlock.toString();
+
+// Source for the content-root selector + HTML stripper used by extract_ai's
+// HTML format and any other caller that wants cleaned outerHTML of the
+// page's content area. Same module-load-time capture trick as the walker.
+const FIND_CONTENT_ROOT_AND_STRIP_HTML_BODY = `
+function findContentRootAndStripHtml(sel) {
+  const CONTENT_AREA_SELECTORS = ["main", "article", '[role="main"]', "body"];
+  const d = document;
+  let root = null;
+  if (sel) {
+    root = d.querySelector(sel);
+  } else {
+    for (let i = 0; i < CONTENT_AREA_SELECTORS.length; i++) {
+      const s = CONTENT_AREA_SELECTORS[i];
+      if (s === "body") { root = d.body; break; }
+      const el = d.querySelector(s);
+      if (el && ((el.textContent || "").trim().length) > 100) { root = el; break; }
+    }
+    if (!root) root = d.body;
+  }
+  if (!root) return "";
+  let html = root.outerHTML;
+  html = html.replace(/<script\\b[^<]*(?:(?!<\\/script>)<[^<]*)*<\\/script>/gi, " ");
+  html = html.replace(/<style\\b[^<]*(?:(?!<\\/style>)<[^<]*)*<\\/style>/gi, " ");
+  html = html.replace(/<svg\\b[^<]*(?:(?!<\\/svg>)<[^<]*)*<\\/svg>/gi, " ");
+  html = html.replace(/<!--[\\s\\S]*?-->/g, " ");
+  return html.replace(/\\s+/g, " ").trim();
+}
+return findContentRootAndStripHtml;
+`;
+
+export const FIND_CONTENT_ROOT_AND_STRIP_HTML_SRC = new Function(
+  FIND_CONTENT_ROOT_AND_STRIP_HTML_BODY,
+)() as (sel: string | null) => string;
+
+/**
+ * Self-contained content-area extraction function. Designed to be passed
+ * to page.evaluate() (Playwright serializes it to the browser) AND run
+ * under linkedom in tests.
+ *
+ * Two modes:
+ *   mode="walk" (default) — walk-based extraction with block-tag awareness.
+ *     When includeLinks is true, anchor text gets [href] appended and links
+ *     are collected separately. Anchor text uses textContent?.trim() (preserves
+ *     internal whitespace like "A\n B") matching the original get_page_text
+ *     includeLinks behavior.
+ *   mode="innerText" — uses HTMLElement.innerText (simpler, matches the
+ *     go_to_url readPage / scroll readAfterScroll / fetch_urls fallback path).
+ *
+ * Returns { text, links?, __noMatch? }.
+ *
+ * The walker body is inlined from walkContentBlock at module load time
+ * (via WALK_CONTENT_BLOCK_SRC) so this function stays self-contained for
+ * browser serialization — no module-scope references leak across the
+ * page.evaluate boundary.
+ */
+export const extractPageContent = new Function(
+  `
+${WALK_CONTENT_BLOCK_SRC}
+
+return function extractPageContent(opts, doc) {
+  const CONTENT_AREA_SELECTORS = ["main", "article", '[role="main"]', "body"];
+  const d = doc || document;
+  const sel = (opts && opts.selector) != null ? opts.selector : null;
+  const includeLinks = !!(opts && opts.includeLinks);
+  const mode = (opts && opts.mode) || "walk";
+
+  // Find content root
+  let root = null;
+  if (sel) {
+    root = d.querySelector(sel);
+  } else {
+    for (let i = 0; i < CONTENT_AREA_SELECTORS.length; i++) {
+      const s = CONTENT_AREA_SELECTORS[i];
+      if (s === "body") { root = d.body; break; }
+      const el = d.querySelector(s);
+      if (el && ((el.textContent || "").trim().length) > 100) { root = el; break; }
+    }
+    if (!root) root = d.body;
+  }
+  if (!root) return sel ? { text: "", __noMatch: true } : { text: "" };
+
+  if (mode === "innerText") {
+    const text = ((root && root.innerText) || "")
+      .replace(/[^\\S\\n]+/g, " ")
+      .replace(/\\n{3,}/g, "\\n\\n")
+      .trim();
+    return { text: text };
+  }
+
+  const result = walkContentBlock(root, { includeLinks: includeLinks });
+  return includeLinks
+    ? { text: result.text, links: result.rawLinks }
+    : { text: result.text };
+};
+`,
+)() as (
+  opts: {
+    selector?: string | null;
+    includeLinks?: boolean;
+    mode?: "walk" | "innerText";
+  },
+  doc?: Document,
+) => {
+  text: string;
+  links?: Array<{ text: string; href: string }>;
+  __noMatch?: boolean;
+};
 
 /**
  * Validate that each cookie in a set has either `url` or (`domain` AND `path`).

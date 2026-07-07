@@ -7,6 +7,7 @@ import {
   actionFeedback as defaultActionFeedback,
   writeToFile as defaultWriteToFile,
 } from "../utils.js";
+import { FIND_CONTENT_ROOT_AND_STRIP_HTML_SRC } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
 import {
   execClick as defaultExecClick,
@@ -366,30 +367,12 @@ export async function runExtractAi(
     });
     content = result.text ?? "";
   } else {
-    content = await page.evaluate(() => {
-      const CONTENT_AREA_SELECTORS = ["main", "article", '[role="main"]', "body"] as const;
-      const d = document;
-      let root: Element | null = null;
-      for (const s of CONTENT_AREA_SELECTORS) {
-        if (s === "body") {
-          root = d.body;
-          break;
-        }
-        const el = d.querySelector(s);
-        if (el && (el.textContent?.trim().length ?? 0) > 100) {
-          root = el;
-          break;
-        }
-      }
-      if (!root) root = d.body;
-      if (!root) return "";
-      let html = root.outerHTML;
-      html = html.replace(/<script\b[^<]*(?:(?!<\/script>)<[^<]*)*<\/script>/gi, " ");
-      html = html.replace(/<style\b[^<]*(?:(?!<\/style>)<[^<]*)*<\/style>/gi, " ");
-      html = html.replace(/<svg\b[^<]*(?:(?!<\/svg>)<[^<]*)*<\/svg>/gi, " ");
-      html = html.replace(/<!--[\s\S]*?-->/g, " ");
-      return html.replace(/\s+/g, " ").trim();
-    });
+    content = await page.evaluate(
+      new Function("sel", `return (${FIND_CONTENT_ROOT_AND_STRIP_HTML_SRC})(sel)`) as (
+        sel: string | null,
+      ) => string,
+      null,
+    );
   }
 
   const maxContent = 20_000;

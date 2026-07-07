@@ -15,6 +15,7 @@ import {
   isSpaShell,
   pickPrimaryLink,
   validateExpression,
+  WALK_CONTENT_BLOCK_SRC,
   type Link,
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
@@ -34,6 +35,48 @@ const turndown = new TurndownService({
   codeBlockStyle: "fenced",
   bulletListMarker: "-",
 });
+
+/**
+ * Build one record from a single root element + a field map.
+ *
+ * Field-map spec grammar:
+ *   "selector"               → root.querySelector(selector).textContent.trim()
+ *   "selector@attr"          → root.querySelector(selector).getAttribute(attr)
+ *   "."                      → root.textContent.trim() (root element's own text)
+ *
+ * Browser-serializable: passed to ctx.evaluate (multi-root path) and
+ * ctx.locator(sel).evaluate (ref path). Pure: same input → same output,
+ * no module-scope references.
+ */
+function extractRecord(
+  root: Element,
+  opts: { fieldMap: Record<string, string> },
+): Record<string, string | null> {
+  const record: Record<string, string | null> = {};
+  for (const [name, spec] of Object.entries(opts.fieldMap)) {
+    const atIdx = spec.lastIndexOf("@");
+    let subSel: string;
+    let attr: string | null = null;
+    if (atIdx > 0) {
+      subSel = spec.slice(0, atIdx);
+      attr = spec.slice(atIdx + 1);
+    } else if (spec === ".") {
+      record[name] = root.textContent?.trim() ?? null;
+      continue;
+    } else {
+      subSel = spec;
+    }
+    const el = root.querySelector(subSel);
+    if (!el) {
+      record[name] = null;
+    } else if (attr) {
+      record[name] = el.getAttribute(attr);
+    } else {
+      record[name] = el.textContent?.trim() ?? null;
+    }
+  }
+  return record;
+}
 
 /**
  * Pure extraction pipeline shared by the HTTP fast-path and the browser
@@ -122,6 +165,150 @@ export async function fetchHttp(
   const tag = `[http${status === 200 ? "" : ` ${status}`}]`;
   const contentText = `${tag} ${title || url}\nURL: ${url}\n\n${outText}`;
   return { url, title: title || url, text: contentText, path: "http", escalated, status };
+}
+
+// Dependency-injection seam for the fetch_urls handler. Tests inject fakes
+// through these fields instead of mutating the global module registry via
+// bun's mock.module() — which leaks into other test files that share a
+// process. See src/__tests__/fetch_urls.test.ts for usage.
+export interface RunFetchUrlsDeps {
+  fetchHttp?: typeof fetchHttp;
+}
+
+export async function runFetchUrls(
+  args: {
+    urls: string[];
+    extractContent?: boolean;
+    maxCharsPerPage?: number;
+    mode?: "auto" | "browser" | "http";
+  },
+  mgr: BrowserManager,
+  env: Env,
+  deps: RunFetchUrlsDeps = {},
+): Promise<{
+  content: Array<{ type: "text"; text: string }>;
+  structuredContent: { results: FetchResult[] };
+}> {
+  const { urls, extractContent = true, maxCharsPerPage = 3000, mode = "auto" } = args;
+  const fetchHttpFn = deps.fetchHttp ?? fetchHttp;
+  const results: string[] = [];
+  const structured: FetchResult[] = [];
+
+  // Browser path: original behavior — open a real background tab.
+  const fetchBrowser = async (url: string): Promise<FetchResult> => {
+    return withBackgroundTab(mgr, async (page) => {
+      await page.goto(url, { waitUntil: "domcontentloaded" });
+      await globalWait(env);
+
+      const pageTitle = await page.title().catch(() => "");
+      const errorStatus = detectErrorPage(pageTitle);
+      if (errorStatus) {
+        const msg = `[browser] ${url}\n[HTTP ${errorStatus} — ${pageTitle}]`;
+        return { url, title: pageTitle, text: msg, path: "browser" as const };
+      }
+
+      const html = await page.content();
+      const { text, title } = extractFromHtml(html, pageTitle, extractContent);
+
+      if (maxCharsPerPage > 0 && text.length > maxCharsPerPage) {
+        const truncated =
+          text.slice(0, maxCharsPerPage) + `\n[TRUNCATED — ${text.length.toLocaleString()} total]`;
+        return {
+          url,
+          title: title || pageTitle || url,
+          text: `[browser] ${title || pageTitle || url}\nURL: ${url}\n\n${truncated}`,
+          path: "browser" as const,
+        };
+      }
+      return {
+        url,
+        title: title || pageTitle || url,
+        text: `[browser] ${title || pageTitle || url}\nURL: ${url}\n\n${text}`,
+        path: "browser" as const,
+      };
+    });
+  };
+
+  const fetchOne = async (url: string): Promise<FetchResult> => {
+    if (mode === "browser") return fetchBrowser(url);
+    if (mode === "http") {
+      try {
+        return await fetchHttpFn(url, { extractContent, maxCharsPerPage });
+      } catch (err) {
+        const error = err as Error;
+        const msg = `[http] ${url}\n[ERROR: ${cleanErrorMessage(error)}]`;
+        return { url, title: url, text: msg, path: "http", escalated: false };
+      }
+    }
+    // mode === "auto": try HTTP, escalate on shell/challenge.
+    let httpResult: FetchResult;
+    try {
+      httpResult = await fetchHttpFn(url, { extractContent, maxCharsPerPage });
+    } catch (err) {
+      // HTTP path failed entirely — fall back to browser.
+      try {
+        const br = await fetchBrowser(url);
+        // Browser path was used (even though HTTP fell through) — note
+        // this in structuredContent but label the user-visible prefix
+        // [browser] since the browser path actually served the page.
+        const note = `[browser] HTTP fast-path failed; browser served this URL (${cleanErrorMessage(err as Error)})`;
+        return {
+          ...br,
+          text: `${note}\n\n${br.text}`,
+          escalated: true,
+        };
+      } catch (err2) {
+        const err2Msg = `[browser] ${url}\n[ERROR: ${cleanErrorMessage(err2 as Error)}]`;
+        return { url, title: url, text: err2Msg, path: "browser", escalated: false };
+      }
+    }
+    if (httpResult.escalated) {
+      try {
+        const br = await fetchBrowser(url);
+        // Spec: prefix is `[browser]` when browser actually served the
+        // URL (even if auto escalated). escalated:true so structured
+        // consumers know auto chose to switch paths.
+        return { ...br, escalated: true };
+      } catch (escalationErr) {
+        // Browser escalation failed — keep whatever the http path gave us
+        // so the caller at least sees the raw HTML/text shell response.
+        // Surface the underlying error in the structured response for debugging.
+        const fallbackText = `${httpResult.text}\n\n[escalation failed: ${cleanErrorMessage(escalationErr as Error)}]`;
+        return { ...httpResult, text: fallbackText, escalated: false };
+      }
+    }
+    return httpResult;
+  };
+
+  const settled = await Promise.allSettled(urls.map(fetchOne));
+  for (let i = 0; i < settled.length; i++) {
+    const r = settled[i];
+    if (r.status === "fulfilled") {
+      results.push(r.value.text);
+      structured.push({
+        url: r.value.url,
+        title: r.value.title,
+        text: r.value.text,
+        path: r.value.path,
+        escalated: r.value.escalated ?? false,
+      });
+    } else {
+      const errText = `## ${urls[i]}\n[ERROR: ${cleanErrorMessage(r.reason)}]`;
+      results.push(errText);
+      structured.push({
+        url: urls[i],
+        title: urls[i],
+        text: errText,
+        path: "browser" as const,
+        escalated: false,
+      });
+    }
+  }
+
+  return {
+    content: [{ type: "text" as const, text: results.join("\n\n---\n\n") }],
+    structuredContent: { results: structured },
+  };
 }
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
@@ -284,58 +471,37 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
         // --- matchAll: per-element structured output -----------------------
         if (matchAll) {
           const rawEntries = await ctx.evaluate(
-            ({ sel, withLinks }: { sel: string | null; withLinks: boolean }) => {
+            ({
+              sel,
+              withLinks,
+              walkerSrc,
+            }: {
+              sel: string | null;
+              withLinks: boolean;
+              walkerSrc: string;
+            }) => {
+              // Rebuild the shared walkContentBlock in the browser context so
+              // we don't leak module references across the page.evaluate
+              // boundary. See helpers.ts WALK_CONTENT_BLOCK_SRC.
+              const walker = new Function("return (" + walkerSrc + ")")();
               const roots = sel ? Array.from(document.querySelectorAll(sel)) : [document.body];
-              const collect = (root: Element) => {
-                const rawLinks: Array<{ text: string; href: string }> = [];
-                const blockTags = new Set([
-                  "P",
-                  "DIV",
-                  "LI",
-                  "H1",
-                  "H2",
-                  "H3",
-                  "H4",
-                  "H5",
-                  "H6",
-                  "TR",
-                  "BLOCKQUOTE",
-                  "PRE",
-                  "SECTION",
-                  "ARTICLE",
-                  "HEADER",
-                  "FOOTER",
-                  "NAV",
-                  "ASIDE",
-                  "MAIN",
-                  "DETAILS",
-                  "SUMMARY",
-                  "FIGCAPTION",
-                  "DT",
-                  "DD",
-                ]);
-                const walk = (node: Element): string => {
-                  if (node.tagName === "BR") return "\n";
-                  if (node.tagName === "A") {
-                    const href = (node as HTMLAnchorElement).href;
-                    const txt = (node.textContent ?? "").replace(/\s+/g, " ").trim();
-                    if (withLinks && href) rawLinks.push({ text: txt, href });
-                    return txt;
-                  }
-                  const inner = Array.from(node.childNodes)
-                    .map((n) => (n.nodeType === 3 ? (n.textContent ?? "") : walk(n as Element)))
-                    .join("");
-                  return blockTags.has(node.tagName) ? "\n" + inner + "\n" : inner;
-                };
-                const text = walk(root)
-                  .replace(/[^\S\n]+/g, " ")
-                  .replace(/\n{3,}/g, "\n\n")
-                  .trim();
-                return { text, rawLinks };
-              };
-              return roots.map(collect);
+              return roots.map((root: Element) =>
+                walker(root, {
+                  includeLinks: withLinks,
+                  // matchAll returns structured {text, links} — anchor URLs
+                  // are surfaced via rawLinks, not as inline markers in text.
+                  markHrefsInText: false,
+                  // matchAll's pre-shared-walker behavior: aggressive
+                  // whitespace collapse inside anchor text (incl. newlines).
+                  collapseWhitespaceInAnchors: true,
+                }),
+              );
             },
-            { sel: selector ?? null, withLinks: includeLinks },
+            {
+              sel: selector ?? null,
+              withLinks: includeLinks,
+              walkerSrc: WALK_CONTENT_BLOCK_SRC,
+            },
           );
 
           type MatchEntry = {
@@ -511,126 +677,7 @@ CONTEXT BUDGET — output capped at maxCharsPerPage per URL (default 3K per URL)
     },
     handler: async ({ urls, extractContent = true, maxCharsPerPage = 3000, mode = "auto" }) => {
       try {
-        const results: string[] = [];
-        const structured: FetchResult[] = [];
-
-        // Browser path: original behavior — open a real background tab.
-        const fetchBrowser = async (url: string): Promise<FetchResult> => {
-          return withBackgroundTab(mgr, async (page) => {
-            await page.goto(url, { waitUntil: "domcontentloaded" });
-            await globalWait(env);
-
-            const pageTitle = await page.title().catch(() => "");
-            const errorStatus = detectErrorPage(pageTitle);
-            if (errorStatus) {
-              const msg = `[browser] ${url}\n[HTTP ${errorStatus} — ${pageTitle}]`;
-              return { url, title: pageTitle, text: msg, path: "browser" as const };
-            }
-
-            const html = await page.content();
-            const { text, title } = extractFromHtml(html, pageTitle, extractContent);
-
-            if (maxCharsPerPage > 0 && text.length > maxCharsPerPage) {
-              const truncated =
-                text.slice(0, maxCharsPerPage) +
-                `\n[TRUNCATED — ${text.length.toLocaleString()} total]`;
-              return {
-                url,
-                title: title || pageTitle || url,
-                text: `[browser] ${title || pageTitle || url}\nURL: ${url}\n\n${truncated}`,
-                path: "browser" as const,
-              };
-            }
-            return {
-              url,
-              title: title || pageTitle || url,
-              text: `[browser] ${title || pageTitle || url}\nURL: ${url}\n\n${text}`,
-              path: "browser" as const,
-            };
-          });
-        };
-
-        const fetchOne = async (url: string): Promise<FetchResult> => {
-          if (mode === "browser") return fetchBrowser(url);
-          if (mode === "http") {
-            try {
-              return await fetchHttp(url, { extractContent, maxCharsPerPage });
-            } catch (err) {
-              const error = err as Error;
-              const msg = `[http] ${url}\n[ERROR: ${cleanErrorMessage(error)}]`;
-              return { url, title: url, text: msg, path: "http", escalated: false };
-            }
-          }
-          // mode === "auto": try HTTP, escalate on shell/challenge.
-          let httpResult: FetchResult;
-          try {
-            httpResult = await fetchHttp(url, { extractContent, maxCharsPerPage });
-          } catch (err) {
-            // HTTP path failed entirely — fall back to browser.
-            try {
-              const br = await fetchBrowser(url);
-              // Browser path was used (even though HTTP fell through) — note
-              // this in structuredContent but label the user-visible prefix
-              // [browser] since the browser path actually served the page.
-              const note = `[browser] HTTP fast-path failed; browser served this URL (${cleanErrorMessage(err as Error)})`;
-              return {
-                ...br,
-                text: `${note}\n\n${br.text}`,
-                escalated: true,
-              };
-            } catch (err2) {
-              const err2Msg = `[browser] ${url}\n[ERROR: ${cleanErrorMessage(err2 as Error)}]`;
-              return { url, title: url, text: err2Msg, path: "browser", escalated: false };
-            }
-          }
-          if (httpResult.escalated) {
-            try {
-              const br = await fetchBrowser(url);
-              // Spec: prefix is `[browser]` when browser actually served the
-              // URL (even if auto escalated). escalated:true so structured
-              // consumers know auto chose to switch paths.
-              return { ...br, escalated: true };
-            } catch (escalationErr) {
-              // Browser escalation failed — keep whatever the http path gave us
-              // so the caller at least sees the raw HTML/text shell response.
-              // Surface the underlying error in the structured response for debugging.
-              const fallbackText = `${httpResult.text}\n\n[escalation failed: ${cleanErrorMessage(escalationErr as Error)}]`;
-              return { ...httpResult, text: fallbackText, escalated: false };
-            }
-          }
-          return httpResult;
-        };
-
-        const settled = await Promise.allSettled(urls.map(fetchOne));
-        for (let i = 0; i < settled.length; i++) {
-          const r = settled[i];
-          if (r.status === "fulfilled") {
-            results.push(r.value.text);
-            structured.push({
-              url: r.value.url,
-              title: r.value.title,
-              text: r.value.text,
-              path: r.value.path,
-              escalated: r.value.escalated ?? false,
-            });
-          } else {
-            const errText = `## ${urls[i]}\n[ERROR: ${cleanErrorMessage(r.reason)}]`;
-            results.push(errText);
-            structured.push({
-              url: urls[i],
-              title: urls[i],
-              text: errText,
-              path: "browser" as const,
-              escalated: false,
-            });
-          }
-        }
-
-        const out = {
-          content: [{ type: "text" as const, text: results.join("\n\n---\n\n") }],
-          structuredContent: { results: structured },
-        };
-        return out;
+        return await runFetchUrls({ urls, extractContent, maxCharsPerPage, mode }, mgr, env);
       } catch (err) {
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(err) }] };
       }
@@ -1105,66 +1152,15 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
         if (isRef) {
           // Ref addresses exactly one element.  locator.evaluate() auto-waits
           // and throws on timeout (stale ref) — never silently return [].
-          const record = await ctx.locator(sel).evaluate(
-            (root, { fieldMap }) => {
-              const rec: Record<string, string | null> = {};
-              for (const [name, spec] of Object.entries(fieldMap)) {
-                const atIdx = spec.lastIndexOf("@");
-                let subSel: string;
-                let attr: string | null = null;
-                if (atIdx > 0) {
-                  subSel = spec.slice(0, atIdx);
-                  attr = spec.slice(atIdx + 1);
-                } else if (spec === ".") {
-                  rec[name] = root.textContent?.trim() ?? null;
-                  continue;
-                } else {
-                  subSel = spec;
-                }
-                const el = root.querySelector(subSel);
-                if (!el) {
-                  rec[name] = null;
-                } else if (attr) {
-                  rec[name] = el.getAttribute(attr);
-                } else {
-                  rec[name] = el.textContent?.trim() ?? null;
-                }
-              }
-              return rec;
-            },
-            { fieldMap: fields as Record<string, string> },
-          );
+          const record = await ctx.locator(sel).evaluate(extractRecord, {
+            fieldMap: fields as Record<string, string>,
+          });
           results = [record];
         } else {
           results = await ctx.evaluate(
             (args) => {
               const roots = Array.from(document.querySelectorAll(args.sel)).slice(0, args.maxItems);
-              return roots.map((root) => {
-                const record: Record<string, string | null> = {};
-                for (const [name, spec] of Object.entries(args.fieldMap)) {
-                  const atIdx = spec.lastIndexOf("@");
-                  let subSel: string;
-                  let attr: string | null = null;
-                  if (atIdx > 0) {
-                    subSel = spec.slice(0, atIdx);
-                    attr = spec.slice(atIdx + 1);
-                  } else if (spec === ".") {
-                    record[name] = root.textContent?.trim() ?? null;
-                    continue;
-                  } else {
-                    subSel = spec;
-                  }
-                  const el = root.querySelector(subSel);
-                  if (!el) {
-                    record[name] = null;
-                  } else if (attr) {
-                    record[name] = el.getAttribute(attr);
-                  } else {
-                    record[name] = el.textContent?.trim() ?? null;
-                  }
-                }
-                return record;
-              });
+              return roots.map((root) => extractRecord(root, { fieldMap: args.fieldMap }));
             },
             { sel, fieldMap: fields as Record<string, string>, maxItems: limit },
           );

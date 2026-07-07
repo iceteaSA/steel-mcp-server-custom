@@ -4,6 +4,7 @@ import { globalWait } from "../utils.js";
 import { loadCredentials, saveCredentials, type Credential } from "../credentials-store.js";
 import { cleanErrorMessage } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
+import { tabTargetForce } from "./shared.js";
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // credentials ---------------------------------------------------------------
@@ -159,7 +160,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         .describe(
           "CSS selector for the submit/login button. If provided, clicks it after filling.",
         ),
-      tabId: z.number().int().min(1).optional().describe("Optional tab ID for the page to fill."),
+      ...tabTargetForce,
     },
     annotations: {
       readOnlyHint: false,
@@ -167,7 +168,15 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
       idempotentHint: false,
       openWorldHint: true,
     },
-    handler: async ({ name, usernameSelector, passwordSelector, submitSelector, tabId }) => {
+    handler: async ({
+      name,
+      usernameSelector,
+      passwordSelector,
+      submitSelector,
+      tabId,
+      owner,
+      force,
+    }) => {
       try {
         const creds = await loadCredentials(env);
         const cred = creds.find((c) => c.name === name);
@@ -203,7 +212,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         }
 
         // Fill the form — uses the real (unmasked) values internally.
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner, force });
         const filled: string[] = [];
 
         if (usernameSelector) {

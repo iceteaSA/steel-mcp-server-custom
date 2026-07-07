@@ -217,7 +217,7 @@ describe("diffSnapshots", () => {
     expect(diffSnapshots("", "")).toBe("(no visible change)");
   });
 
-  // B1 regression: middle insertion must show + lines
+  // Regression: middle insertion must show + lines
   it("shows '+' for a line inserted between two unchanged lines", () => {
     const prev = `- heading "Title" [ref=e1]
 - link "B" [ref=e3]`;
@@ -231,7 +231,7 @@ describe("diffSnapshots", () => {
     expect(result).toContain('"A"');
   });
 
-  // B1 regression: middle deletion must show - lines
+  // Regression: middle deletion must show - lines
   it("shows '-' for a line deleted between two unchanged lines", () => {
     const prev = `- heading "Title" [ref=e1]
 - link "A" [ref=e2]

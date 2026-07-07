@@ -1,5 +1,5 @@
 /**
- * Unit tests for toolset resolution + registrar gating (A9).
+ * Unit tests for toolset resolution + registrar gating.
  *
  * Does NOT require a browser connection — tests the pure logic.
  */

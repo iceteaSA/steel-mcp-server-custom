@@ -1,5 +1,5 @@
 /**
- * Unit tests for per-owner active tab tracking + ownership resolution (B1).
+ * Unit tests for per-owner active tab tracking + ownership resolution.
  *
  * Does NOT require a browser connection — tests the pure bookkeeping logic
  * of resolveTab, touchTab, closeTab cleanup, and ownersWithLiveTabs.

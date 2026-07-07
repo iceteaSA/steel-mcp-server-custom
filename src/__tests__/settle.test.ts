@@ -150,7 +150,7 @@ function ariaPage(snapshot: string) {
 }
 
 describe("actionFeedback", () => {
-  // B1: no-stored returns "" WITHOUT capturing — no spurious store seeding.
+  // no-stored returns "" WITHOUT capturing — no spurious store seeding
   it("returns empty string when no stored snapshot exists (does NOT seed store)", async () => {
     clearAllSnapshots();
     const result = await actionFeedback(ariaPage(SNAP_FIXTURE), 1);
@@ -175,7 +175,7 @@ describe("actionFeedback", () => {
     expect(getStoredSnapshot(1)).toBe(SNAP_CHANGED);
   });
 
-  // B2: navigated stores the FULL tree (untruncated) but displays ≤3K chars.
+  // navigated stores the FULL tree (untruncated) but displays ≤3K chars
   it("navigated stores full tree and displays truncated (no phantom diffs)", async () => {
     clearAllSnapshots();
     // Build a long snapshot (>3K chars for display, <15K for realistic store).

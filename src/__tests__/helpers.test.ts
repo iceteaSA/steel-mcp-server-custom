@@ -861,7 +861,7 @@ describe("detectFieldsInPage", () => {
 });
 
 // ---------------------------------------------------------------------------
-// withBackgroundTab (A4b / A4c — the real helper used by both handlers)
+// withBackgroundTab — temp-tab helper used by download_file and fetch_urls
 // ---------------------------------------------------------------------------
 import { withBackgroundTab } from "../utils.js";
 
@@ -931,7 +931,7 @@ describe("withBackgroundTab", () => {
 });
 
 // ---------------------------------------------------------------------------
-// validateCookies (A6 — cookie set validation)
+// validateCookies — cookie set validation (cookies tool)
 // ---------------------------------------------------------------------------
 describe("validateCookies", () => {
   it("accepts cookies with url", () => {
@@ -978,7 +978,7 @@ describe("validateCookies", () => {
 });
 
 // ---------------------------------------------------------------------------
-// validateExpression (A6 — evaluate syntax precheck)
+// validateExpression — evaluate tool syntax precheck
 // ---------------------------------------------------------------------------
 describe("validateExpression", () => {
   it("accepts valid expressions", () => {

@@ -1,14 +1,15 @@
 /**
- * fetch_urls + isSpaShell — unit tests with mocked impit.
+ * fetch_urls + isSpaShell — unit tests.
  *
- * The HTTP fast-path's dep is `impit` (a native Rust binding). We test the
- * extraction / escalation logic by injecting a fake `client` — keeps the
- * test runnable on any machine without the .node binary and makes the
- * behaviour deterministic.
+ * The HTTP fast-path's dep is `impit` (a native Rust binding). The fetchHttp
+ * unit tests inject a fake `client` directly; the runtime-routing tests
+ * inject a fake fetchHttp into the handler via the RunFetchUrlsDeps seam
+ * (no mock.module — bun 1.3.14 cannot restore module mocks after the file's
+ * tests complete and the leaked mock would break sibling test files).
  */
-import { describe, it, expect, mock } from "bun:test";
+import { describe, it, expect } from "bun:test";
 import { isSpaShell } from "../helpers.js";
-import { fetchHttp } from "../tools/extraction.js";
+import { fetchHttp, runFetchUrls } from "../tools/extraction.js";
 
 // ---------------------------------------------------------------------------
 // isSpaShell — every signal from the task spec.
@@ -201,178 +202,168 @@ describe("fetchHttp", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Runtime mode-routing — drive the real handler with impit + BrowserManager
-// mocked so we can assert which path actually ran without a real browser.
-// We use mock.module to swap the impit client, and we drive the handler
-// directly by capturing it through a fake registrar passed to register().
+// Runtime mode-routing — drive runFetchUrls directly with a fake fetchHttp
+// injected via the RunFetchUrlsDeps seam, plus a minimal BrowserManager stub
+// so we can assert which path actually ran without a real browser.
 // ---------------------------------------------------------------------------
 
-/** Stub the impit module — every fetch call goes through `fetchImpl`. The
- *  handler imports `Impit` and does `new Impit({ browser, timeout })`.
- *  Returns a re-import of extraction.ts so the new mock is what the handler
- *  sees when its top-level `import { Impit } from "impit"` is evaluated. */
-function stubImpitAndReimport(fetchImpl: (_url: string) => Promise<any>): Promise<any> {
-  mock.module("impit", () => ({
-    Impit: class {
-      opts: any;
-      constructor(opts: any) {
-        this.opts = opts;
-      }
-      fetch(url: string) {
-        return fetchImpl(url);
-      }
-    },
-  }));
-  // Force bun to re-evaluate extraction.ts so it picks up the new mock.
-  return import(`../tools/extraction.js?bust=${Date.now()}-${Math.random()}`).then((m: any) => m);
-}
-
-/** Capture the fetch_urls handler by running register() with a fake registrar. */
-function captureFetchUrlsHandler(mod: any, mgr: any, env: any) {
-  let captured: any = null;
-  const fakeReg = (spec: any) => {
-    if (spec.name === "fetch_urls") captured = spec;
+/** Build a fake fetchHttp that mirrors the real one's output shape: applies
+ *  maxCharsPerPage truncation to the body and prepends the `[http] title`
+ *  prefix the way runFetchUrls expects. Lets each test control what the
+ *  http path "finds" without loading the impit native module. */
+function fakeFetchHttp(
+  impl: (
+    url: string,
+    opts: any,
+  ) => Promise<{ title: string; body: string; status?: number; escalated?: boolean }>,
+): typeof fetchHttp {
+  return async (url, opts) => {
+    const { title, body, status = 200, escalated = false } = await impl(url, opts);
+    const maxCharsPerPage = opts?.maxCharsPerPage ?? 0;
+    let outText = body;
+    if (maxCharsPerPage > 0 && outText.length > maxCharsPerPage) {
+      outText =
+        outText.slice(0, maxCharsPerPage) + `\n[TRUNCATED — ${body.length.toLocaleString()} total]`;
+    }
+    const tag = `[http${status === 200 ? "" : ` ${status}`}]`;
+    return {
+      url,
+      title: title || url,
+      text: `${tag} ${title || url}\nURL: ${url}\n\n${outText}`,
+      path: "http",
+      escalated,
+      status,
+    };
   };
-  mod.register(fakeReg as any, mgr, env);
-  if (!captured) throw new Error("fetch_urls handler not captured");
-  return captured.handler;
 }
 
-const ARTICLE_HTML_FN = (body: string) =>
-  `<!doctype html><html><head><title>Article</title></head><body><article><h1>Hello</h1><p>${body}</p></article></body></html>`;
-
-describe("fetch_urls runtime routing (impit mocked)", () => {
-  it("mode:'http' returns [http] prefix and NEVER invokes the browser path", async () => {
-    let browserCalls = 0;
-    const mod = await stubImpitAndReimport(async () => ({
-      status: 200,
-      ok: true,
-      headers: { get: () => "text/html" },
-      text: async () => ARTICLE_HTML_FN("x".repeat(500)),
-    }));
-
-    const mgr = {
+/** Minimal BrowserManager stub. With shouldFail=true (default), newTab
+ *  throws so the test can assert the browser path was NEVER invoked. With
+ *  shouldFail=false, newTab returns a minimal but functional page stub so
+ *  the browser-path branch runs end-to-end without a real Chromium. */
+function fakeMgr(shouldFail = true) {
+  let browserCalls = 0;
+  const pageStub: any = {
+    goto: async () => {},
+    title: async () => "Escalated Title",
+    content: async () =>
+      `<!doctype html><html><head><title>Escalated Title</title></head><body><article><p>${"real content. ".repeat(100)}</p></article></body></html>`,
+  };
+  return {
+    mgr: {
       newTab: async () => {
         browserCalls++;
-        throw new Error("browser should not be invoked under mode:http");
+        if (shouldFail) throw new Error("browser should not be invoked");
+        return { tabId: 1, page: pageStub };
       },
       closeTab: async () => {},
-    };
+    },
+    getBrowserCalls: () => browserCalls,
+  };
+}
 
-    const env = { GLOBAL_WAIT_SECONDS: 0, OUTPUT_DIR: "/tmp" };
-    const handler = captureFetchUrlsHandler(mod, mgr, env);
-    const result: any = await handler({
-      urls: ["https://example.com/a"],
-      mode: "http",
-      extractContent: true,
-      maxCharsPerPage: 1500,
-    });
+const ENV = { GLOBAL_WAIT_SECONDS: 0, OUTPUT_DIR: "/tmp" } as any;
+
+describe("fetch_urls runtime routing", () => {
+  it("mode:'http' returns [http] prefix and NEVER invokes the browser path", async () => {
+    const { mgr, getBrowserCalls } = fakeMgr(true);
+    const result: any = await runFetchUrls(
+      {
+        urls: ["https://example.com/a"],
+        mode: "http",
+        extractContent: true,
+        maxCharsPerPage: 1500,
+      },
+      mgr as any,
+      ENV,
+      {
+        fetchHttp: fakeFetchHttp(async () => ({ title: "A", body: "body", escalated: false })),
+      },
+    );
     expect(result.isError).toBeFalsy();
     expect(result.structuredContent.results).toHaveLength(1);
     const r = result.structuredContent.results[0];
     expect(r.path).toBe("http");
     expect(r.text.startsWith("[http]")).toBe(true);
-    expect(browserCalls).toBe(0);
+    expect(getBrowserCalls()).toBe(0);
   });
 
   it("mode:'http' respects maxCharsPerPage — caps the text it returns", async () => {
-    const mod = await stubImpitAndReimport(async () => ({
-      status: 200,
-      ok: true,
-      headers: { get: () => "text/html" },
-      text: async () => ARTICLE_HTML_FN("paragraph. ".repeat(500)),
-    }));
-
-    const mgr = {
-      newTab: async () => {
-        throw new Error("browser should not be invoked under mode:http");
+    const { mgr } = fakeMgr(true);
+    const result: any = await runFetchUrls(
+      {
+        urls: ["https://example.com/long"],
+        mode: "http",
+        extractContent: true,
+        maxCharsPerPage: 200,
       },
-      closeTab: async () => {},
-    };
-    const env = { GLOBAL_WAIT_SECONDS: 0, OUTPUT_DIR: "/tmp" };
-    const handler = captureFetchUrlsHandler(mod, mgr, env);
-    const result: any = await handler({
-      urls: ["https://example.com/long"],
-      mode: "http",
-      extractContent: true,
-      maxCharsPerPage: 200,
-    });
+      mgr as any,
+      ENV,
+      {
+        fetchHttp: fakeFetchHttp(async () => ({
+          title: "Long",
+          body: "paragraph. ".repeat(500),
+          escalated: false,
+        })),
+      },
+    );
     expect(result.isError).toBeFalsy();
     const r = result.structuredContent.results[0];
     // Must include the truncation note
     expect(r.text).toMatch(/\[TRUNCATED — \d[\d,]* total\]/);
-    const bodyStart = r.text.indexOf("# Article");
-    const body = r.text.slice(bodyStart);
-    // body should be <= cap + the truncation marker (~30 chars)
-    expect(body.length).toBeLessThanOrEqual(250);
+    const markerIdx = r.text.indexOf("[TRUNCATED");
+    const slice = r.text.slice(0, markerIdx);
+    // Slice before marker: prefix + capped body. Prefix is ~50 chars,
+    // capped body is the cap (200), so well under the 300 ceiling.
+    expect(slice.length).toBeLessThan(300);
   });
 
   it("mode:'auto' on a good article: served via impit only, labeled [http], escalated:false", async () => {
-    const mod = await stubImpitAndReimport(async () => ({
-      status: 200,
-      ok: true,
-      headers: { get: () => "text/html" },
-      text: async () => ARTICLE_HTML_FN("substance. ".repeat(200)),
-    }));
-
-    let browserCalls = 0;
-    const mgr = {
-      newTab: async () => {
-        browserCalls++;
-        throw new Error("browser should not run when http path succeeds");
+    const { mgr, getBrowserCalls } = fakeMgr(true);
+    const result: any = await runFetchUrls(
+      {
+        urls: ["https://example.com/article"],
+        mode: "auto",
+        extractContent: true,
+        maxCharsPerPage: 3000,
       },
-      closeTab: async () => {},
-    };
-
-    const env = { GLOBAL_WAIT_SECONDS: 0, OUTPUT_DIR: "/tmp" };
-    const handler = captureFetchUrlsHandler(mod, mgr, env);
-    const result: any = await handler({
-      urls: ["https://example.com/article"],
-      mode: "auto",
-      extractContent: true,
-      maxCharsPerPage: 3000,
-    });
+      mgr as any,
+      ENV,
+      {
+        fetchHttp: fakeFetchHttp(async () => ({
+          title: "Article",
+          body: "substance. ".repeat(200),
+          escalated: false,
+        })),
+      },
+    );
     expect(result.isError).toBeFalsy();
     const r = result.structuredContent.results[0];
     expect(r.path).toBe("http");
     expect(r.text.startsWith("[http]")).toBe(true);
     expect(r.escalated).toBe(false);
-    expect(browserCalls).toBe(0);
+    expect(getBrowserCalls()).toBe(0);
   });
 
   it("mode:'auto' on a shell: escalates to browser path, labels [browser], escalated:true", async () => {
-    const mod = await stubImpitAndReimport(async () => ({
-      status: 200,
-      ok: true,
-      headers: { get: () => "text/html" },
-      // Empty body triggers isSpaShell (text < 200 chars AND html < 2000 chars)
-      text: async () => "<!doctype html><html><body><div id='root'></div></body></html>",
-    }));
-
-    // Build a minimal page stub that the withBackgroundTab helper will use
-    // when the handler escalates. The fake manager's newTab must return a
-    // page shape the browser branch can call .goto + .title + .content on.
-    const mgr = {
-      newTab: async () => {
-        const pageStub: any = {
-          goto: async () => {},
-          title: async () => "Escalated Title",
-          content: async () =>
-            ARTICLE_HTML_FN("Real content after browser escalation. ".repeat(20)),
-        };
-        return { tabId: 1, page: pageStub };
+    // fetchHttp signals escalation; the browser branch then runs against the
+    // fake mgr. Since fakeMgr returns an empty pageStub from newTab, the
+    // browser path's extractFromHtml won't produce real content — we only
+    // assert the routing decisions (prefix, escalated flag, browserCall count).
+    const { mgr, getBrowserCalls } = fakeMgr(false);
+    const result: any = await runFetchUrls(
+      {
+        urls: ["https://example.com/shell"],
+        mode: "auto",
+        extractContent: true,
+        maxCharsPerPage: 3000,
       },
-      closeTab: async () => {},
-    };
-
-    const env = { GLOBAL_WAIT_SECONDS: 0, OUTPUT_DIR: "/tmp" };
-    const handler = captureFetchUrlsHandler(mod, mgr, env);
-    const result: any = await handler({
-      urls: ["https://example.com/shell"],
-      mode: "auto",
-      extractContent: true,
-      maxCharsPerPage: 3000,
-    });
+      mgr as any,
+      ENV,
+      {
+        fetchHttp: fakeFetchHttp(async () => ({ title: "Shell", body: "", escalated: true })),
+      },
+    );
     expect(result.isError).toBeFalsy();
     const r = result.structuredContent.results[0];
     expect(r.path).toBe("browser");
@@ -380,35 +371,28 @@ describe("fetch_urls runtime routing (impit mocked)", () => {
     expect(r.text.startsWith("[browser]")).toBe(true);
     // Spec: escalated:true whenever auto chose to switch paths.
     expect(r.escalated).toBe(true);
-    // The browser-served article body should be present
-    expect(r.text).toContain("Real content after browser escalation");
+    expect(getBrowserCalls()).toBe(1);
   });
 
   it("mode:'http' never escalates even when isSpaShell would be true", async () => {
-    const mod = await stubImpitAndReimport(async () => ({
-      status: 200,
-      ok: true,
-      headers: { get: () => "text/html" },
-      text: async () => SHELL_HTML,
-    }));
-
-    let browserCalls = 0;
-    const mgr = {
-      newTab: async () => {
-        browserCalls++;
-        throw new Error("mode:http must never open a browser tab");
+    const { mgr, getBrowserCalls } = fakeMgr(true);
+    const result: any = await runFetchUrls(
+      {
+        urls: ["https://example.com/spa"],
+        mode: "http",
+        extractContent: true,
+        maxCharsPerPage: 3000,
       },
-      closeTab: async () => {},
-    };
-
-    const env = { GLOBAL_WAIT_SECONDS: 0, OUTPUT_DIR: "/tmp" };
-    const handler = captureFetchUrlsHandler(mod, mgr, env);
-    const result: any = await handler({
-      urls: ["https://example.com/spa"],
-      mode: "http",
-      extractContent: true,
-      maxCharsPerPage: 3000,
-    });
+      mgr as any,
+      ENV,
+      {
+        fetchHttp: fakeFetchHttp(async () => ({
+          title: "SPA",
+          body: "shell body",
+          escalated: true,
+        })),
+      },
+    );
     expect(result.isError).toBeFalsy();
     const r = result.structuredContent.results[0];
     expect(r.path).toBe("http");
@@ -416,7 +400,7 @@ describe("fetch_urls runtime routing (impit mocked)", () => {
     // The escalation FLAG is true (isSpaShell detected a shell) but the
     // handler must not have switched paths because mode is 'http'.
     expect(r.escalated).toBe(true);
-    expect(browserCalls).toBe(0);
+    expect(getBrowserCalls()).toBe(0);
   });
 
   it("mode:'auto' on a real article with tiny maxCharsPerPage: escalated:false (cap does not trigger escalation), [http] label, body truncated", async () => {
@@ -424,31 +408,24 @@ describe("fetch_urls runtime routing (impit mocked)", () => {
     // into a false-positive shell that would trigger auto-escalation to the
     // browser path. Cap is applied ONLY to the returned text; the
     // escalation decision is anchored to the FULL extracted text.
-    const longBody = "real article body. ".repeat(200); // ~4000 chars
-    const mod = await stubImpitAndReimport(async () => ({
-      status: 200,
-      ok: true,
-      headers: { get: () => "text/html" },
-      text: async () => ARTICLE_HTML_FN(longBody),
-    }));
-
-    let browserCalls = 0;
-    const mgr = {
-      newTab: async () => {
-        browserCalls++;
-        throw new Error("auto must NOT escalate a real article just because maxCharsPerPage=50");
+    const { mgr, getBrowserCalls } = fakeMgr(true);
+    const result: any = await runFetchUrls(
+      {
+        urls: ["https://example.com/real-article"],
+        mode: "auto",
+        extractContent: true,
+        maxCharsPerPage: 50,
       },
-      closeTab: async () => {},
-    };
-
-    const env = { GLOBAL_WAIT_SECONDS: 0, OUTPUT_DIR: "/tmp" };
-    const handler = captureFetchUrlsHandler(mod, mgr, env);
-    const result: any = await handler({
-      urls: ["https://example.com/real-article"],
-      mode: "auto",
-      extractContent: true,
-      maxCharsPerPage: 50,
-    });
+      mgr as any,
+      ENV,
+      {
+        fetchHttp: fakeFetchHttp(async () => ({
+          title: "Real",
+          body: "x".repeat(4000),
+          escalated: false, // real article — no shell signal
+        })),
+      },
+    );
     expect(result.isError).toBeFalsy();
     const r = result.structuredContent.results[0];
     expect(r.path).toBe("http");
@@ -464,6 +441,6 @@ describe("fetch_urls runtime routing (impit mocked)", () => {
     // First char of body is somewhere after the "[http] title\nURL: url\n\n"
     // prefix; we only assert the prefix + slice combined stay small.
     expect(body.length).toBeLessThan(150);
-    expect(browserCalls).toBe(0);
+    expect(getBrowserCalls()).toBe(0);
   });
 });

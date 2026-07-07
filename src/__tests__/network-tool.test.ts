@@ -142,7 +142,7 @@ describe("get_network tool", () => {
     expect(denied.content[0].text).toContain("requestId 7 not found in your tabs");
   });
 
-  // SEC3 — single owner-auth chokepoint (tools/network.ts:authorizeBodyFetch).
+  // authorizeBodyFetch — single owner-auth chokepoint for response-body fetches.
   // Every body fetch — requestId OR body:true single-match — must pass through
   // it before mgr.getResponseBody. The rule (intentionally narrow — a bare
   // tabId is NEVER authorization):
@@ -151,8 +151,8 @@ describe("get_network tool", () => {
   //   * caller's owner matches the tab    → readable
   //   * otherwise                          → DENIED
   // Both branches of the get_network handler call this immediately before
-  // getResponseBody — see tools/network.ts:485. There is exactly one call
-  // site for getResponseBody (grep-confirmed).
+  // getResponseBody. There is exactly one call site for getResponseBody
+  // (grep-confirmed).
 
   // ---- requestId branch ----
 

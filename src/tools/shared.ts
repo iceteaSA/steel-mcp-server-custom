@@ -1,5 +1,5 @@
 // -----------------------------------------------------------------------------
-// Tool registration wrapper + toolset gating (MCP best practices A8 + A9).
+// Tool registration wrapper + toolset gating (MCP best practices).
 //
 // Provides a type-safe registrar that wraps server.registerTool() with
 // toolset filtering, annotations, optional outputSchema + structuredContent.
