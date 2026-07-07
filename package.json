@@ -14,7 +14,7 @@
         "dist"
     ],
     "scripts": {
-        "build": "bun build src/index.ts --outdir dist --target=node --format=cjs && mv dist/index.js dist/index.cjs",
+        "build": "bun build src/index.ts --outdir dist --target=node --format=cjs --external patchright --external patchright-core && mv dist/index.js dist/index.cjs",
         "dev": "bun --watch src/index.ts",
         "start": "node dist/index.cjs",
         "lint": "oxlint src/",

@@ -51,31 +51,37 @@ the MCP inspector.
 bun install
 bun run build
 #  → dist/index.cjs + dist/*.linux-x64-{gnu,musl}.node
-#    (self-contained — no node_modules step needed on the LXC)
+#    (patchright is external — must ship node_modules alongside dist/)
 
-# 2. Sync the dist/ folder to the LXC deploy dir (no node_modules needed)
-rsync -av --delete ./dist/ ~/mcp-servers/steel-mcp-server-custom/dist/
+# 2. Sync the dist/ folder to the LXC deploy dir
+rsync -av --delete ./dist/ openclaw:~/mcp-servers/steel-mcp-server-custom/dist/
 
-# 3. Run the artifact on the LXC
+# 3. Ship patchright + patchright-core (the only runtime deps not bundled)
+rsync -av ./node_modules/patchright ./node_modules/patchright-core \
+  openclaw:~/mcp-servers/steel-mcp-server-custom/node_modules/
+
+# 4. Run the artifact on the LXC
 cd ~/mcp-servers/steel-mcp-server-custom
 node dist/index.cjs
 
-# 4. Copy the agent-facing skill
+# 5. Copy the agent-facing skill
 cp skill/SKILL.md ~/.agents/skills/steel-browser/SKILL.md
 ```
 
 The artifact runs under `node` on the LXC — bun is not needed at runtime. The `skill/`
 directory holds the agent-facing usage skill — keep it in sync with tool changes.
 
-**Self-contained build.** `bun build --outdir dist --target=node --format=cjs` (with
-no `--external` flags) bundles every JS module from `src/` + dependencies into
-`dist/index.cjs` and emits the two napi `.node` files (`@napi-rs/image`,
-`impit`) as sidecars next to it. `patchright` is pure JS so its CDP-connect +
-page API code is in the bundle too. The deploy target only needs `node` + the
-files in `dist/` — no `bun install --production`, no `node_modules`, no arch
-mismatch on the install host. Both gnu and musl `.node` variants are shipped
-(35 MB / 59 MB depending on whether you count both); `node` picks the right one
-at load time.
+**Build — patchright is external.** `bun build --outdir dist --target=node --format=cjs
+--external patchright --external patchright-core` bundles all JS deps EXCEPT patchright
+into `dist/index.cjs`. The two napi `.node` files (`@napi-rs/image`, `impit`) are
+emitted as sidecars next to it. **patchright is external because it reads its own
+package.json at runtime via `__dirname` — the bundler would hardcode the build host's
+absolute path, making the artifact unreproducible across machines. `--compile`
+single-binary is also ruled out (patchright's bundled ws hangs on the Steel CDP
+WebSocket under bun compile).** The deploy target needs `node` + `dist/` +
+`node_modules/patchright{,-core}` — no `bun install --production`, no full
+`node_modules`. Both gnu and musl `.node` variants are shipped; `node` picks the
+right one at load time.
 
 ---
 
