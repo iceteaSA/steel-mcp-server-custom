@@ -35,6 +35,38 @@ export type ConsoleMessage = {
 };
 
 // -----------------------------------------------------------------------------
+// Error classes for owner-isolated tab access
+// -----------------------------------------------------------------------------
+
+/**
+ * Thrown when an agent tries to access a tab owned by a different agent
+ * without the `force: true` override.
+ */
+export class TabOwnershipError extends Error {
+  constructor(
+    public readonly tabId: number,
+    public readonly tabOwner: string,
+    public readonly caller: string,
+  ) {
+    super(
+      `Tab ${tabId} belongs to owner "${tabOwner}" — you are "${caller}". ` +
+        `Pass force:true to override, or target your own tab.`,
+    );
+    this.name = "TabOwnershipError";
+  }
+}
+
+/**
+ * Thrown when an owner-based lookup finds no open tab for the given owner.
+ */
+export class NoTabError extends Error {
+  constructor(public readonly owner: string) {
+    super(`No open tab for owner "${owner}" — call new_tab with your owner first.`);
+    this.name = "NoTabError";
+  }
+}
+
+// -----------------------------------------------------------------------------
 // BrowserManager — index.ts lines 59–938
 // -----------------------------------------------------------------------------
 
@@ -64,6 +96,11 @@ export class BrowserManager {
   private nextTabId = 1;
   private currentTabId = 1;
 
+  // Per-owner active tab tracking. Updated whenever a tab is touched
+  // with an explicit owner context (touchTab, newTab with owner).
+  // resolveTab uses this for owner-only lookup (no explicit tabId).
+  private ownerActiveTab = new Map<string, number>();
+
   // Profile management — multiple isolated BrowserContexts within one browser.
   // Each profile has its own cookies/localStorage/cache. Tabs from all profiles
   // share the global tabs map (globally unique tabId), so existing tools work
@@ -83,9 +120,77 @@ export class BrowserManager {
     return this.currentTabId;
   }
 
-  /** Mark a tab as recently used. Called on every page-interacting tool. */
-  touchTab(tabId: number): void {
-    if (this.tabs.has(tabId)) this.tabLastActivity.set(tabId, Date.now());
+  /**
+   * Mark a tab as recently used. Called on every page-interacting tool.
+   * When an owner is given, also updates the per-owner active tab pointer
+   * so that owner-only resolveTab lookups find the right tab.
+   */
+  touchTab(tabId: number, owner?: string): void {
+    if (this.tabs.has(tabId)) {
+      this.tabLastActivity.set(tabId, Date.now());
+      if (owner) this.ownerActiveTab.set(owner, tabId);
+    }
+  }
+
+  /**
+   * Resolve a tab ID from an optional explicit ID, owner context, and
+   * force flag. This is the single ownership guard that all page-accessing
+   * calls should route through.
+   *
+   * Rules (first match wins):
+   * 1. explicit tabId + owner given AND tab has different owner AND !force →
+   *    throw TabOwnershipError
+   * 2. explicit tabId → return it (caller validates existence)
+   * 3. owner given, no tabId → ownerActiveTab lookup; fall back to that
+   *    owner's most-recently-touched surviving tab; none → NoTabError
+   * 4. neither → return currentTabId (global active tab pointer)
+   */
+  resolveTab(opts: { tabId?: number; owner?: string; force?: boolean }): number {
+    // Explicit tabId + optional ownership check
+    if (opts.tabId !== undefined) {
+      if (opts.owner) {
+        const tabOwner = this.tabOwners.get(opts.tabId);
+        if (tabOwner !== undefined && tabOwner !== opts.owner && !opts.force) {
+          throw new TabOwnershipError(opts.tabId, tabOwner, opts.owner);
+        }
+      }
+      return opts.tabId;
+    }
+
+    // Owner-based lookup (no explicit tabId)
+    if (opts.owner) {
+      // 3a. Check cached per-owner active tab — common case
+      const active = this.ownerActiveTab.get(opts.owner);
+      if (active !== undefined) {
+        const page = this.tabs.get(active);
+        if (page && !page.isClosed()) return active;
+        // Stale pointer — page was closed externally. Fall through to scan.
+      }
+
+      // 3b. Fall back to most-recently-touched surviving tab for this owner
+      let bestId: number | undefined;
+      let bestTime = 0;
+      for (const [id, last] of this.tabLastActivity) {
+        if (this.tabOwners.get(id) === opts.owner && last > bestTime) {
+          const page = this.tabs.get(id);
+          if (page && !page.isClosed()) {
+            bestId = id;
+            bestTime = last;
+          }
+        }
+      }
+      if (bestId !== undefined) {
+        // Repair the stale pointer
+        this.ownerActiveTab.set(opts.owner, bestId);
+        return bestId;
+      }
+
+      // 3c. Nothing found
+      throw new NoTabError(opts.owner);
+    }
+
+    // Neither — legacy global active pointer
+    return this.currentTabId;
   }
 
   private allocateTab(page: Page, owner?: string): number {
@@ -99,6 +204,10 @@ export class BrowserManager {
       this.tabs.delete(id);
       this.tabOwners.delete(id);
       this.tabLastActivity.delete(id);
+      // Clean up ownerActiveTab if this was someone's active tab
+      for (const [o, activeId] of this.ownerActiveTab) {
+        if (activeId === id) this.ownerActiveTab.delete(o);
+      }
       const profileName = this.tabToProfile.get(id);
       if (profileName) {
         this.tabToProfile.delete(id);
@@ -360,18 +469,40 @@ export class BrowserManager {
    * Return the Page for `tabId` (if given) or the current active tab.
    * Auto-recovers from transient "browser has been closed" errors with one
    * soft-reset + retry. Use tabId for concurrent agent workflows where
-   * different agents hold different tabs. Touches the tab's lastActivity
-   * timestamp so the idle sweeper leaves active tabs alone.
+   * different agents hold different tabs.
+   *
+   * Overload 1: legacy — `getPage(tabId?)` for backward compatibility.
+   * Overload 2: owner-aware — `getPage({ tabId?, owner?, force? })` routes
+   *             through resolveTab to enforce per-agent tab isolation.
    */
-  async getPage(tabId?: number): Promise<Page> {
+  async getPage(tabId?: number): Promise<Page>;
+  async getPage(opts: { tabId?: number; owner?: string; force?: boolean }): Promise<Page>;
+  async getPage(arg?: number | { tabId?: number; owner?: string; force?: boolean }): Promise<Page> {
     await this.initialize();
-    if (tabId !== undefined) {
-      const page = this.tabs.get(tabId);
-      if (!page) throw new Error(`Tab ${tabId} does not exist.`);
-      if (page.isClosed()) throw new Error(`Tab ${tabId} is closed.`);
-      this.touchTab(tabId);
+
+    let tabId: number | undefined;
+    let owner: string | undefined;
+    let force = false;
+
+    if (typeof arg === "number") {
+      tabId = arg;
+    } else if (arg) {
+      tabId = arg.tabId;
+      owner = arg.owner;
+      force = arg.force ?? false;
+    }
+
+    // Owner-aware path: resolveTab handles ownership validation + lookup
+    if (tabId !== undefined || owner) {
+      const resolved = this.resolveTab({ tabId, owner, force });
+      const page = this.tabs.get(resolved);
+      if (!page) throw new Error(`Tab ${resolved} does not exist.`);
+      if (page.isClosed()) throw new Error(`Tab ${resolved} is closed.`);
+      this.touchTab(resolved, owner);
       return page;
     }
+
+    // Legacy path: getPage() with no args at all
     const page = this.currentPage;
     if (page && !page.isClosed()) {
       this.touchTab(this.currentTabId);
@@ -445,7 +576,11 @@ export class BrowserManager {
     // Profile tabs get JS-level stealth via addInitScript (set on context creation).
     // HTTP UA in profiles shows HeadlessChrome — acceptable, see createProfile comment.
     const tabId = this.allocateTab(page, owner);
-    if (activate) this.currentTabId = tabId;
+    if (activate) {
+      this.currentTabId = tabId;
+      // Track per-owner active tab so owner-only resolveTab works
+      if (owner) this.ownerActiveTab.set(owner, tabId);
+    }
     // Track profile membership
     if (profileName) {
       const profile = this.profiles.get(profileName)!;
@@ -481,6 +616,26 @@ export class BrowserManager {
     return closed;
   }
 
+  /**
+   * Return a snapshot of live tabs grouped by owner. Used by stop_browser
+   * safety guards: if other agents still have tabs open, the guard can
+   * warn or block. Passing `excludeOwner` omits that owner from the result
+   * — e.g. the agent requesting the stop.
+   */
+  ownersWithLiveTabs(excludeOwner?: string): Array<{ owner: string; tabIds: number[] }> {
+    const byOwner = new Map<string, number[]>();
+    for (const [id, owner] of this.tabOwners) {
+      if (excludeOwner !== undefined && owner === excludeOwner) continue;
+      const page = this.tabs.get(id);
+      if (page && !page.isClosed()) {
+        const list = byOwner.get(owner);
+        if (list) list.push(id);
+        else byOwner.set(owner, [id]);
+      }
+    }
+    return Array.from(byOwner, ([owner, tabIds]) => ({ owner, tabIds }));
+  }
+
   /** Drop all state without trying to close a browser that may already be gone. */
   private async softReset(): Promise<void> {
     if (this.idleSweeperHandle) {
@@ -496,6 +651,7 @@ export class BrowserManager {
     this.tabs.clear();
     this.tabOwners.clear();
     this.tabLastActivity.clear();
+    this.ownerActiveTab.clear();
     this.primaryTabId = undefined;
     this.nextTabId = 1;
     this.currentTabId = 1;
@@ -519,6 +675,31 @@ export class BrowserManager {
     this.tabs.delete(id);
     this.tabOwners.delete(id);
     this.tabLastActivity.delete(id);
+
+    // Clean up ownerActiveTab entries pointing at the closed tab.
+    // For each owner whose active tab was this one, fall back to that
+    // owner's most-recently-touched surviving tab; delete the entry if
+    // no tabs remain.
+    for (const [owner, activeId] of this.ownerActiveTab) {
+      if (activeId === id) {
+        let bestId: number | undefined;
+        let bestTime = 0;
+        for (const [tid, last] of this.tabLastActivity) {
+          if (this.tabOwners.get(tid) === owner && last > bestTime) {
+            const p = this.tabs.get(tid);
+            if (p && !p.isClosed()) {
+              bestId = tid;
+              bestTime = last;
+            }
+          }
+        }
+        if (bestId !== undefined) {
+          this.ownerActiveTab.set(owner, bestId);
+        } else {
+          this.ownerActiveTab.delete(owner);
+        }
+      }
+    }
 
     // Clean up profile membership
     const profileName = this.tabToProfile.get(id);
@@ -1021,6 +1202,7 @@ export class BrowserManager {
     this.tabs.clear();
     this.tabOwners.clear();
     this.tabLastActivity.clear();
+    this.ownerActiveTab.clear();
     this.primaryTabId = undefined;
     this.nextTabId = 1;
     this.currentTabId = 1;
