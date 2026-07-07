@@ -8,6 +8,7 @@ import fs from "fs/promises";
 import path from "path";
 import type { Page } from "playwright";
 import type { BrowserManager, Env } from "./manager.js";
+import { waitForSettled } from "./settle.js";
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -17,6 +18,16 @@ export async function globalWait(env: Pick<Env, "GLOBAL_WAIT_SECONDS">): Promise
   if (env.GLOBAL_WAIT_SECONDS > 0) {
     await sleep(env.GLOBAL_WAIT_SECONDS * 1000);
   }
+}
+
+/**
+ * Post-action wait: settle detection (network idle + DOM quiet) followed by
+ * the configurable global wait.  Call this from every action tool after the
+ * action completes, replacing the bare `await globalWait(env)`.
+ */
+export async function afterAction(page: Page, env: Env): Promise<void> {
+  await waitForSettled(page, env);
+  await globalWait(env);
 }
 
 /**

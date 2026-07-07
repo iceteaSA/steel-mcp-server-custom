@@ -27,6 +27,9 @@ export const EnvSchema = z
     DEFAULT_VIEWPORT_HEIGHT: z.coerce.number().default(720),
     // Seconds to wait after each action tool (for slow-loading pages).
     GLOBAL_WAIT_SECONDS: z.coerce.number().default(0),
+    // Maximum time in ms to wait for network idle + DOM quiet after actions.
+    // Set 0 to disable post-action settle detection entirely.
+    SETTLE_TIMEOUT_MS: z.coerce.number().default(5000),
     // Session auto-release timeout in ms. Safety net if stop_browser is never
     // called. Default: 5 minutes. Set higher for long-running tasks.
     SESSION_TIMEOUT_MS: z.coerce.number().default(300000),

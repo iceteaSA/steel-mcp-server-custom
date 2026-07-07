@@ -20,6 +20,7 @@ import { EnvSchema } from "./env";
 import { isBrowserClosedError, isSteelSessionStuck } from "./helpers";
 import { isValidProfileName, assertSafeProfilePath } from "./helpers";
 import { clearSnapshot, clearAllSnapshots } from "./snapshot.js";
+import { SETTLE_INIT_SCRIPT } from "./settle.js";
 
 // Inferred type of the parsed env object.
 export type Env = z.infer<typeof EnvSchema>;
@@ -310,6 +311,9 @@ export class BrowserManager {
 
     this.browser = await chromium.connectOverCDP(wsUrl);
     this.browserContext = this.browser.contexts()[0];
+    // Settle detection init runs before any page script on future pages;
+    // the first page (already loaded) will be guarded by the undefined probe.
+    await this.browserContext.addInitScript(SETTLE_INIT_SCRIPT);
     const initialPage = this.browserContext.pages()[0];
     this.currentTabId = this.allocateTab(initialPage);
     // Mark as primary — idle sweeper must never close this tab, else Steel's
@@ -399,6 +403,7 @@ export class BrowserManager {
           height: this.env.DEFAULT_VIEWPORT_HEIGHT,
         },
       });
+      await this.browserContext.addInitScript(SETTLE_INIT_SCRIPT);
       const initialPage = await this.browserContext.newPage();
       this.currentTabId = this.allocateTab(initialPage);
       // Mark primary — consistency with steel mode, and protects the only
@@ -1004,6 +1009,8 @@ export class BrowserManager {
 
     // Inject stealth overrides (extensions don't work in non-default contexts)
     await this.injectStealthIntoContext(context);
+    // Settle detection for profile pages
+    await context.addInitScript(SETTLE_INIT_SCRIPT);
 
     const page = await context.newPage();
 

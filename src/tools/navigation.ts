@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Page } from "playwright";
 import type { BrowserManager, Env } from "../manager.js";
-import { globalWait, sleep } from "../utils.js";
+import { afterAction, sleep } from "../utils.js";
 import {
   CAPTCHA_POLL_INTERVAL_MS,
   CAPTCHA_WAIT_TOTAL_MS,
@@ -116,7 +116,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         }
 
         await page.goto(url, { waitUntil: "domcontentloaded" });
-        await globalWait(env);
+        await afterAction(page, env);
 
         let finalUrl = page.url();
         let title = await page.title().catch(() => "");
@@ -265,7 +265,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         } else {
           await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
         }
-        await globalWait(env);
+        await afterAction(page, env);
         const afterUrl = page.url();
         const verb =
           action === "back" ? "Went back" : action === "forward" ? "Went forward" : "Reloaded";

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
-import { globalWait } from "../utils.js";
+import { afterAction } from "../utils.js";
 import {
   buildRadioSelector,
   cleanErrorMessage,
@@ -81,7 +81,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         const page = await mgr.getPage({ tabId, owner, force });
         const beforeUrl = page.url();
         await page.click(sel, { timeout });
-        await globalWait(env);
+        await afterAction(page, env);
 
         let waitMsg = "";
         if (waitFor) {
@@ -341,7 +341,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         if (submitSelector) {
           await page.click(submitSelector, { timeout });
         }
-        await globalWait(env);
+        await afterAction(page, env);
         const lines = [`Filled ${filled.length}/${fields.length} field(s).`];
         if (filled.length) {
           const byKind = filled.map((x) => `${x.selector} [${x.kind}]`).join(", ");
@@ -493,7 +493,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
           };
         }
 
-        await globalWait(env);
+        await afterAction(page, env);
         const actual = Math.abs(result.after - result.before);
         const noOp = actual === 0;
         const suffix = noOp
