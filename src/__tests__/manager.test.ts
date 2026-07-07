@@ -5,7 +5,7 @@
  * of resolveTab, touchTab, closeTab cleanup, and ownersWithLiveTabs.
  * Fake Page objects stub out the Playwright dependency.
  */
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, spyOn } from "bun:test";
 import { BrowserManager, TabOwnershipError, NoTabError, type Env } from "../manager.js";
 import type { Page } from "playwright";
 
@@ -399,6 +399,50 @@ describe("ownersWithLiveTabs", () => {
     // agent-a's only tab is closed — should not appear
     expect(result.find((r: { owner: string }) => r.owner === "agent-a")).toBeUndefined();
     expect(result.find((r: { owner: string }) => r.owner === "agent-b")).toBeDefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// allocateTab — idempotent re-registration merges owner metadata
+// ---------------------------------------------------------------------------
+
+describe("allocateTab — idempotent re-registration", () => {
+  it("sets owner when context listener registered the page first", async () => {
+    const mgr = setupMgr();
+    mgr.primaryTabId = 999;
+    mgr.tabs.set(999, fakePage());
+
+    const page = fakePage();
+    // Simulate the context.on("page") listener firing first (no owner).
+    const firstId = (mgr as any).allocateTab(page) as number;
+    // Then the explicit new_tab path calls allocateTab with an owner.
+    const secondId = (mgr as any).allocateTab(page, "agent-a") as number;
+
+    expect(secondId).toBe(firstId);
+    expect(mgr.tabOwners.get(firstId)).toBe("agent-a");
+    expect(mgr.tabLastActivity.has(firstId)).toBe(true);
+
+    // Owner-scoped cleanup must now find this tab.
+    const closed = await mgr.closeTabsByOwner("agent-a");
+    expect(closed).toContain(firstId);
+  });
+
+  it("keeps existing owner and warns when re-registered with a different owner", () => {
+    const mgr = setupMgr();
+    const consoleError = spyOn(console, "error").mockImplementation(() => {});
+
+    const page = fakePage();
+    const firstId = (mgr as any).allocateTab(page, "agent-a") as number;
+    const secondId = (mgr as any).allocateTab(page, "agent-b") as number;
+
+    expect(secondId).toBe(firstId);
+    expect(mgr.tabOwners.get(firstId)).toBe("agent-a");
+    expect(consoleError).toHaveBeenCalled();
+    const call = consoleError.mock.calls[0] as string[];
+    expect(call[0]).toContain('already owned by "agent-a"');
+    expect(call[0]).toContain('ignoring owner "agent-b"');
+
+    consoleError.mockRestore();
   });
 });
 

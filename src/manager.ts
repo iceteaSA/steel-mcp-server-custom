@@ -236,7 +236,23 @@ export class BrowserManager {
     // context.on("page") listener that fires for ALL new pages including
     // our own context.newPage() calls), return the existing tabId.
     const existing = this.pageToTabId.get(page);
-    if (existing !== undefined) return existing;
+    if (existing !== undefined) {
+      // Merge owner metadata: listener-registered pages have no owner, but
+      // an explicit caller may supply one. Refresh activity so the tab stays
+      // alive. Never steal a tab from its existing owner.
+      if (owner) {
+        const existingOwner = this.tabOwners.get(existing);
+        if (existingOwner === undefined) {
+          this.tabOwners.set(existing, owner);
+        } else if (existingOwner !== owner) {
+          console.error(
+            `[steel-mcp] allocateTab re-registration warning: tab ${existing} already owned by "${existingOwner}"; ignoring owner "${owner}".`,
+          );
+        }
+      }
+      this.tabLastActivity.set(existing, Date.now());
+      return existing;
+    }
 
     const id = this.nextTabId++;
     this.tabs.set(id, page);
