@@ -14,7 +14,7 @@
         "dist"
     ],
     "scripts": {
-        "build": "bun build src/index.ts --outfile dist/index.cjs --target=node --format=cjs --external @napi-rs/image --external playwright",
+        "build": "bun build src/index.ts --outfile dist/index.cjs --target=node --format=cjs --external @napi-rs/image --external patchright",
         "dev": "bun --watch src/index.ts",
         "start": "node dist/index.cjs",
         "lint": "oxlint src/",
@@ -30,7 +30,7 @@
         "dotenv": "^17.4.2",
         "linkedom": "^0.18.12",
         "mime-types": "^3.0.2",
-        "playwright": "1.61.1",
+        "patchright": "^1.61.1",
         "steel-sdk": "^0.18.0",
         "turndown": "^7.2.4",
         "zod": "^4.4.3"

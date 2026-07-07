@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, spyOn } from "bun:test";
 import { BrowserManager, TabOwnershipError, NoTabError, type Env } from "../manager.js";
-import type { Page } from "playwright";
+import type { Page } from "patchright";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -459,7 +459,7 @@ describe("allocateTab — idempotent re-registration", () => {
 // Dialog policy handling — pre-armed accept/dismiss, no pending/timer model
 // ---------------------------------------------------------------------------
 
-import type { Dialog } from "playwright";
+import type { Dialog } from "patchright";
 
 /** Build a minimal fake Dialog object for testing dialog capture + handling. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any

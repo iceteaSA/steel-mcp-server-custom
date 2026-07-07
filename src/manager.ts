@@ -13,7 +13,7 @@ import fs from "fs/promises";
 import path from "path";
 import { sleep } from "./utils.js";
 
-import { chromium, Browser, BrowserContext, Page, Request, Response } from "playwright";
+import { chromium, Browser, BrowserContext, Page, Request, Response } from "patchright";
 import { Steel } from "steel-sdk";
 import { z } from "zod";
 import { EnvSchema } from "./env";

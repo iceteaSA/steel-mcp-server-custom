@@ -6,7 +6,7 @@
 
 import fs from "fs/promises";
 import path from "path";
-import type { Page } from "playwright";
+import type { Page } from "patchright";
 import type { BrowserManager, Env } from "./manager.js";
 import { waitForSettled } from "./settle.js";
 import {

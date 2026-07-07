@@ -6,7 +6,7 @@
 // -----------------------------------------------------------------------------
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { Frame, Page } from "playwright";
+import type { Frame, Page } from "patchright";
 import { z } from "zod";
 
 // Re-exported because @modelcontextprotocol/sdk 1.29 doesn't re-export

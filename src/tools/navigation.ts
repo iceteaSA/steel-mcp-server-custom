@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { Page } from "playwright";
+import type { Page } from "patchright";
 import type { BrowserManager, Env } from "../manager.js";
 import { afterAction, actionFeedback, sleep } from "../utils.js";
 import {

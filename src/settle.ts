@@ -6,7 +6,7 @@
 // waitForSettled polls those counters until the page is quiet.
 // -----------------------------------------------------------------------------
 
-import type { Page } from "playwright";
+import type { Page } from "patchright";
 
 // -----------------------------------------------------------------------------
 // Types

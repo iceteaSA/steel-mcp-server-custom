@@ -3,7 +3,7 @@
 // per-tab snapshot store for agent-side change feedback.
 // -----------------------------------------------------------------------------
 
-import type { Frame, Page } from "playwright";
+import type { Frame, Page } from "patchright";
 
 // -----------------------------------------------------------------------------
 // Types

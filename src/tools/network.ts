@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 import { z } from "zod";
-import type { BrowserContext } from "playwright";
+import type { BrowserContext } from "patchright";
 import type { BrowserManager, Env } from "../manager.js";
 import {
   cleanErrorMessage,
