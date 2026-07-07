@@ -1,5 +1,5 @@
 import { describe, it, expect } from "bun:test";
-import { register as registerNetwork } from "../tools/network.js";
+import { register as registerNetwork, authorizeBodyFetch } from "../tools/network.js";
 import type { BrowserManager, Env } from "../manager.js";
 import type { ToolRegistrar } from "../tools/shared.js";
 
@@ -142,18 +142,22 @@ describe("get_network tool", () => {
     expect(denied.content[0].text).toContain("requestId 7 not found in your tabs");
   });
 
-  // SEC3 — requestId cross-tab body leak: an agent must NEVER be able to
-  // read another owner's response body. Rule (see tools/network.ts):
-  //   * event.tabId undefined  → untabbed, always readable when it survived
-  //                              the list filter (no owning tab to guard)
-  //   * event.tabId set, owner matches caller's owner → allowed
-  //   * event.tabId set, owner undefined (unowned tab) → allowed
-  //   * event.tabId set, owner != caller's owner     → DENIED, even when
-  //                                                    caller passes the
-  //                                                    correct tabId — only
-  //                                                    owner matches; a bare
-  //                                                    tabId does not authorize
-  //                                                    reading an owned tab's body.
+  // SEC3 — single owner-auth chokepoint (tools/network.ts:authorizeBodyFetch).
+  // Every body fetch — requestId OR body:true single-match — must pass through
+  // it before mgr.getResponseBody. The rule (intentionally narrow — a bare
+  // tabId is NEVER authorization):
+  //   * event.tabId undefined (untabbed)  → readable
+  //   * owner undefined for the tab       → readable (unowned tab)
+  //   * caller's owner matches the tab    → readable
+  //   * otherwise                          → DENIED
+  // Both branches of the get_network handler call this immediately before
+  // getResponseBody — see tools/network.ts:485. There is exactly one call
+  // site for getResponseBody (grep-confirmed).
+
+  // ---- requestId branch ----
+
+  // Regression guard (regression from prior commits): requestId with no
+  // owner + owned tab → isError, body never returned.
   it("denies requestId body fetch when no scope given AND event belongs to another owner's tab", async () => {
     const { register, handlers } = makeRegistrar();
     const mgr = fakeMgr(
@@ -168,7 +172,7 @@ describe("get_network tool", () => {
         },
       ],
       { 42: "AUTH-TOKEN-LEAK" },
-      1, // caller's resolved tab (irrelevant — caller passes no tabId/owner)
+      1,
       { 9: "owner-B" },
     );
     registerNetwork(register, mgr, env);
@@ -178,9 +182,6 @@ describe("get_network tool", () => {
     expect(result.content[0].text).not.toContain("AUTH-TOKEN-LEAK");
   });
 
-  // Residual hole: tabId alone must NOT authorize reading another owner's
-  // tab body — attacker reads the unscoped list to learn owner B's tabId,
-  // then asks for the body with only that tabId. Body must remain denied.
   it("denies requestId body fetch when caller passes B's tabId but no owner", async () => {
     const { register, handlers } = makeRegistrar();
     const mgr = fakeMgr(
@@ -202,20 +203,83 @@ describe("get_network tool", () => {
     const result = await handlers.get_network({
       requestId: 50,
       tabId: 9,
-      // owner intentionally omitted — the attacker only knows the tabId.
     });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/body fetch requires owner:"owner-B"/);
+    expect(result.content[0].text).toMatch(/belongs to owner "owner-B"/);
+    expect(result.content[0].text).toMatch(/pass owner:"owner-B"/);
     expect(result.content[0].text).not.toContain("owned-body");
   });
 
-  // Positive: the owning agent can read its own body with a matching owner.
-  it("allows requestId body fetch when owner matches the event's tab owner", async () => {
+  // ---- body:true single-match branch ----
+
+  // THE residual: body:true with no requestId narrows to a single event
+  // through tabId alone; the previous handler selected events[0] and
+  // called getResponseBody without the owner check.
+  it("denies body:true single-match when tabId points to an owned tab and no owner is given", async () => {
     const { register, handlers } = makeRegistrar();
     const mgr = fakeMgr(
       [
         {
-          id: 50,
+          id: 60,
+          tabId: 9,
+          method: "GET",
+          url: "https://other-agent/x",
+          resourceType: "xhr",
+          status: 200,
+        },
+      ],
+      { 60: "AUTH-TOKEN-LEAK-2" },
+      9,
+      { 9: "owner-B" },
+    );
+    registerNetwork(register, mgr, env);
+    const result = await handlers.get_network({
+      body: true,
+      tabId: 9,
+      // owner intentionally omitted — bare tabId is NOT authorization.
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/belongs to owner "owner-B"/);
+    expect(result.content[0].text).not.toContain("AUTH-TOKEN-LEAK-2");
+  });
+
+  // Same residual via urlPattern narrowing: the attacker writes a
+  // sufficiently unique urlPattern that exactly one owned-tab event
+  // survives the list filter, then asks for its body.
+  it("denies body:true single-match when urlPattern narrows to one owned-tab event and no owner is given", async () => {
+    const { register, handlers } = makeRegistrar();
+    const mgr = fakeMgr(
+      [
+        {
+          id: 70,
+          tabId: 9,
+          method: "GET",
+          url: "https://other-agent/super-unique-path",
+          resourceType: "xhr",
+          status: 200,
+        },
+      ],
+      { 70: "AUTH-TOKEN-LEAK-3" },
+      1, // caller's resolved tab (irrelevant — caller passes no tabId/owner)
+      { 9: "owner-B" },
+    );
+    registerNetwork(register, mgr, env);
+    const result = await handlers.get_network({
+      body: true,
+      urlPattern: "super-unique-path",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/belongs to owner "owner-B"/);
+    expect(result.content[0].text).not.toContain("AUTH-TOKEN-LEAK-3");
+  });
+
+  // Positive: body:true with matching owner — allowed.
+  it("allows body:true single-match when owner matches the event's tab owner", async () => {
+    const { register, handlers } = makeRegistrar();
+    const mgr = fakeMgr(
+      [
+        {
+          id: 80,
           tabId: 9,
           method: "GET",
           url: "https://my-agent/x",
@@ -223,17 +287,94 @@ describe("get_network tool", () => {
           status: 200,
         },
       ],
-      { 50: "owned-body" },
+      { 80: "owned-body" },
       9,
       { 9: "owner-B" },
     );
     registerNetwork(register, mgr, env);
     const result = await handlers.get_network({
-      requestId: 50,
+      body: true,
       tabId: 9,
       owner: "owner-B",
     });
     expect(result.isError).toBeUndefined();
     expect(result.content[0].text).toBe("owned-body");
+  });
+
+  // Untabbed event body:true → always allowed (no owning tab to guard).
+  it("allows body:true for an untabbed event regardless of owner arg", async () => {
+    const { register, handlers } = makeRegistrar();
+    const mgr = fakeMgr(
+      [
+        {
+          id: 7,
+          tabId: undefined,
+          method: "GET",
+          url: "https://untabbed/x",
+          resourceType: "fetch",
+          status: 200,
+        },
+      ],
+      { 7: "untabbed-body" },
+      1,
+    );
+    registerNetwork(register, mgr, env);
+    const result = await handlers.get_network({ body: true });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toBe("untabbed-body");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// authorizeBodyFetch — pure function unit tests. Locks the contract: untabbed
+// events readable, unowned tabs readable, owner match readable, anything else
+// denied. These tests guard the chokepoint from future drift.
+// ---------------------------------------------------------------------------
+
+describe("authorizeBodyFetch (single owner-auth chokepoint)", () => {
+  const fakeGetOwner = (map: Record<number, string>) => (tabId: number) => map[tabId];
+
+  it("untabbed event (tabId undefined) is always readable", () => {
+    const r = authorizeBodyFetch({ id: 1, tabId: undefined }, undefined, {
+      getTabOwner: fakeGetOwner({}),
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it("untabbed event readable even when caller passes a stray owner", () => {
+    const r = authorizeBodyFetch({ id: 1, tabId: undefined }, "owner-A", {
+      getTabOwner: fakeGetOwner({}),
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it("owned tab + matching owner → readable", () => {
+    const r = authorizeBodyFetch({ id: 1, tabId: 9 }, "owner-B", {
+      getTabOwner: fakeGetOwner({ 9: "owner-B" }),
+    });
+    expect(r.ok).toBe(true);
+  });
+
+  it("owned tab + no owner → DENIED", () => {
+    const r = authorizeBodyFetch({ id: 1, tabId: 9 }, undefined, {
+      getTabOwner: fakeGetOwner({ 9: "owner-B" }),
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/belongs to owner "owner-B"/);
+  });
+
+  it("owned tab + wrong owner → DENIED", () => {
+    const r = authorizeBodyFetch({ id: 1, tabId: 9 }, "owner-A", {
+      getTabOwner: fakeGetOwner({ 9: "owner-B" }),
+    });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/pass owner:"owner-B"/);
+  });
+
+  it("unowned tab (no owner registered) → readable regardless of caller owner", () => {
+    const r = authorizeBodyFetch({ id: 1, tabId: 9 }, "owner-A", {
+      getTabOwner: fakeGetOwner({}),
+    });
+    expect(r.ok).toBe(true);
   });
 });

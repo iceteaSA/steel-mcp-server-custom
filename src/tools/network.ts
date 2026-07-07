@@ -16,6 +16,34 @@ import { withBackgroundTab, writeToFile } from "../utils.js";
 import type { ToolRegistrar } from "./shared.js";
 import { tabTarget } from "./shared.js";
 
+/**
+ * Single owner-auth chokepoint for every `get_network` body fetch.
+ *
+ * Rule (intentionally narrow — a bare tabId is NEVER authorization):
+ *   * event.tabId undefined (untabbed event) → readable (no owning tab)
+ *   * tab has an owner AND caller passes that owner → readable
+ *   * otherwise → DENIED with a clear error that names the owning agent
+ *
+ * Both the `requestId` branch and the `body:true` single-match branch of
+ * the get_network handler must call this immediately before
+ * `mgr.getResponseBody()`. There must be exactly one authorization site —
+ * adding a sibling inline check is a regression waiting to happen.
+ */
+export function authorizeBodyFetch(
+  event: { id: number; tabId?: number },
+  callerOwner: string | undefined,
+  mgr: { getTabOwner: (tabId: number) => string | undefined },
+): { ok: true } | { ok: false; error: string } {
+  if (event.tabId === undefined) return { ok: true };
+  const tabOwner = mgr.getTabOwner(event.tabId);
+  if (tabOwner === undefined) return { ok: true };
+  if (callerOwner !== undefined && callerOwner === tabOwner) return { ok: true };
+  return {
+    ok: false,
+    error: `Response body for request #${event.id} belongs to owner "${tabOwner}"'s tab — pass owner:"${tabOwner}" to read it.`,
+  };
+}
+
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // cookies -------------------------------------------------------------------
   register({
@@ -417,35 +445,6 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
                 structuredContent: { events },
               };
             }
-            // Owner-required body gate for owned tabs.
-            //
-            // Rule: when the event's tabId belongs to a known owner,
-            // reading the body REQUIRES a matching `owner` argument. A
-            // bare `tabId` — even the correct one — does not authorize
-            // the body fetch; only the owning agent can. This closes the
-            // residual hole where owner A reads the unscoped list to
-            // learn owner B's tabId+requestId, then asks for the body
-            // with only tabId (no owner) and walks away with the body.
-            //
-            // An untabbed event (tabId === undefined) has no owning tab
-            // and is always readable when it survived the list filter —
-            // matches the existing "untabbed events only without
-            // tab/owner filter" carve-out.
-            if (targetEvent.tabId !== undefined) {
-              const tabOwner = mgr.getTabOwner(targetEvent.tabId);
-              if (tabOwner !== undefined && owner !== tabOwner) {
-                return {
-                  isError: true,
-                  content: [
-                    {
-                      type: "text",
-                      text: `requestId ${requestId} belongs to owner "${tabOwner}" — body fetch requires owner:"${tabOwner}".`,
-                    },
-                  ],
-                  structuredContent: { events },
-                };
-              }
-            }
             targetId = requestId;
           } else {
             if (events.length !== 1) {
@@ -463,10 +462,28 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
             targetEvent = events[0];
             targetId = targetEvent?.id;
           }
-          if (targetId === undefined) {
+          if (targetId === undefined || targetEvent === undefined) {
             return {
               isError: true,
               content: [{ type: "text", text: "No matching network request found." }],
+              structuredContent: { events },
+            };
+          }
+
+          // Single owner-auth chokepoint for ALL body fetches. Both the
+          // requestId branch and the body:true single-match branch land
+          // here — every getResponseBody call must pass through this gate.
+          // Rule:
+          //   * event.tabId undefined (untabbed) → readable (no owning tab)
+          //   * tab has an owner AND caller passes that owner → readable
+          //   * otherwise → DENIED (caller didn't pass owner OR passed
+          //     a different one; a bare tabId never authorizes an owned
+          //     tab's body)
+          const auth = authorizeBodyFetch(targetEvent, owner, mgr);
+          if (!auth.ok) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: auth.error }],
               structuredContent: { events },
             };
           }
