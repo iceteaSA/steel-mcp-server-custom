@@ -39,7 +39,7 @@ bun run format:check   # or `bun run format` to write
 bun run test
 ```
 
-**Tests:** `bun test` runs over `src/__tests__/*.test.ts` only (18 files; 453 passed
+**Tests:** `bun test` runs over `src/__tests__/*.test.ts` only (18 files; 465 passed
 + 12 skipped). The root `test/` directory has been deleted (stale leftover from an
 earlier version). Full browser flows are still validated manually via mcporter or
 the MCP inspector.
@@ -50,33 +50,32 @@ the MCP inspector.
 # 1. On the build host (where bun is installed)
 bun install
 bun run build
-#  → dist/index.cjs
+#  → dist/index.cjs + dist/*.linux-x64-{gnu,musl}.node
+#    (self-contained — no node_modules step needed on the LXC)
 
-# 2. Sync to the LXC deploy dir (with node_modules for the native deps)
-rsync -av --delete \
-  --exclude=node_modules \
-  ./ ~/mcp-servers/steel-mcp-server-custom/   # or scp, deploy tool, etc.
+# 2. Sync the dist/ folder to the LXC deploy dir (no node_modules needed)
+rsync -av --delete ./dist/ ~/mcp-servers/steel-mcp-server-custom/dist/
 
-# 3. On the LXC — install only the runtime deps (skips devDeps + saves native .node files)
+# 3. Run the artifact on the LXC
 cd ~/mcp-servers/steel-mcp-server-custom
-bun install --production      # or: npm ci --omit=dev
-#  → dist/index.cjs + node_modules/{patchright,@napi-rs/image,impit,@modelcontextprotocol,...}
+node dist/index.cjs
 
 # 4. Copy the agent-facing skill
 cp skill/SKILL.md ~/.agents/skills/steel-browser/SKILL.md
 ```
 
-The artifact runs under `node` on the LXC — bun is not needed at runtime, only for the
-one-time `bun install --production` step (the equivalent `npm ci --omit=dev` also works).
-The `skill/` directory holds the agent-facing usage skill — keep it in sync with tool changes.
+The artifact runs under `node` on the LXC — bun is not needed at runtime. The `skill/`
+directory holds the agent-facing usage skill — keep it in sync with tool changes.
 
-**Native deps (build → runtime).** `--external` in the build script means
-`@napi-rs/image`, `patchright`, and `impit` are NOT bundled into `dist/index.cjs` —
-they need to be present on the target's `node_modules/` with their prebuilt `.node`
-binaries. Skipping step 3 above is the most common deploy failure (the server
-exits with `Cannot find module 'patchright'` or similar). All three packages ship
-platform-specific native binaries; make sure the install runs on an arch that
-matches the runtime host.
+**Self-contained build.** `bun build --outdir dist --target=node --format=cjs` (with
+no `--external` flags) bundles every JS module from `src/` + dependencies into
+`dist/index.cjs` and emits the two napi `.node` files (`@napi-rs/image`,
+`impit`) as sidecars next to it. `patchright` is pure JS so its CDP-connect +
+page API code is in the bundle too. The deploy target only needs `node` + the
+files in `dist/` — no `bun install --production`, no `node_modules`, no arch
+mismatch on the install host. Both gnu and musl `.node` variants are shipped
+(35 MB / 59 MB depending on whether you count both); `node` picks the right one
+at load time.
 
 ---
 
