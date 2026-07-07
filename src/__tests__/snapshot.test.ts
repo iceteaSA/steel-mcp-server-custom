@@ -9,7 +9,11 @@ import {
   getStoredSnapshot,
   filterTree,
   truncateForDisplay,
+  applyIntent,
 } from "../snapshot.js";
+import type { BrowserManager, Env } from "../manager.js";
+import type { ToolRegistrar } from "../tools/shared.js";
+import { register as registerExtraction } from "../tools/extraction.js";
 
 // ---------------------------------------------------------------------------
 // truncateAtLine — line-boundary truncation helper
@@ -499,5 +503,294 @@ describe("truncateForDisplay", () => {
     const result = truncateForDisplay(text, 80);
     expect(result).toContain("more lines");
     expect(result.length).toBeLessThanOrEqual(80);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// applyIntent — goal-scoped filter
+// ---------------------------------------------------------------------------
+describe("applyIntent", () => {
+  const TREE = `- generic @e1
+  - textbox "Email" @e2
+  - textbox "Password" @e3
+  - button "Login" @e4
+  - link "Forgot password?" @e5
+  - paragraph "Welcome back" @e6`;
+
+  it("unknown intent returns input unchanged", () => {
+    expect(applyIntent(TREE, "unknown_intent")).toBe(TREE);
+  });
+
+  it("login intent keeps textbox and button matching keywords", () => {
+    const result = applyIntent(TREE, "login");
+    expect(result).toContain("textbox");
+    expect(result).toContain("Email");
+    expect(result).toContain("button");
+    expect(result).toContain("Login");
+    expect(result).toContain("link");
+    expect(result).toContain("Forgot");
+    // password textbox should be kept (matches keyword)
+    expect(result).toContain("Password");
+    // paragraph "Welcome back" does NOT match login keywords — dropped
+    expect(result).not.toContain("paragraph");
+    expect(result).not.toContain("Welcome");
+  });
+
+  it("search intent keeps searchbox and button", () => {
+    const tree = `- generic @e1
+  - searchbox "Find" @e2
+  - button "Search" @e3
+  - paragraph "Some text" @e4`;
+    const result = applyIntent(tree, "search");
+    expect(result).toContain("searchbox");
+    expect(result).toContain("button");
+    expect(result).toContain("Search");
+    expect(result).not.toContain("paragraph");
+  });
+
+  it("read_content intent keeps heading and paragraph", () => {
+    const tree = `- heading "Title" @e1
+- paragraph "Some article content text" @e2
+- button "Buy" @e3
+- link "Read more" @e4`;
+    const result = applyIntent(tree, "read_content");
+    expect(result).toContain("heading");
+    expect(result).toContain("paragraph");
+    expect(result).toContain("article");
+    expect(result).not.toContain("button");
+    expect(result).not.toContain("Buy");
+  });
+
+  it("nameless structural lines are kept (conservative ancestor pass-through)", () => {
+    // Structural lines without a role match get no role; intent filter
+    // should keep them when they are ancestors of retained lines.
+    const tree = `- generic @e1
+  - text @e2
+    - textbox "Email" @e3`;
+    const result = applyIntent(tree, "login");
+    // textbox + its ancestors should be kept
+    expect(result).toContain("generic");
+    expect(result).toContain("textbox");
+    expect(result).toContain("Email");
+  });
+
+  it("never returns blank — falls back to input", () => {
+    const tree = `- paragraph "Nothing relevant" @e1`;
+    const result = applyIntent(tree, "login");
+    // No login-related roles or keywords → fallback to input
+    expect(result).toBe(tree);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Snapshot handler: diff mode (A3) + intent filter (A4)
+// ---------------------------------------------------------------------------
+describe("snapshot handler (diff + intent)", () => {
+  const SNAP_RAW = `- heading "Title" @e1
+- textbox "Search" @e2
+- button "Go" @e3`;
+  const SNAP_CHANGED = `- heading "Title" @e1
+- textbox "Search": hello @e4
+- button "Go" @e5`;
+
+  const env: Env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+
+  function makeRegistrar() {
+    const handlers: Record<string, (...args: any[]) => any> = {};
+    const register = ((opts: any) => {
+      handlers[opts.name] = opts.handler;
+    }) as ToolRegistrar;
+    return { register, handlers };
+  }
+
+  // ---- A3: diff mode ---------------------------------------------------------
+  it("diff=true returns 'no baseline' message when no stored snapshot", async () => {
+    const { register, handlers } = makeRegistrar();
+    const mockPage = {
+      locator: (_sel: string) => ({
+        ariaSnapshot: async (_opts?: unknown) => SNAP_RAW,
+      }),
+      frames: () => [],
+    } as any;
+    const mgr = {
+      getPage: async () => mockPage,
+      resolveTab: () => 1,
+    } as unknown as BrowserManager;
+
+    clearAllSnapshots();
+    registerExtraction(register, mgr, env);
+    const result = await handlers.snapshot({ diff: true });
+    const text = result.content[0].text as string;
+    expect(text).toContain("(no baseline");
+    expect(result.isError).toBeUndefined();
+  });
+
+  it("diff=true returns delta when baseline exists and page changed", async () => {
+    const { register, handlers } = makeRegistrar();
+    const mockPage = {
+      locator: (_sel: string) => ({
+        ariaSnapshot: async (_opts?: unknown) => SNAP_CHANGED,
+      }),
+      frames: () => [],
+    } as any;
+    const mgr = {
+      getPage: async () => mockPage,
+      resolveTab: () => 1,
+    } as unknown as BrowserManager;
+
+    clearAllSnapshots();
+    storeSnapshot(1, SNAP_RAW);
+    registerExtraction(register, mgr, env);
+    const result = await handlers.snapshot({ diff: true });
+    const text = result.content[0].text as string;
+    expect(result.isError).toBeUndefined();
+    // Delta mode returns diff output, not the full tree
+    expect(text).toContain("textbox");
+    expect(text).not.toContain("(no baseline");
+    // The new baseline should have been stored
+    expect(getStoredSnapshot(1)).toBe(SNAP_CHANGED);
+  });
+
+  it("diff mode is not triggered when a frame is targeted", async () => {
+    // diff only applies to full-page snapshots (frame === undefined).
+    // When frame is set, the handler proceeds normally and the diff
+    // block is skipped. We verify by confirming a normal snapshot
+    // is returned (not the "no baseline" prefix).
+    const { register, handlers } = makeRegistrar();
+    const mainFrame = {
+      name: () => "",
+      url: () => "https://example.com/",
+    };
+    const childFrame = {
+      name: () => "child",
+      url: () => "about:blank",
+      locator: (_sel: string) => ({
+        ariaSnapshot: async (_opts?: unknown) => SNAP_RAW,
+      }),
+    };
+    const mockPage = {
+      frames: () => [mainFrame, childFrame],
+      locator: (_sel: string) => ({
+        ariaSnapshot: async (_opts?: unknown) => SNAP_RAW,
+      }),
+    } as any;
+    const mgr = {
+      getPage: async () => mockPage,
+      resolveTab: () => 1,
+    } as unknown as BrowserManager;
+
+    clearAllSnapshots();
+    registerExtraction(register, mgr, env);
+    const result = await handlers.snapshot({ diff: true, frame: "child" });
+    expect(result.isError).toBeUndefined();
+    const text = result.content[0].text as string;
+    // diff disabled for frame — returns normal filtered snapshot
+    expect(text).not.toContain("(no baseline");
+  });
+
+  // ---- A4: intent filter -----------------------------------------------------
+  it("intent=login filters after filterTree", async () => {
+    const { register, handlers } = makeRegistrar();
+    const loginSnap =
+      '- generic @e1\n  - textbox "Email" [active] @e2\n  - textbox "Password" @e3\n  - button "Login" @e4\n  - paragraph "Welcome" @e5';
+    const mockPage = {
+      locator: (_sel: string) => ({
+        ariaSnapshot: async (_opts?: unknown) => loginSnap,
+      }),
+      frames: () => [],
+    } as any;
+    const mgr = {
+      getPage: async () => mockPage,
+      resolveTab: () => 1,
+    } as unknown as BrowserManager;
+
+    clearAllSnapshots();
+    registerExtraction(register, mgr, env);
+    const result = await handlers.snapshot({ filter: "interactive", intent: "login" });
+    const text = result.content[0].text as string;
+    expect(result.isError).toBeUndefined();
+    expect(text).toContain("textbox");
+    expect(text).toContain("Email");
+    expect(text).toContain("button");
+    expect(text).toContain("Login");
+    // paragraph "Welcome" should be dropped by intent filter
+    expect(text).not.toContain("Welcome");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// page_state handler (A5)
+// ---------------------------------------------------------------------------
+describe("page_state handler", () => {
+  const env: Env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+
+  function makeRegistrar() {
+    const handlers: Record<string, (...args: any[]) => any> = {};
+    const register = ((opts: any) => {
+      handlers[opts.name] = opts.handler;
+    }) as ToolRegistrar;
+    return { register, handlers };
+  }
+
+  it("returns compact JSON with url, title, scrollPercent, elementCount", async () => {
+    const { register, handlers } = makeRegistrar();
+    const mockPage = {
+      evaluate: async (fn: any) => {
+        // Browser-context function — return known values
+        return fn();
+      },
+    } as any;
+
+    // Override evaluate to return the fake browser-side result.
+    mockPage.evaluate = async (_fn: any) => ({
+      url: "https://example.com/page",
+      title: "Example Page",
+      scrollPercent: 42,
+      elementCount: 1500,
+      interactiveCount: 23,
+    });
+
+    const mgr = {
+      getPage: async () => mockPage,
+      resolveTab: () => 1,
+      getLastDialog: () => null,
+    } as unknown as BrowserManager;
+
+    registerExtraction(register, mgr, env);
+    const result = await handlers.page_state({});
+    expect(result.isError).toBeUndefined();
+
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.url).toBe("https://example.com/page");
+    expect(parsed.title).toBe("Example Page");
+    expect(parsed.scrollPercent).toBe(42);
+    expect(parsed.elementCount).toBe(1500);
+    expect(parsed.interactiveCount).toBe(23);
+    expect(parsed.hasDialog).toBe(false);
+    expect(result.structuredContent).toEqual(parsed);
+  });
+
+  it("hasDialog=false by default", async () => {
+    const { register, handlers } = makeRegistrar();
+    const mockPage = {
+      evaluate: async (_fn: any) => ({
+        url: "https://example.com/",
+        title: "Test",
+        scrollPercent: 0,
+        elementCount: 10,
+        interactiveCount: 0,
+      }),
+    } as any;
+
+    const mgr = {
+      getPage: async () => mockPage,
+      resolveTab: () => 1,
+      getLastDialog: () => null,
+    } as unknown as BrowserManager;
+
+    registerExtraction(register, mgr, env);
+    const result = await handlers.page_state({});
+    const parsed = JSON.parse(result.content[0].text as string);
+    expect(parsed.hasDialog).toBe(false);
   });
 });

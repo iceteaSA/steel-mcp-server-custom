@@ -27,7 +27,15 @@ import {
   toSelector,
   decorateRefError,
 } from "./shared.js";
-import { captureSnapshot, filterTree, storeSnapshot, truncateForDisplay } from "../snapshot.js";
+import {
+  captureSnapshot,
+  diffSnapshots,
+  filterTree,
+  getStoredSnapshot,
+  storeSnapshot,
+  truncateForDisplay,
+  applyIntent,
+} from "../snapshot.js";
 
 // Singleton — configured once, reused across calls.
 const turndown = new TurndownService({
@@ -1228,6 +1236,18 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         .describe(
           "Element filter. interactive (default): only actionable elements + structural ancestors (3-5x fewer nodes). all: full tree. visible: drop hidden.",
         ),
+      diff: z
+        .boolean()
+        .optional()
+        .describe(
+          "Return only elements changed since the last snapshot of this tab (delta), not the full tree.",
+        ),
+      intent: z
+        .enum(["login", "search", "read_content", "fill_form", "navigate", "buy", "extract_data"])
+        .optional()
+        .describe(
+          "Goal-scoped filter applied AFTER interactive/visible filter (e.g. 'login' keeps only form elements + login-related text).",
+        ),
       ...tabTarget,
       ...frameTarget,
     },
@@ -1237,7 +1257,7 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, maxChars, filter, tabId, owner, frame }) => {
+    handler: async ({ selector, maxChars, filter, diff, intent, tabId, owner, frame }) => {
       try {
         const resolvedTabId = mgr.resolveTab({ tabId, owner });
         const page = await mgr.getPage({ tabId, owner });
@@ -1246,6 +1266,23 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         // Capture the full untruncated tree.
         const result = await captureSnapshot(ctx, resolvedTabId, { selector, noTruncate: true });
 
+        // ----- diff mode: return delta vs stored baseline (A3) -----
+        if (diff && frame === undefined) {
+          const prev = getStoredSnapshot(resolvedTabId);
+          storeSnapshot(resolvedTabId, result.text);
+          if (prev === undefined) {
+            const shown = truncateForDisplay(
+              filterTree(result.text, filter ?? "interactive"),
+              maxChars ?? 8000,
+            );
+            return {
+              content: [{ type: "text", text: `(no baseline — captured fresh)\n${shown}` }],
+            };
+          }
+          const delta = diffSnapshots(prev, result.text, { maxChars: maxChars ?? 8000 });
+          return { content: [{ type: "text", text: delta }] };
+        }
+
         // Store the raw tree (no frames block) — baseline must not include
         // the frames metadata or actionFeedback diffs will phantom-diff it
         // every time child frame URLs change.
@@ -1253,11 +1290,10 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
           storeSnapshot(resolvedTabId, result.text);
         }
 
-        // Filter + truncate for display only; stored baseline stays full + raw.
-        const displayText = truncateForDisplay(
-          filterTree(result.text, filter ?? "interactive"),
-          maxChars ?? 8000,
-        );
+        // Filter + intent-scope + truncate for display.
+        const filtered = filterTree(result.text, filter ?? "interactive");
+        const scoped = intent ? applyIntent(filtered, intent) : filtered;
+        const displayText = truncateForDisplay(scoped, maxChars ?? 8000);
 
         // Append frames metadata AFTER filtering so it always survives — frame
         // names/indices are not interactive roles and would be stripped otherwise.
@@ -1271,6 +1307,69 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         }
 
         return { content: [{ type: "text", text: output }] };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          isError: true,
+          content: [{ type: "text", text: cleanErrorMessage(error) }],
+        };
+      }
+    },
+  });
+
+  // page_state — lightweight page observation (A5) ---------------------------------
+  register({
+    name: "page_state",
+    title: "Page State",
+    toolset: "core",
+    description: `Lightweight page observation (url, title, scroll%, element counts) — ~48 tokens, no full snapshot. Use to check "did the page change?" cheaply.
+
+CONTEXT BUDGET — tiny fixed output.`,
+    inputSchema: {
+      ...tabTarget,
+    },
+    outputSchema: {
+      url: z.string().optional(),
+      title: z.string().optional(),
+      scrollPercent: z.number().optional(),
+      elementCount: z.number().optional(),
+      interactiveCount: z.number().optional(),
+      hasDialog: z.boolean().optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({ tabId, owner }) => {
+      try {
+        const page = await mgr.getPage({ tabId, owner });
+        const resolvedTabId = mgr.resolveTab({ tabId, owner });
+        const s = await page.evaluate(() => {
+          const de = document.documentElement;
+          const max = de.scrollHeight - de.clientHeight;
+          const interactive = document.querySelectorAll(
+            "a[href],button,input,select,textarea,[role=button],[role=link],[role=textbox],[tabindex]:not([tabindex='-1'])",
+          ).length;
+          return {
+            url: location.href,
+            title: document.title,
+            scrollPercent: max > 0 ? Math.round((de.scrollTop / max) * 100) : 0,
+            elementCount: document.querySelectorAll("*").length,
+            interactiveCount: interactive,
+          };
+        });
+
+        // Check if tab has a recent dialog.
+        const lastDialog = mgr.getLastDialog(resolvedTabId);
+        const hasDialog = lastDialog !== null;
+
+        const out = { ...s, hasDialog };
+        return {
+          content: [{ type: "text", text: JSON.stringify(out) }],
+          structuredContent: out,
+        };
       } catch (err) {
         const error = err as Error;
         return {

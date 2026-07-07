@@ -39,6 +39,7 @@ const JSON_TOOLS = new Set([
   "list_profiles",
   "credentials",
   "captcha_status",
+  "page_state",
 ]);
 
 // Stub BrowserManager — tools that call mgr methods will throw, but
@@ -214,7 +215,7 @@ describe("ALL_TOOLSETS", () => {
 // ---------------------------------------------------------------------------
 
 describe("tools/list wire-level completeness", () => {
-  it("all 33 tools have title, description, annotations; 9 have outputSchema", async () => {
+  it("all 35 tools have title, description, annotations; 10 have outputSchema", async () => {
     const server = new McpServer(
       { name: "test", version: "0.0.0" },
       { capabilities: { tools: {} } },
@@ -235,8 +236,8 @@ describe("tools/list wire-level completeness", () => {
     registerCredentials(register, stubMgr, stubEnv);
     registerProfiles(register, stubMgr, stubEnv);
 
-    // 34 tools total
-    expect(toolCount()).toBe(34);
+    // 35 tools total (without act/extract_ai since ACT_LLM env not set)
+    expect(toolCount()).toBe(35);
 
     // Create client-server pair
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -249,7 +250,7 @@ describe("tools/list wire-level completeness", () => {
     const tools = result.tools;
 
     // Exact tool count on the wire
-    expect(tools.length).toBe(34);
+    expect(tools.length).toBe(35);
 
     for (const tool of tools) {
       const name = tool.name;

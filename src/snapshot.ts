@@ -330,6 +330,59 @@ function capOutput(raw: string, maxChars: number, suffix: string): string {
 }
 
 // -----------------------------------------------------------------------------
+// applyIntent — goal-scoped filter layered on top of filterTree
+// -----------------------------------------------------------------------------
+
+const INTENT_KEYWORDS: Record<string, RegExp> = {
+  login: /\b(user|email|e-mail|pass|login|log in|sign in|sign-in|otp|2fa|remember)\b/i,
+  search: /\b(search|query|find|filter|sort|go)\b/i,
+  read_content: /\b(article|content|body|main|read|more)\b/i,
+  fill_form: /\b(name|address|phone|city|zip|country|state|submit|save|continue|next)\b/i,
+  navigate: /\b(home|menu|nav|back|next|previous|page|tab|link)\b/i,
+  buy: /\b(cart|checkout|buy|purchase|price|add to|pay|order|quantity)\b/i,
+  extract_data: /\b(table|row|column|list|item|result|data|export)\b/i,
+};
+
+const INTENT_ROLES: Record<string, Set<string>> = {
+  login: new Set(["textbox", "checkbox", "button", "link"]),
+  search: new Set(["textbox", "searchbox", "combobox", "button"]),
+  read_content: new Set(["heading", "paragraph", "article", "link", "list", "listitem"]),
+  fill_form: new Set(["textbox", "combobox", "checkbox", "radio", "button", "option", "listbox"]),
+  navigate: new Set(["link", "button", "tab", "menuitem"]),
+  buy: new Set(["button", "link", "textbox", "spinbutton", "combobox"]),
+  extract_data: new Set(["table", "row", "cell", "list", "listitem", "link", "heading"]),
+};
+
+/** Goal-scoped filter layered on top of filterTree. Keeps a line when its role is
+ * in the intent role set OR its text matches the intent keywords; retains ancestors;
+ * conservative (nameless structural lines kept; unknown intent = passthrough). */
+export function applyIntent(text: string, intent: string): string {
+  const roles = INTENT_ROLES[intent];
+  const kw = INTENT_KEYWORDS[intent];
+  if (!roles || !kw) return text;
+
+  const lines = text.split("\n");
+  const keep = Array.from<boolean>({ length: lines.length }).fill(false);
+  const stack: number[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.trim() === "") continue;
+    const ind = indentOf(line);
+    while (stack.length && indentOf(lines[stack[stack.length - 1]]) >= ind) stack.pop();
+    const role = lineRole(line);
+    if (roles.has(role) || kw.test(line)) {
+      keep[i] = true;
+      for (const a of stack) keep[a] = true;
+    }
+    stack.push(i);
+  }
+
+  const out = lines.filter((_, i) => keep[i]);
+  return out.length ? out.join("\n") : text;
+}
+
+// -----------------------------------------------------------------------------
 // Per-tab snapshot store
 // -----------------------------------------------------------------------------
 
@@ -386,12 +439,12 @@ const INTERACTIVE_ROLES = new Set([
   "select",
 ]);
 
-function lineRole(line: string): string {
+export function lineRole(line: string): string {
   const m = line.match(/^\s*-\s+([a-z]+)/);
   return m ? m[1] : "";
 }
 
-function indentOf(line: string): number {
+export function indentOf(line: string): number {
   return line.length - line.trimStart().length;
 }
 
