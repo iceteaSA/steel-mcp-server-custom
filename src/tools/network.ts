@@ -18,7 +18,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "cookies",
     title: "Browser Cookies",
-    description: `Get or set browser cookies for the current session. Default: return all cookies (filter by domain or URL). Pass setCookies to inject cookies (e.g. restore a saved session from a previous run). The set mode does NOT persist across browser restarts — use save_profile for durable session storage. Do NOT use to transfer cookies between profiles; each profile has its own isolated cookie jar.
+    description: `Get or set browser cookies for the current session. Default: return all cookies (filter by domain or URL); pass setCookies to inject cookies (e.g. restore a saved session). Set mode does NOT persist across browser restarts — use save_profile for durable storage. Do NOT use to transfer cookies between profiles; each profile has its own isolated cookie jar.
 
 CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
     toolset: "network",

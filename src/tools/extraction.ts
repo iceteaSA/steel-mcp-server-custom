@@ -484,7 +484,7 @@ CONTEXT BUDGET — output capped at maxCharsPerPage per URL (default 3K per URL)
   register({
     name: "get_links",
     title: "Get Links",
-    description: `Extract all links from the page as a structured [{text, href}] array. Deduped by href (first non-empty text wins). Filter with urlPattern (JS regex) to narrow results. Use to discover navigation targets, API endpoints, or downloadable files. Do NOT use for page text — use get_page_text for content extraction.
+    description: `Extract all links from the page as a structured [{text, href}] array, deduped by href (first non-empty text wins). Filter with urlPattern (JS regex) to narrow results. Use to discover navigation targets, API endpoints, or downloadable files. Do NOT use for page text — use get_page_text for content extraction.
 
 CONTEXT BUDGET — output capped at limit (default 50).`,
     toolset: "extract",
@@ -600,7 +600,7 @@ CONTEXT BUDGET — output capped at limit (default 50).`,
   register({
     name: "get_attrs",
     title: "Get Attributes",
-    description: `Extract specific attributes from elements matching a CSS selector. Special attrs: "text" = innerText, "html" = outerHTML. Use for data-*, aria-*, src, alt, href, or structured data extraction. Returns a JSON array of objects. Do NOT use for simple link lists — get_links is faster and deduplicates.
+    description: `Extract specific attributes from elements matching a CSS selector. Special attrs: "text" = innerText, "html" = outerHTML. Use for data-*, aria-*, src, alt, href, or structured data extraction — returns a JSON array of objects. Do NOT use for simple link lists — get_links is faster and deduplicates.
 
 CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPerAttr to bound long values.`,
     toolset: "extract",
@@ -713,7 +713,7 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
   register({
     name: "evaluate",
     title: "Evaluate JavaScript",
-    description: `Run arbitrary JavaScript in the page context and return the result as JSON. An escape hatch when other tools don't cover a use case. Must be an expression — wrap multi-line logic in an IIFE: (() => { ... })(). With selector, the expression gets \`el\` bound to the first match. Do NOT use for routine scraping — use get_page_text, get_links, get_attrs, or extract instead. This bypasses all safety guards.
+    description: `Run arbitrary JavaScript in the page context and return the result as JSON — an escape hatch when other tools don't cover a use case. Must be an expression; wrap multi-line logic in an IIFE: (() => { ... })(). With selector, the expression gets \`el\` bound to the first match. Do NOT use for routine scraping — use get_page_text, get_links, get_attrs, or extract instead.
 
 CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "file" for large results.`,
     toolset: "extract",
@@ -841,7 +841,7 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
   register({
     name: "extract",
     title: "Declarative Extract",
-    description: `Declarative structured extraction from repeating elements. Pass a CSS selector and a field map (field name → sub-selector or sub-selector@attribute) to produce a JSON array of records. Replaces fragile evaluate() patterns for scraping product lists, search results, tables, or any repeating DOM structures. Use "." as the field spec to extract the root element's own text. Do NOT use for single-element extraction — use get_attrs or get_page_text instead.
+    description: `Declarative structured extraction from repeating elements. Pass a CSS selector and a field map (field name → sub-selector or sub-selector@attribute) to produce a JSON array of records. Use "." as the field spec to extract the root element's own text. Replaces fragile evaluate() for scraping lists, tables, or repeating DOM structures — do NOT use for single-element extraction (use get_attrs or get_page_text).
 
 CONTEXT BUDGET — output capped at limit (default 20 items).`,
     toolset: "extract",

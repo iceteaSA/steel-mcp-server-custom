@@ -243,9 +243,13 @@ describe("tools/list wire-level completeness", () => {
     for (const tool of tools) {
       const name = tool.name;
 
-      // Non-empty title
-      expect(tool.annotations?.title, `${name}: title missing or empty`).toBeTruthy();
-      expect((tool.annotations?.title ?? "").length, `${name}: title empty`).toBeGreaterThan(0);
+      // Non-empty title (top-level + annotations.title)
+      const tTitle = (tool as any).title as string | undefined;
+      expect(tTitle || tool.annotations?.title, `${name}: title missing or empty`).toBeTruthy();
+      expect(
+        ((tTitle ?? tool.annotations?.title ?? "") as string).length,
+        `${name}: title empty`,
+      ).toBeGreaterThan(0);
 
       // Non-empty description
       expect(tool.description, `${name}: description missing`).toBeTruthy();
