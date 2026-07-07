@@ -206,4 +206,27 @@ describe("runAct", () => {
       runAct({ instruction: "one click", maxSteps: 3 }, mgr, baseEnv as any),
     ).rejects.toThrow(/step 1: click e1.*stale ref/s);
   });
+
+  it("stops at the 60s wall cap and does not keep calling llmJson", async () => {
+    const page = makeFakePage();
+    const mgr = makeFakeMgr(page);
+    let now = 0;
+    const originalDateNow = Date.now;
+    Date.now = () => now;
+
+    mockCaptureSnapshot.mockResolvedValue({ text: "- button [ref=e1]", generation: 1 });
+    mockLlmJson.mockImplementation(async () => {
+      now = 60_001; // advance past the cap during the LLM call
+      return { action: "click", ref: "e1", reason: "click" };
+    });
+
+    try {
+      await expect(
+        runAct({ instruction: "click", maxSteps: 5 }, mgr, baseEnv as any),
+      ).rejects.toThrow(/reached 60s wall cap/);
+      expect(mockLlmJson).toHaveBeenCalledTimes(1);
+    } finally {
+      Date.now = originalDateNow;
+    }
+  });
 });

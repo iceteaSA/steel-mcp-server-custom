@@ -120,14 +120,18 @@ export async function runAct(
 
   const steps: string[] = [];
 
+  function elapsedMs(): number {
+    return Date.now() - startedAt;
+  }
+
   function remainingMs(): number {
-    return Math.max(1, WALL_CAP_MS - (Date.now() - startedAt));
+    return Math.max(1, WALL_CAP_MS - elapsedMs());
   }
 
   function checkCap(label: string): void {
-    if (remainingMs() <= 0) {
-      steps.push(`${label}: 60s wall-clock cap reached`);
-      throw new Error([...steps, "Failure: 60s wall-clock cap reached"].join("\n"));
+    if (elapsedMs() >= WALL_CAP_MS) {
+      steps.push(`${label}: reached 60s wall cap`);
+      throw new Error([...steps, "Failure: reached 60s wall cap"].join("\n"));
     }
   }
 

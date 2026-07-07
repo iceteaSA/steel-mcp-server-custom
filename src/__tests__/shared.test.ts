@@ -213,6 +213,17 @@ describe("execFillField", () => {
     expect(loc.fill).toHaveBeenCalledWith("hello", { timeout: 10000 });
   });
 
+  it("selects by value with explicit select kind", async () => {
+    const page = makeFakePage();
+    await execFillField(page, baseEnv as any, {
+      selector: "#country",
+      value: "US",
+      kind: "select",
+    });
+    const loc = (page.locator as any).mock.results[0].value;
+    expect(loc.selectOption).toHaveBeenCalledWith("US", { timeout: 10000 });
+  });
+
   it("selects by label with explicit selectLabel kind", async () => {
     const page = makeFakePage();
     await execFillField(page, baseEnv as any, {
