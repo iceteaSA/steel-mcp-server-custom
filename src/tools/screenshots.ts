@@ -242,6 +242,7 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
         // Annotate — overlay numbered labels on interactive elements and return
         // a marks map so the agent can correlate visual position to refs.
         let marks: Array<{ n: number; ref: string; x: number; y: number }> | undefined;
+        let annotateNote = "";
         if (annotate) {
           try {
             const snap = await captureSnapshot(page, resolvedTabId, {
@@ -252,31 +253,41 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
             const refRe = /@e\d+/g;
             const refs = [...new Set(interactive.match(refRe) ?? [])];
 
-            const boxes: Array<{
-              n: number;
-              ref: string;
-              x: number;
-              y: number;
-              w: number;
-              h: number;
-            }> = [];
-            let num = 0;
-            for (const ref of refs) {
-              const box = await page
-                .locator(`aria-ref=${ref.slice(1)}`)
-                .boundingBox()
-                .catch(() => null);
-              if (box) {
-                num += 1;
-                boxes.push({
-                  n: num,
-                  ref: ref.slice(1),
-                  x: box.x,
-                  y: box.y,
-                  w: box.width,
-                  h: box.height,
-                });
-              }
+            // Cap at MAX_MARKS to avoid N serial CDP round-trips on pages with
+            // hundreds of interactive elements. Resolve boundingBoxes in parallel.
+            const MAX_MARKS = 50;
+            const refsToMark = refs.slice(0, MAX_MARKS);
+
+            const resolved = await Promise.all(
+              refsToMark.map(async (ref) => {
+                const box = await page
+                  .locator(`aria-ref=${ref.slice(1)}`)
+                  .boundingBox()
+                  .catch(() => null);
+                return box ? { ref: ref.slice(1), box } : null;
+              }),
+            );
+
+            const withBoxes = resolved.filter(
+              (
+                r,
+              ): r is {
+                ref: string;
+                box: { x: number; y: number; width: number; height: number };
+              } => r !== null,
+            );
+
+            const boxes = withBoxes.map((r, i) => ({
+              n: i + 1,
+              ref: r.ref,
+              x: r.box.x,
+              y: r.box.y,
+              w: r.box.width,
+              h: r.box.height,
+            }));
+
+            if (refs.length > MAX_MARKS) {
+              annotateNote = ` (marked first ${MAX_MARKS} of ${refs.length} interactive elements)`;
             }
 
             marks = boxes.map((b) => ({
@@ -417,7 +428,7 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
             content: [
               {
                 type: "text",
-                text: `Screenshot saved to: ${filePath}\nSize: ${buffer.length.toLocaleString()} bytes${autoNote}`,
+                text: `Screenshot saved to: ${filePath}\nSize: ${buffer.length.toLocaleString()} bytes${annotateNote}${autoNote}`,
               },
             ],
           };
@@ -429,7 +440,7 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
 
         const result: any = {
           content: [
-            { type: "text", text: "Screenshot taken." },
+            { type: "text", text: `Screenshot taken.${annotateNote}` },
             {
               type: "image",
               data: buffer.toString("base64"),
