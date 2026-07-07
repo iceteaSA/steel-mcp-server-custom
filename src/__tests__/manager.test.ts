@@ -401,3 +401,294 @@ describe("ownersWithLiveTabs", () => {
     expect(result.find((r: { owner: string }) => r.owner === "agent-b")).toBeDefined();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Dialog capture (D1) — state machine for browser dialogs
+// ---------------------------------------------------------------------------
+
+import type { Dialog } from "playwright";
+
+/** Build a minimal fake Dialog object for testing dialog capture + handling. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function fakeDialog(overrides: Record<string, any> = {}): Dialog {
+  return {
+    type: () => overrides.type ?? "alert",
+    message: () => overrides.message ?? "Test message",
+    defaultValue: () => overrides.defaultValue ?? "",
+    accept: overrides.accept ?? (async () => {}),
+    dismiss: overrides.dismiss ?? (async () => {}),
+  } as unknown as Dialog;
+}
+
+/**
+ * Register a tab WITH the dialog capture listener wired (mirrors allocateTab).
+ * The standard addTab helper skips the dialog listener — use this when
+ * testing dialog-specific behaviour.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function addTabWithDialog(mgr: any, owner?: string): number {
+  const id = mgr.nextTabId++;
+  const page = fakePage();
+  mgr.tabs.set(id, page);
+  if (owner) mgr.tabOwners.set(id, owner);
+  mgr.tabLastActivity.set(id, Date.now());
+  page.on("close", () => {
+    mgr.tabs.delete(id);
+    mgr.tabOwners.delete(id);
+    mgr.tabLastActivity.delete(id);
+    for (const [o, activeId] of mgr.ownerActiveTab) {
+      if (activeId === id) mgr.ownerActiveTab.delete(o);
+    }
+    const pending = mgr.pendingDialogs?.get(id);
+    if (pending) {
+      clearTimeout(pending.timer);
+      mgr.pendingDialogs.delete(id);
+    }
+    mgr.lastDialogs?.delete(id);
+  });
+  // Wire the dialog listener — mirror of manager.allocateTab
+  page.on("dialog", async (dialog: Dialog) => {
+    const type = dialog.type();
+    const message = dialog.message();
+    const defaultValue = dialog.defaultValue();
+
+    if (type === "beforeunload") {
+      await dialog.accept();
+      mgr.lastDialogs.set(id, {
+        type,
+        message,
+        action: "accepted",
+        autoDismissed: true,
+        at: Date.now(),
+      });
+      return;
+    }
+
+    const timer = setTimeout(async () => {
+      mgr.pendingDialogs.delete(id);
+      try {
+        await dialog.dismiss();
+      } catch {
+        /* */
+      }
+      mgr.lastDialogs.set(id, {
+        type,
+        message,
+        action: "dismissed",
+        autoDismissed: true,
+        at: Date.now(),
+      });
+    }, mgr.dialogAutoDismissMs);
+
+    mgr.pendingDialogs.set(id, { dialog, type, message, defaultValue, at: Date.now(), timer });
+  });
+  return id;
+}
+
+describe("dialog capture", () => {
+  it("beforeunload dialogs are auto-accepted and recorded as lastDialog", async () => {
+    const mgr = setupMgr();
+    let accepted = false;
+    const dialog = fakeDialog({
+      type: "beforeunload",
+      message: "Leave site?",
+      accept: async () => {
+        accepted = true;
+      },
+    });
+    const tabId = addTabWithDialog(mgr);
+    // Fire the dialog event — the handler is async so wait for it to settle.
+    (mgr.tabs.get(tabId) as any)._emit("dialog", dialog);
+    await new Promise((r) => setTimeout(r, 10));
+
+    // beforeunload should be accepted immediately
+    expect(accepted).toBe(true);
+
+    // No pending dialog — beforeunload bypasses pending state
+    expect(mgr.getPendingDialog(tabId)).toBeNull();
+
+    // Recorded as lastDialog with autoDismissed: true
+    const last = mgr.getLastDialog(tabId);
+    expect(last).toBeTruthy();
+    expect(last!.type).toBe("beforeunload");
+    expect(last!.message).toBe("Leave site?");
+    expect(last!.action).toBe("accepted");
+    expect(last!.autoDismissed).toBe(true);
+  });
+
+  it("alert dialogs are stored as pending with auto-dismiss timer", async () => {
+    const mgr = setupMgr();
+    mgr.dialogAutoDismissMs = 50; // short timeout for test
+    let dismissed = false;
+    const dialog = fakeDialog({
+      type: "alert",
+      message: "Hello!",
+      dismiss: async () => {
+        dismissed = true;
+      },
+    });
+    const tabId = addTabWithDialog(mgr);
+    (mgr.tabs.get(tabId) as any)._emit("dialog", dialog);
+
+    // Immediately pending
+    const pending = mgr.getPendingDialog(tabId);
+    expect(pending).toBeTruthy();
+    expect(pending!.type).toBe("alert");
+    expect(pending!.message).toBe("Hello!");
+
+    // Wait for auto-dismiss
+    await new Promise((r) => setTimeout(r, 100));
+
+    expect(dismissed).toBe(true);
+    expect(mgr.getPendingDialog(tabId)).toBeNull();
+
+    const last = mgr.getLastDialog(tabId);
+    expect(last).toBeTruthy();
+    expect(last!.action).toBe("dismissed");
+    expect(last!.autoDismissed).toBe(true);
+  });
+
+  it("handleDialog accept: clears timer, accepts dialog, records lastDialog", async () => {
+    const mgr = setupMgr();
+    let acceptedPromptText: string | undefined;
+    const dialog = fakeDialog({
+      type: "prompt",
+      message: "Enter name:",
+      defaultValue: "Alice",
+      accept: async (text?: string) => {
+        acceptedPromptText = text;
+      },
+    });
+    const tabId = addTabWithDialog(mgr);
+    (mgr.tabs.get(tabId) as any)._emit("dialog", dialog);
+
+    const result = await mgr.handleDialog(tabId, "accept", "Bob");
+    expect(result.type).toBe("prompt");
+    expect(result.action).toBe("accepted");
+    expect(result.promptText).toBe("Bob");
+    expect(acceptedPromptText).toBe("Bob");
+
+    // Timer cleared, no longer pending
+    expect(mgr.getPendingDialog(tabId)).toBeNull();
+
+    const last = mgr.getLastDialog(tabId);
+    expect(last!.action).toBe("accepted");
+    expect(last!.autoDismissed).toBe(false);
+  });
+
+  it("handleDialog dismiss: clears timer, dismisses dialog, records lastDialog", async () => {
+    const mgr = setupMgr();
+    let dismissed = false;
+    const dialog = fakeDialog({
+      type: "confirm",
+      message: "Are you sure?",
+      dismiss: async () => {
+        dismissed = true;
+      },
+    });
+    const tabId = addTabWithDialog(mgr);
+    (mgr.tabs.get(tabId) as any)._emit("dialog", dialog);
+
+    const result = await mgr.handleDialog(tabId, "dismiss");
+    expect(result.action).toBe("dismissed");
+    expect(dismissed).toBe(true);
+    expect(mgr.getPendingDialog(tabId)).toBeNull();
+
+    const last = mgr.getLastDialog(tabId);
+    expect(last!.action).toBe("dismissed");
+    expect(last!.autoDismissed).toBe(false);
+  });
+
+  it("handleDialog throws when no dialog is pending", async () => {
+    const mgr = setupMgr();
+    const tabId = addTabWithDialog(mgr);
+    await expect(mgr.handleDialog(tabId, "accept")).rejects.toThrow("No pending dialog");
+  });
+
+  it("dialogNotice returns pending warning when dialog is pending", () => {
+    const mgr = setupMgr();
+    const dialog = fakeDialog({ type: "alert", message: "Oops!" });
+    const tabId = addTabWithDialog(mgr);
+    (mgr.tabs.get(tabId) as any)._emit("dialog", dialog);
+
+    const notice = mgr.dialogNotice(tabId);
+    expect(notice).toContain("⚠ dialog appeared");
+    expect(notice).toContain("alert");
+    expect(notice).toContain("Oops!");
+    expect(notice).toContain("handle_dialog");
+  });
+
+  it("dialogNotice returns auto-dismissed warning for recent auto-dismiss (within 30s)", () => {
+    const mgr = setupMgr();
+    const tabId = addTabWithDialog(mgr);
+    mgr.lastDialogs.set(tabId, {
+      type: "confirm",
+      message: "Delete item?",
+      action: "dismissed",
+      autoDismissed: true,
+      at: Date.now(), // just now
+    });
+
+    const notice = mgr.dialogNotice(tabId);
+    expect(notice).toContain("⚠ dialog");
+    expect(notice).toContain("confirm");
+    expect(notice).toContain("Delete item?");
+    expect(notice).toContain("auto-dismissed");
+  });
+
+  it("dialogNotice returns empty when no dialogs and no recent auto-dismiss", () => {
+    const mgr = setupMgr();
+    const tabId = addTabWithDialog(mgr);
+    expect(mgr.dialogNotice(tabId)).toBe("");
+  });
+
+  it("dialogNotice returns empty when lastDialog autoDismissed is older than 30s", () => {
+    const mgr = setupMgr();
+    const tabId = addTabWithDialog(mgr);
+    mgr.lastDialogs.set(tabId, {
+      type: "alert",
+      message: "Old",
+      action: "dismissed",
+      autoDismissed: true,
+      at: Date.now() - 31000, // 31s ago
+    });
+    expect(mgr.dialogNotice(tabId)).toBe("");
+  });
+
+  it("dialogNotice returns empty when lastDialog was NOT auto-dismissed", () => {
+    const mgr = setupMgr();
+    const tabId = addTabWithDialog(mgr);
+    mgr.lastDialogs.set(tabId, {
+      type: "alert",
+      message: "Handled",
+      action: "accepted",
+      autoDismissed: false,
+      at: Date.now(),
+    });
+    expect(mgr.dialogNotice(tabId)).toBe("");
+  });
+
+  it("closeTab clears pending dialog timer and dismisses the dialog", async () => {
+    const mgr = setupMgr();
+    mgr.primaryTabId = 999;
+    mgr.tabs.set(999, fakePage());
+
+    let dismissed = false;
+    const dialog = fakeDialog({
+      type: "alert",
+      message: "Test",
+      dismiss: async () => {
+        dismissed = true;
+      },
+    });
+    const tabId = addTabWithDialog(mgr);
+    (mgr.tabs.get(tabId) as any)._emit("dialog", dialog);
+    expect(mgr.getPendingDialog(tabId)).toBeTruthy();
+
+    await mgr.closeTab(tabId);
+
+    // Pending dialog should be dismissed
+    expect(dismissed).toBe(true);
+    expect(mgr.getPendingDialog(tabId)).toBeNull();
+  });
+});
