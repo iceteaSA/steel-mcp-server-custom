@@ -257,6 +257,15 @@ describe("diffSnapshots", () => {
     expect(result.length).toBeLessThanOrEqual(300);
     expect(result).toContain("truncated");
   });
+
+  it("hard-clips to maxChars even when tiny (e.g. 10)", () => {
+    // A large diff from small maxChars — even truncateAtLine's minimum
+    // (one full line) may exceed the effective budget.
+    const prev = Array.from({ length: 30 }, (_, i) => `- text "Line ${i}" [ref=e${i}]`).join("\n");
+    const next = "";
+    const result = diffSnapshots(prev, next, { maxChars: 10 });
+    expect(result.length).toBeLessThanOrEqual(10);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -312,7 +312,11 @@ function capOutput(raw: string, maxChars: number, suffix: string): string {
   if (raw.length <= maxChars) return raw;
   const effective = Math.max(1, maxChars - suffix.length);
   const { text } = truncateAtLine(raw, effective);
-  return text + suffix;
+  let out = text + suffix;
+  // Hard-clip when truncateAtLine keeps a line longer than effective
+  // (truncateAtLine guarantees at least one full line).
+  if (out.length > maxChars) out = out.slice(0, maxChars);
+  return out;
 }
 
 // -----------------------------------------------------------------------------
