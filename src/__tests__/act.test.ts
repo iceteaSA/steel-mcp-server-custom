@@ -75,37 +75,26 @@ const baseEnv = {
   ACT_LLM_MODEL: "gemma",
 };
 
-// Mock heavy deps so tests stay unit-level.
+// Per-test deps injected into runAct. Using the DI seam (RunActDeps) instead of
+// bun's mock.module() avoids leaking the mocks into other test files that share
+// the same process — bun 1.3.14 cannot restore module mocks after the file's
+// tests complete.
 const mockLlmJson = mock<() => Promise<any>>(() => Promise.resolve({ action: "done", reason: "" }));
 const mockCaptureSnapshot = mock<() => Promise<{ text: string; generation: number }>>(() =>
   Promise.resolve({ text: "", generation: 1 }),
 );
-const mockAfterAction = mock(() => Promise.resolve());
 const mockActionFeedback = mock(() => Promise.resolve(""));
 
-mock.module("../llm.js", () => ({
-  llmConfigured: () => true,
+const baseDeps = {
   llmJson: mockLlmJson,
-}));
-
-mock.module("../snapshot.js", () => ({
   captureSnapshot: mockCaptureSnapshot,
-  storeSnapshot: mock(() => {}),
-  getStoredSnapshot: mock(() => undefined),
-  diffSnapshots: mock(() => "(no visible change)"),
-}));
-
-mock.module("../utils.js", () => ({
-  afterAction: mockAfterAction,
   actionFeedback: mockActionFeedback,
-  writeToFile: mock((data: string) => Promise.resolve(`/tmp/out/${data.length}`)),
-}));
+};
 
 describe("runAct", () => {
   beforeEach(() => {
     mockLlmJson.mockReset();
     mockCaptureSnapshot.mockReset();
-    mockAfterAction.mockReset();
     mockActionFeedback.mockReset();
   });
 
@@ -115,7 +104,12 @@ describe("runAct", () => {
     mockCaptureSnapshot.mockResolvedValue({ text: "- button [ref=e1]", generation: 1 });
     mockLlmJson.mockResolvedValue({ action: "done", reason: "Task complete" });
 
-    const text = await runAct({ instruction: "do nothing", maxSteps: 3 }, mgr, baseEnv as any);
+    const text = await runAct(
+      { instruction: "do nothing", maxSteps: 3 },
+      mgr,
+      baseEnv as any,
+      baseDeps,
+    );
 
     expect(text).toContain("step 1: done");
     expect(text).toContain("Task complete");
@@ -133,7 +127,12 @@ describe("runAct", () => {
       .mockResolvedValueOnce({ action: "press_key", ref: "e3", value: "Enter", reason: "submit" })
       .mockResolvedValueOnce({ action: "done", reason: "submitted" });
 
-    const text = await runAct({ instruction: "submit the form", maxSteps: 5 }, mgr, baseEnv as any);
+    const text = await runAct(
+      { instruction: "submit the form", maxSteps: 5 },
+      mgr,
+      baseEnv as any,
+      baseDeps,
+    );
 
     expect(text).toMatch(/step 1: click e1.*open form/);
     expect(text).toMatch(/step 2: fill e2 "hello".*enter text/);
@@ -148,7 +147,12 @@ describe("runAct", () => {
     mockCaptureSnapshot.mockResolvedValue({ text: "- nothing", generation: 1 });
     mockLlmJson.mockResolvedValue({ action: "stuck", reason: "No matching element" });
 
-    const text = await runAct({ instruction: "click missing", maxSteps: 5 }, mgr, baseEnv as any);
+    const text = await runAct(
+      { instruction: "click missing", maxSteps: 5 },
+      mgr,
+      baseEnv as any,
+      baseDeps,
+    );
 
     expect(text).toContain("step 1: stuck");
     expect(text).toContain("No matching element");
@@ -161,7 +165,12 @@ describe("runAct", () => {
     mockCaptureSnapshot.mockResolvedValue({ text: "- button [ref=e1]", generation: 1 });
     mockLlmJson.mockResolvedValue({ action: "click", ref: "e1", reason: "keep going" });
 
-    const text = await runAct({ instruction: "keep clicking", maxSteps: 2 }, mgr, baseEnv as any);
+    const text = await runAct(
+      { instruction: "keep clicking", maxSteps: 2 },
+      mgr,
+      baseEnv as any,
+      baseDeps,
+    );
 
     expect(text).toContain("step 1: click e1");
     expect(text).toContain("step 2: click e1");
@@ -177,7 +186,12 @@ describe("runAct", () => {
       .mockResolvedValueOnce({ action: "scroll", ref: "e5", value: "down", reason: "see more" })
       .mockResolvedValueOnce({ action: "done", reason: "enough" });
 
-    const text = await runAct({ instruction: "scroll", maxSteps: 3 }, mgr, baseEnv as any);
+    const text = await runAct(
+      { instruction: "scroll", maxSteps: 3 },
+      mgr,
+      baseEnv as any,
+      baseDeps,
+    );
 
     expect(text).toMatch(/step 1: scroll e5 "down".*see more/);
     expect(text).toMatch(/step 2: done.*enough/);
@@ -189,9 +203,9 @@ describe("runAct", () => {
     mockCaptureSnapshot.mockResolvedValue({ text: "- button", generation: 1 });
     mockLlmJson.mockRejectedValue(new Error("LLM timeout"));
 
-    await expect(runAct({ instruction: "fail", maxSteps: 3 }, mgr, baseEnv as any)).rejects.toThrow(
-      /LLM timeout/,
-    );
+    await expect(
+      runAct({ instruction: "fail", maxSteps: 3 }, mgr, baseEnv as any, baseDeps),
+    ).rejects.toThrow(/LLM timeout/);
   });
 
   it("includes the transcript so far when an action fails", async () => {
@@ -205,7 +219,7 @@ describe("runAct", () => {
     (page.locator as any).mockImplementation(() => fakeLocator);
 
     await expect(
-      runAct({ instruction: "one click", maxSteps: 3 }, mgr, baseEnv as any),
+      runAct({ instruction: "one click", maxSteps: 3 }, mgr, baseEnv as any, baseDeps),
     ).rejects.toThrow(/step 1: click e1.*stale ref/s);
   });
 
@@ -224,7 +238,7 @@ describe("runAct", () => {
 
     try {
       await expect(
-        runAct({ instruction: "click", maxSteps: 5 }, mgr, baseEnv as any),
+        runAct({ instruction: "click", maxSteps: 5 }, mgr, baseEnv as any, baseDeps),
       ).rejects.toThrow(/reached 60s wall cap/);
       expect(mockLlmJson).toHaveBeenCalledTimes(1);
     } finally {

@@ -27,22 +27,19 @@ const baseEnv = {
   ACT_LLM_MODEL: "gemma",
 };
 
-// Mock heavy deps so tests stay unit-level.
+// Per-test deps injected into runExtractAi. Using the DI seam (RunExtractAiDeps)
+// instead of bun's mock.module() avoids leaking the mocks into other test files
+// that share the same process — bun 1.3.14 cannot restore module mocks after
+// the file's tests complete.
 const mockLlmJson = mock<(env: any, opts: any) => Promise<any>>(() =>
   Promise.resolve({ name: "Alice" }),
 );
 const mockWriteToFile = mock<() => Promise<string>>(() => Promise.resolve("/tmp/out/result.json"));
 
-mock.module("../llm.js", () => ({
-  llmConfigured: () => true,
+const baseDeps = {
   llmJson: mockLlmJson,
-}));
-
-mock.module("../utils.js", () => ({
-  afterAction: mock(() => Promise.resolve()),
-  actionFeedback: mock(() => Promise.resolve("")),
   writeToFile: mockWriteToFile,
-}));
+};
 
 function makeFakeMgr(html: string): BrowserManager {
   return {
@@ -138,6 +135,7 @@ describe("runExtractAi", () => {
       { instruction: "get greeting", schema, format: "text" },
       mgr,
       baseEnv as any,
+      baseDeps,
     );
 
     expect(result.text).toBe(JSON.stringify({ name: "Alice" }, null, 2));
@@ -154,6 +152,7 @@ describe("runExtractAi", () => {
       { instruction: "extract", format: "text" },
       mgr,
       baseEnv as any,
+      baseDeps,
     );
 
     expect(result.text).toBe(JSON.stringify({ name: "Alice" }, null, 2));
@@ -165,7 +164,7 @@ describe("runExtractAi", () => {
     const longText = "x".repeat(25_000);
     const mgr = makeFakeMgr(`<p>${longText}</p>`);
 
-    await runExtractAi({ instruction: "extract", format: "html" }, mgr, baseEnv as any);
+    await runExtractAi({ instruction: "extract", format: "html" }, mgr, baseEnv as any, baseDeps);
 
     const callArgs = mockLlmJson.mock.calls[0][1];
     expect(callArgs.user.length).toBeLessThanOrEqual(20_000 + 100);
@@ -179,10 +178,12 @@ describe("runExtractAi", () => {
       return big;
     });
 
-    const result = await runExtractAi({ instruction: "extract", format: "text" }, mgr, {
-      ...baseEnv,
-      MAX_INLINE_BYTES: 100,
-    } as any);
+    const result = await runExtractAi(
+      { instruction: "extract", format: "text" },
+      mgr,
+      { ...baseEnv, MAX_INLINE_BYTES: 100 } as any,
+      baseDeps,
+    );
 
     expect(result.filePath).toBe("/tmp/out/result.json");
     expect(mockWriteToFile).toHaveBeenCalled();

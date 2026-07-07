@@ -1,12 +1,40 @@
-import type { Page } from "patchright";
-import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
-import { extractPageContent } from "../helpers.js";
-import { llmJson } from "../llm.js";
-import { captureSnapshot } from "../snapshot.js";
-import { actionFeedback, writeToFile } from "../utils.js";
+import { z } from "zod";
+import { extractPageContent as defaultExtractPageContent } from "../helpers.js";
+import { llmJson as defaultLlmJson } from "../llm.js";
+import { captureSnapshot as defaultCaptureSnapshot } from "../snapshot.js";
+import {
+  actionFeedback as defaultActionFeedback,
+  writeToFile as defaultWriteToFile,
+} from "../utils.js";
 import type { ToolRegistrar } from "./shared.js";
-import { execClick, execFillField, execPressKey, execScroll, tabTarget } from "./shared.js";
+import {
+  execClick as defaultExecClick,
+  execFillField as defaultExecFillField,
+  execPressKey as defaultExecPressKey,
+  execScroll as defaultExecScroll,
+  tabTarget,
+} from "./shared.js";
+
+// Dependency-injection seam. Production code uses the defaults; tests pass
+// mocks through this object instead of mutating the global module registry
+// via bun's mock.module() — which leaks into other test files when they
+// share a process. See src/__tests__/act.test.ts for usage.
+export interface RunActDeps {
+  captureSnapshot?: typeof defaultCaptureSnapshot;
+  llmJson?: typeof defaultLlmJson;
+  actionFeedback?: typeof defaultActionFeedback;
+  execClick?: typeof defaultExecClick;
+  execFillField?: typeof defaultExecFillField;
+  execPressKey?: typeof defaultExecPressKey;
+  execScroll?: typeof defaultExecScroll;
+}
+
+export interface RunExtractAiDeps {
+  extractPageContent?: typeof defaultExtractPageContent;
+  llmJson?: typeof defaultLlmJson;
+  writeToFile?: typeof defaultWriteToFile;
+}
 
 const ACT_ACTION_SCHEMA = z.object({
   action: z.enum(["click", "fill", "press_key", "scroll", "done", "stuck"]),
@@ -108,7 +136,16 @@ export async function runAct(
   },
   mgr: BrowserManager,
   env: Env,
+  deps: RunActDeps = {},
 ): Promise<string> {
+  const captureSnapshot = deps.captureSnapshot ?? defaultCaptureSnapshot;
+  const llmJson = deps.llmJson ?? defaultLlmJson;
+  const actionFeedback = deps.actionFeedback ?? defaultActionFeedback;
+  const execClick = deps.execClick ?? defaultExecClick;
+  const execFillField = deps.execFillField ?? defaultExecFillField;
+  const execPressKey = deps.execPressKey ?? defaultExecPressKey;
+  const execScroll = deps.execScroll ?? defaultExecScroll;
+
   const { instruction, maxSteps, tabId, owner, force } = args;
   const page = await mgr.getPage({ tabId, owner, force });
   const resolvedTabId = mgr.resolveTab({ tabId, owner, force });
@@ -161,7 +198,27 @@ export async function runAct(
       const stepLine = `step ${step}: ${decision.action} ${decision.ref ?? ""}${valuePart} — ${decision.reason}`;
       steps.push(stepLine);
       const actionStart = Date.now();
-      await executeAction(page, env, decision);
+      switch (decision.action) {
+        case "click":
+          await execClick(page, env, { ref: decision.ref });
+          break;
+        case "fill":
+          if (decision.value === undefined) throw new Error("fill action requires a value");
+          await execFillField(page, env, { ref: decision.ref, value: decision.value });
+          break;
+        case "press_key":
+          if (decision.value === undefined)
+            throw new Error("press_key action requires a value (key)");
+          await execPressKey(page, env, { ref: decision.ref, key: decision.value });
+          break;
+        case "scroll": {
+          const direction = decision.value === "up" ? "up" : "down";
+          await execScroll(page, env, { ref: decision.ref, direction });
+          break;
+        }
+        default:
+          throw new Error(`Unknown action: ${decision.action}`);
+      }
       const actionElapsed = Date.now() - actionStart;
       steps[steps.length - 1] = `${stepLine} (${actionElapsed}ms)`;
 
@@ -182,33 +239,6 @@ export async function runAct(
     }
     steps.push(`Failure: ${message}`);
     throw new Error(steps.join("\n"));
-  }
-}
-
-async function executeAction(
-  page: Page,
-  env: Env,
-  decision: z.infer<typeof ACT_ACTION_SCHEMA>,
-): Promise<void> {
-  switch (decision.action) {
-    case "click":
-      await execClick(page, env, { ref: decision.ref });
-      break;
-    case "fill":
-      if (decision.value === undefined) throw new Error("fill action requires a value");
-      await execFillField(page, env, { ref: decision.ref, value: decision.value });
-      break;
-    case "press_key":
-      if (decision.value === undefined) throw new Error("press_key action requires a value (key)");
-      await execPressKey(page, env, { ref: decision.ref, key: decision.value });
-      break;
-    case "scroll": {
-      const direction = decision.value === "up" ? "up" : "down";
-      await execScroll(page, env, { ref: decision.ref, direction });
-      break;
-    }
-    default:
-      throw new Error(`Unknown action: ${decision.action}`);
   }
 }
 
@@ -313,7 +343,12 @@ export async function runExtractAi(
   },
   mgr: BrowserManager,
   env: Env,
+  deps: RunExtractAiDeps = {},
 ): Promise<{ text: string; structuredContent: unknown; filePath?: string }> {
+  const extractPageContent = deps.extractPageContent ?? defaultExtractPageContent;
+  const llmJson = deps.llmJson ?? defaultLlmJson;
+  const writeToFile = deps.writeToFile ?? defaultWriteToFile;
+
   const { instruction, schema: schemaJson, format } = args;
   const page = await mgr.getPage({ tabId: args.tabId, owner: args.owner, force: args.force });
 
