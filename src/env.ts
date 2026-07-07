@@ -80,6 +80,9 @@ export const EnvSchema = z
     // Default (unset): all toolsets. Overridden by --toolsets CLI flag.
     // Use to reduce the tool surface for context-budget-constrained agents.
     TOOLSETS: z.string().optional(),
+    // Maximum number of request/response events to keep for get_network.
+    // Set 0 to disable network capture entirely (no listeners, empty results).
+    NETWORK_BUFFER_SIZE: z.coerce.number().min(0).default(500),
   })
   .transform((env) => ({
     ...env,

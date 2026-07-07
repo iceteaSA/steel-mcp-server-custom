@@ -133,7 +133,7 @@ describe("non-browser tools", () => {
   it("tools/list returns expected tools with correct names", async () => {
     const r = await client.call(100, "tools/list");
     const names = r.result?.tools?.map((t) => t.name).sort() || [];
-    expect(names.length).toBe(33);
+    expect(names.length).toBe(34);
 
     // Verify removed tools are gone
     const removed = [

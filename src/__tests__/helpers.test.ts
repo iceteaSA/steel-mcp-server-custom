@@ -858,3 +858,125 @@ describe("validateExpression", () => {
     expect(err).toContain("not valid JavaScript");
   });
 });
+
+// ---------------------------------------------------------------------------
+// filterNetworkEvents — pure filter for get_network
+// ---------------------------------------------------------------------------
+import { filterNetworkEvents, type NetworkEventLike } from "../helpers.js";
+
+function makeEvent(overrides: Partial<NetworkEventLike> = {}): NetworkEventLike {
+  return {
+    id: 1,
+    tabId: 1,
+    method: "GET",
+    url: "https://example.com/",
+    resourceType: "document",
+    status: 200,
+    at: Date.now(),
+    ...overrides,
+  };
+}
+
+describe("filterNetworkEvents", () => {
+  it("returns all events when no filter is given", () => {
+    const events = [makeEvent({ id: 1 }), makeEvent({ id: 2 })];
+    expect(filterNetworkEvents(events, {})).toHaveLength(2);
+  });
+
+  it("filters by tabId", () => {
+    const events = [makeEvent({ id: 1, tabId: 1 }), makeEvent({ id: 2, tabId: 2 })];
+    const result = filterNetworkEvents(events, { tabId: 2 });
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe(2);
+  });
+
+  it("filters by resourceType", () => {
+    const events = [
+      makeEvent({ id: 1, resourceType: "xhr" }),
+      makeEvent({ id: 2, resourceType: "fetch" }),
+      makeEvent({ id: 3, resourceType: "script" }),
+    ];
+    const result = filterNetworkEvents(events, { resourceType: "fetch" });
+    expect(result.map((e) => e.id)).toEqual([2]);
+  });
+
+  it("filters by url substring", () => {
+    const events = [
+      makeEvent({ id: 1, url: "https://a.com/api/users" }),
+      makeEvent({ id: 2, url: "https://a.com/static/main.js" }),
+      makeEvent({ id: 3, url: "https://b.com/api" }),
+    ];
+    const result = filterNetworkEvents(events, { urlPattern: "/api/" });
+    expect(result.map((e) => e.id)).toEqual([1, 3]);
+  });
+
+  it("filters by /regex/ url pattern", () => {
+    const events = [
+      makeEvent({ id: 1, url: "https://a.com/api/users" }),
+      makeEvent({ id: 2, url: "https://a.com/static/main.js" }),
+      makeEvent({ id: 3, url: "https://b.com/API/orders" }),
+    ];
+    const result = filterNetworkEvents(events, { urlPattern: "/api/i" });
+    expect(result.map((e) => e.id)).toEqual([1, 3]);
+  });
+
+  it("filters by exact status", () => {
+    const events = [
+      makeEvent({ id: 1, status: 200 }),
+      makeEvent({ id: 2, status: 404 }),
+      makeEvent({ id: 3, status: 500 }),
+    ];
+    expect(filterNetworkEvents(events, { status: "404" }).map((e) => e.id)).toEqual([2]);
+  });
+
+  it("filters by 4xx status range", () => {
+    const events = [
+      makeEvent({ id: 1, status: 200 }),
+      makeEvent({ id: 2, status: 400 }),
+      makeEvent({ id: 3, status: 404 }),
+      makeEvent({ id: 4, status: 500 }),
+    ];
+    expect(filterNetworkEvents(events, { status: "4xx" }).map((e) => e.id)).toEqual([2, 3]);
+  });
+
+  it("filters by 5xx status range", () => {
+    const events = [
+      makeEvent({ id: 1, status: 200 }),
+      makeEvent({ id: 2, status: 404 }),
+      makeEvent({ id: 3, status: 500 }),
+      makeEvent({ id: 4, status: 502 }),
+    ];
+    expect(filterNetworkEvents(events, { status: "5xx" }).map((e) => e.id)).toEqual([3, 4]);
+  });
+
+  it("ignores failed events when status range does not match", () => {
+    const events = [makeEvent({ id: 1, status: 200, failed: true })];
+    expect(filterNetworkEvents(events, { status: "4xx" })).toHaveLength(0);
+  });
+
+  it("limits results and keeps newest last", () => {
+    const events = Array.from({ length: 10 }, (_, i) =>
+      makeEvent({ id: i + 1, url: `https://x/${i}` }),
+    );
+    const result = filterNetworkEvents(events, { limit: 3 });
+    expect(result).toHaveLength(3);
+    expect(result.map((e) => e.id)).toEqual([8, 9, 10]);
+  });
+
+  it("combines filters", () => {
+    const events = [
+      makeEvent({ id: 1, tabId: 1, resourceType: "xhr", status: 200, url: "/api/a" }),
+      makeEvent({ id: 2, tabId: 1, resourceType: "xhr", status: 404, url: "/api/b" }),
+      makeEvent({ id: 3, tabId: 2, resourceType: "xhr", status: 404, url: "/api/b" }),
+      makeEvent({ id: 4, tabId: 1, resourceType: "script", status: 404, url: "/api/b" }),
+    ];
+    const result = filterNetworkEvents(events, {
+      tabId: 1,
+      resourceType: "xhr",
+      status: "4xx",
+      urlPattern: "/api/b",
+      limit: 1,
+    });
+    expect(result.map((e) => e.id)).toEqual([2]);
+  });
+});

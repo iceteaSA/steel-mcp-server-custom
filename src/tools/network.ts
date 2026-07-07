@@ -10,8 +10,9 @@ import {
   mimeToExt,
   validateCookies,
 } from "../helpers.js";
-import { withBackgroundTab } from "../utils.js";
+import { withBackgroundTab, writeToFile } from "../utils.js";
 import type { ToolRegistrar } from "./shared.js";
+import { tabTarget } from "./shared.js";
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // cookies -------------------------------------------------------------------
@@ -278,6 +279,157 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
+      }
+    },
+  });
+
+  // get_network ---------------------------------------------------------------
+  register({
+    name: "get_network",
+    title: "Network Traffic",
+    description: `Inspect the request/response traffic a page has generated (XHR, fetch, document, scripts, etc.). Useful for finding API endpoints, debugging SPA loads, or verifying form submissions. Returns a compact list by default; set body=true (or pass requestId) to fetch one response body on demand.
+
+CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgraded to file mode if it exceeds MAX_INLINE_BYTES.`,
+    toolset: "network",
+    inputSchema: {
+      urlPattern: z
+        .string()
+        .optional()
+        .describe("Filter by URL substring (e.g. '/api/') or /regex/ (e.g. /api\\/i)."),
+      resourceType: z
+        .string()
+        .optional()
+        .describe(
+          "Filter by Playwright resource type (e.g. 'xhr', 'fetch', 'script', 'document').",
+        ),
+      status: z
+        .string()
+        .optional()
+        .describe("Filter by status: exact digits (200, 404) or range (4xx, 5xx)."),
+      limit: z.number().default(30).optional().describe("Max events to return. Default 30."),
+      body: z
+        .boolean()
+        .optional()
+        .describe(
+          "Return the response body of the single matching request. Requires exactly one match unless requestId is given.",
+        ),
+      requestId: z
+        .number()
+        .int()
+        .optional()
+        .describe("Exact network event id to fetch body for. Overrides body matching."),
+      ...tabTarget,
+    },
+    outputSchema: {
+      events: z
+        .array(
+          z.object({
+            id: z.number(),
+            method: z.string(),
+            url: z.string(),
+            resourceType: z.string(),
+            status: z.number().optional(),
+            sizeBytes: z.number().optional(),
+            durationMs: z.number().optional(),
+          }),
+        )
+        .optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async ({
+      urlPattern,
+      resourceType,
+      status,
+      limit = 30,
+      body,
+      requestId,
+      tabId,
+      owner,
+    }: {
+      urlPattern?: string;
+      resourceType?: string;
+      status?: string;
+      limit?: number;
+      body?: boolean;
+      requestId?: number;
+      tabId?: number;
+      owner?: string;
+    }) => {
+      try {
+        const resolved = mgr.resolveTab({ tabId, owner });
+        const events = mgr.getNetworkEvents({
+          urlPattern,
+          resourceType,
+          status,
+          tabId: resolved,
+          owner,
+          limit,
+        });
+
+        if (body || requestId !== undefined) {
+          const targetId = requestId ?? events[0]?.id;
+          if (requestId === undefined && events.length !== 1) {
+            return {
+              isError: true,
+              content: [
+                {
+                  type: "text",
+                  text: `${events.length} matches; pass requestId to fetch a specific body, or narrow the filter so exactly one request matches.`,
+                },
+              ],
+              structuredContent: { events },
+            };
+          }
+          if (targetId === undefined) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: "No matching network request found." }],
+              structuredContent: { events },
+            };
+          }
+
+          const bodyText = await mgr.getResponseBody(targetId);
+          const capped =
+            bodyText.length > 10000
+              ? bodyText.slice(0, 10000) + "\n[TRUNCATED at 10000 chars]"
+              : bodyText;
+          if (Buffer.byteLength(capped) > env.MAX_INLINE_BYTES) {
+            const filePath = await writeToFile(
+              Buffer.from(capped, "utf8"),
+              `network-body-${targetId}.txt`,
+              env,
+            );
+            return {
+              content: [{ type: "text", text: `Body written to: ${filePath}` }],
+              structuredContent: { events: [] },
+            };
+          }
+          return { content: [{ type: "text", text: capped }], structuredContent: { events: [] } };
+        }
+
+        const lines = events.map((e: any) => {
+          const statusOrFailed = e.failed ? "FAILED" : (e.status ?? "-");
+          const size = e.sizeBytes !== undefined ? `${e.sizeBytes}B` : "-";
+          const duration = e.durationMs !== undefined ? `${e.durationMs}ms` : "-";
+          return `#${e.id} ${e.method} ${statusOrFailed} ${e.resourceType} ${e.url} (${size} ${duration})`;
+        });
+
+        return {
+          content: [{ type: "text", text: lines.join("\n") || "No network events matched." }],
+          structuredContent: { events },
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          isError: true,
+          content: [{ type: "text", text: cleanErrorMessage(error) }],
+          structuredContent: { events: [] },
+        };
       }
     },
   });

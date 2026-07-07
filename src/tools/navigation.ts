@@ -183,6 +183,11 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
           }
         }
 
+        // Remember the final URL for crash recovery so the tab can be
+        // restored to the last successful navigation target.
+        const resolvedForLastUrl = mgr.resolveTab({ tabId, owner, force });
+        mgr.setTabLastUrl(resolvedForLastUrl, finalUrl);
+
         const navLine =
           finalUrl !== url
             ? `Navigated to ${url}\nFinal URL: ${finalUrl}`
@@ -224,7 +229,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
           silent: readPage,
         });
 
-        const dialogText = mgr.dialogNotice(resolved);
+        const pageNotice = mgr.dialogNotice(resolved) + mgr.consumeRecoveryNotice(resolved);
         const warningPrefix = priorWarning ? `[WARNING: ${priorWarning}]\n` : "";
         return {
           content: [
@@ -238,7 +243,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
                 mediaNote +
                 pageText +
                 (navFeedback ? `\n${navFeedback}` : "") +
-                dialogText,
+                pageNotice,
             },
           ],
         };
@@ -288,11 +293,12 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         // Reload is always a navigation even if the URL stays the same
         // (content may have changed), and no-ops report navigated:false.
         const resolved = mgr.resolveTab({ tabId, owner, force });
+        mgr.setTabLastUrl(resolved, afterUrl);
         const histFeedback = await actionFeedback(page, resolved, {
           navigated: afterUrl !== beforeUrl || action === "reload",
         });
         const feedbackText = histFeedback ? `\n${histFeedback}` : "";
-        const dialogText = mgr.dialogNotice(resolved);
+        const pageNotice = mgr.dialogNotice(resolved) + mgr.consumeRecoveryNotice(resolved);
 
         const verb =
           action === "back" ? "Went back" : action === "forward" ? "Went forward" : "Reloaded";
@@ -309,7 +315,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
           content: [
             {
               type: "text",
-              text: `${verb}${suffix}.\nCurrent URL: ${afterUrl}${titlePart}${feedbackText}${dialogText}`,
+              text: `${verb}${suffix}.\nCurrent URL: ${afterUrl}${titlePart}${feedbackText}${pageNotice}`,
             },
           ],
         };

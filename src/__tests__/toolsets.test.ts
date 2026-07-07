@@ -224,8 +224,8 @@ describe("tools/list wire-level completeness", () => {
     registerCredentials(register, stubMgr, stubEnv);
     registerProfiles(register, stubMgr, stubEnv);
 
-    // 33 tools total
-    expect(toolCount()).toBe(33);
+    // 34 tools total
+    expect(toolCount()).toBe(34);
 
     // Create client-server pair
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -238,7 +238,7 @@ describe("tools/list wire-level completeness", () => {
     const tools = result.tools;
 
     // Exact tool count on the wire
-    expect(tools.length).toBe(33);
+    expect(tools.length).toBe(34);
 
     for (const tool of tools) {
       const name = tool.name;

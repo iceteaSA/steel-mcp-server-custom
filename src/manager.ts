@@ -13,12 +13,17 @@ import fs from "fs/promises";
 import path from "path";
 import { sleep } from "./utils.js";
 
-import { chromium, Browser, BrowserContext, Page } from "playwright";
+import { chromium, Browser, BrowserContext, Page, Request, Response } from "playwright";
 import { Steel } from "steel-sdk";
 import { z } from "zod";
 import { EnvSchema } from "./env";
-import { isBrowserClosedError, isSteelSessionStuck } from "./helpers";
-import { isValidProfileName, assertSafeProfilePath } from "./helpers";
+import {
+  filterNetworkEvents,
+  isBrowserClosedError,
+  isSteelSessionStuck,
+  isValidProfileName,
+  assertSafeProfilePath,
+} from "./helpers";
 import { clearSnapshot, clearAllSnapshots } from "./snapshot.js";
 import { SETTLE_INIT_SCRIPT } from "./settle.js";
 
@@ -36,6 +41,27 @@ export type ConsoleMessage = {
   tabId?: number;
   location?: { url: string; lineNumber: number; columnNumber: number };
 };
+
+// -----------------------------------------------------------------------------
+// NetworkEvent — request/response metadata captured by BrowserManager
+// -----------------------------------------------------------------------------
+
+export interface NetworkEvent {
+  id: number;
+  tabId?: number;
+  method: string;
+  url: string;
+  resourceType: string;
+  status?: number;
+  contentType?: string;
+  sizeBytes?: number;
+  durationMs?: number;
+  at: number;
+  failed?: boolean;
+  // Strong reference to the Playwright Response while the event lives in the
+  // ring buffer; cleared on eviction so the body is released promptly.
+  response?: Response;
+}
 
 // -----------------------------------------------------------------------------
 // Error classes for owner-isolated tab access
@@ -140,6 +166,21 @@ export class BrowserManager {
       at: number;
     }
   >();
+
+  // Network capture — request/response ring buffer shared across contexts.
+  // Strong response refs live on the event until eviction; WeakSet prevents
+  // double-wiring listeners on the same BrowserContext.
+  private networkEvents: NetworkEvent[] = [];
+  private nextNetworkEventId = 1;
+  private requestStartTimes = new WeakMap<Request, number>();
+  private wiredNetworkContexts = new WeakSet<BrowserContext>();
+
+  // Last known URL per tab, used by crash recovery to re-navigate after a
+  // page is detected as closed/crashed.
+  private tabLastUrl = new Map<number, string>();
+
+  // One-shot notices appended to the next tool result for a recovered tab.
+  private recoveryNotices = new Map<number, string>();
 
   constructor(private readonly env: Env) {}
 
@@ -254,7 +295,18 @@ export class BrowserManager {
     if (owner) this.tabOwners.set(id, owner);
     this.tabLastActivity.set(id, Date.now());
     this.attachConsoleListener(page);
+    this.attachPageListeners(page, id);
     this.pageToTabId.set(page, id);
+    return id;
+  }
+
+  /**
+   * Attach dialog + close listeners to a page. Extracted so crash recovery
+   * can re-wire listeners on a replacement page without re-running the full
+   * allocateTab allocation path. Guards ignore events from a page that has
+   * been replaced in the tab registry.
+   */
+  private attachPageListeners(page: Page, id: number): void {
     // Dialog capture: Playwright dialogs block all page operations until
     // handled, so we resolve them immediately using the tab's pre-armed policy.
     // Default policy is dismiss (Playwright's conservative default). The agent
@@ -263,6 +315,10 @@ export class BrowserManager {
     // blocked. The whole handler is wrapped in try/catch with a best-effort
     // dismiss fallback so a listener bug never wedges the tab.
     page.on("dialog", async (dialog) => {
+      // Ignore events from a page that is no longer the registered one
+      // (e.g. the original page was replaced during crash recovery).
+      if (this.tabs.get(id) !== page) return;
+
       const type = dialog.type();
       const message = dialog.message();
       const defaultValue = dialog.defaultValue();
@@ -322,9 +378,13 @@ export class BrowserManager {
     });
 
     page.on("close", () => {
+      // Ignore close events from a page that was replaced by crash recovery
+      // so the new page's registry entry isn't wiped out.
+      if (this.tabs.get(id) !== page) return;
       this.tabs.delete(id);
       this.tabOwners.delete(id);
       this.tabLastActivity.delete(id);
+      this.tabLastUrl.delete(id);
       this.pageToTabId.delete(page);
       clearSnapshot(id);
       // Clean up ownerActiveTab if this was someone's active tab
@@ -341,7 +401,57 @@ export class BrowserManager {
       this.dialogPolicy.delete(id);
       this.lastDialogs.delete(id);
     });
-    return id;
+  }
+
+  /**
+   * Recreate a tab in-place: open a fresh page, swap it into the registry
+   * under the same tabId, re-wire listeners, and re-navigate to the last known
+   * URL. Sets a one-shot recovery notice for the tab.
+   */
+  private async _recoverTab(tabId: number): Promise<Page> {
+    const replacePage = async (page: Page): Promise<Page> => {
+      const oldPage = this.tabs.get(tabId);
+      if (oldPage) this.pageToTabId.delete(oldPage);
+      this.tabs.set(tabId, page);
+      this.pageToTabId.set(page, tabId);
+      this.tabLastActivity.set(tabId, Date.now());
+      this.attachConsoleListener(page);
+      this.attachPageListeners(page, tabId);
+      const lastUrl = this.tabLastUrl.get(tabId) ?? "about:blank";
+      try {
+        await page.goto(lastUrl, { waitUntil: "commit", timeout: 10000 });
+      } catch {
+        // Navigation failure on a crashed tab is best-effort; the caller
+        // still gets a live page to continue from.
+      }
+      this.tabLastUrl.set(tabId, page.url());
+      this.recoveryNotices.set(tabId, `⚠ tab ${tabId} crashed and was restored to ${page.url()}`);
+      return page;
+    };
+
+    try {
+      const newPage = await this.browserContext!.newPage();
+      return await replacePage(newPage);
+    } catch (err) {
+      if (!isBrowserClosedError(err)) throw err;
+      await this.softReset();
+      await sleep(2000);
+      await this.initialize();
+      const newPage = await this.browserContext!.newPage();
+      return await replacePage(newPage);
+    }
+  }
+
+  /** Return true if a page reference is unusable (closed or detached/crashed). */
+  private async isPageDead(page?: Page): Promise<boolean> {
+    if (!page || page.isClosed()) return true;
+    try {
+      page.url();
+      await page.evaluate(() => 1);
+      return false;
+    } catch {
+      return true;
+    }
   }
 
   /** Start the idle sweeper. Idempotent; no-op if TAB_IDLE_TIMEOUT_MS=0. */
@@ -535,6 +645,10 @@ export class BrowserManager {
 
     this.initialized = true;
 
+    // Wire network capture before popup capture so requests made by the
+    // initial page are recorded from the start.
+    this._wireNetworkCapture(this.browserContext!);
+
     // Register popup/new-page detection. Pages created by the site
     // (target=_blank, window.open) bypass allocateTab — this listener
     // catches them and wires them into the tab registry.
@@ -567,6 +681,150 @@ export class BrowserManager {
 
   /** Attach console log capture to a page (idempotent label via WeakSet). */
   private listenedPages = new WeakSet<Page>();
+
+  /**
+   * Wire request/response capture on a BrowserContext. Idempotent per context;
+   * skipped entirely when NETWORK_BUFFER_SIZE is 0.
+   */
+  private _wireNetworkCapture(context: BrowserContext): void {
+    if (this.env.NETWORK_BUFFER_SIZE <= 0) return;
+    if (this.wiredNetworkContexts.has(context)) return;
+    this.wiredNetworkContexts.add(context);
+
+    context.on("request", (request) => {
+      try {
+        this.requestStartTimes.set(request, Date.now());
+      } catch {
+        // Never let a listener bug escape into Playwright.
+      }
+    });
+
+    context.on("response", async (response) => {
+      try {
+        const request = response.request();
+        const start = this.requestStartTimes.get(request);
+        const page = request.frame()?.page();
+        const tabId = page ? this.pageToTabId.get(page) : undefined;
+        const headers = response.headers();
+        const contentType = headers["content-type"];
+        const contentLength = headers["content-length"];
+        const sizeBytes = contentLength ? parseInt(contentLength, 10) : undefined;
+
+        this.pushNetworkEvent({
+          id: this.nextNetworkEventId++,
+          tabId,
+          method: request.method(),
+          url: request.url(),
+          resourceType: request.resourceType(),
+          status: response.status(),
+          contentType,
+          sizeBytes,
+          durationMs: start ? Date.now() - start : undefined,
+          at: Date.now(),
+          response,
+        });
+      } catch {
+        // best-effort capture
+      }
+    });
+
+    context.on("requestfailed", (request) => {
+      try {
+        const page = request.frame()?.page();
+        const tabId = page ? this.pageToTabId.get(page) : undefined;
+        this.pushNetworkEvent({
+          id: this.nextNetworkEventId++,
+          tabId,
+          method: request.method(),
+          url: request.url(),
+          resourceType: request.resourceType(),
+          failed: true,
+          at: Date.now(),
+        });
+      } catch {
+        // best-effort capture
+      }
+    });
+  }
+
+  /** Append a network event to the ring buffer and evict oldest if over capacity. */
+  private pushNetworkEvent(event: NetworkEvent): void {
+    if (this.env.NETWORK_BUFFER_SIZE <= 0) return;
+    this.networkEvents.push(event);
+    if (this.networkEvents.length > this.env.NETWORK_BUFFER_SIZE) {
+      const evicted = this.networkEvents.splice(
+        0,
+        this.networkEvents.length - this.env.NETWORK_BUFFER_SIZE,
+      );
+      for (const e of evicted) {
+        e.response = undefined;
+      }
+    }
+  }
+
+  /**
+   * Return network events matching the given filter. Results are chronological
+   * (oldest first) with the newest `limit` entries when capped. Owner filtering
+   * is applied here because only the manager knows tab ownership.
+   */
+  getNetworkEvents(filter?: {
+    urlPattern?: string;
+    resourceType?: string;
+    status?: string;
+    tabId?: number;
+    owner?: string;
+    limit?: number;
+  }): NetworkEvent[] {
+    let events = this.networkEvents.slice();
+
+    if (filter?.owner) {
+      const ownedIds = new Set<number>();
+      for (const [id, owner] of this.tabOwners) {
+        if (owner === filter.owner) ownedIds.add(id);
+      }
+      events = events.filter((e) => e.tabId !== undefined && ownedIds.has(e.tabId!));
+    }
+
+    return filterNetworkEvents(events, {
+      urlPattern: filter?.urlPattern,
+      resourceType: filter?.resourceType,
+      status: filter?.status,
+      tabId: filter?.tabId,
+      limit: filter?.limit,
+    }) as NetworkEvent[];
+  }
+
+  /**
+   * Fetch the response body for a buffered network event. Throws if the event
+   * has been evicted or the response reference was collected.
+   */
+  async getResponseBody(id: number): Promise<string> {
+    const event = this.networkEvents.find((e) => e.id === id);
+    if (!event?.response) {
+      throw new Error("body no longer available");
+    }
+    const body = await event.response.body();
+    return body.toString();
+  }
+
+  /**
+   * Record the last known URL for a tab. Called by navigation tools after a
+   * successful navigation so crash recovery can restore to the right place.
+   */
+  setTabLastUrl(tabId: number, url: string): void {
+    this.tabLastUrl.set(tabId, url);
+  }
+
+  /**
+   * Consume and return the recovery notice for a tab, if any. The notice is
+   * cleared after the first read so it is appended to only one tool result.
+   */
+  consumeRecoveryNotice(tabId: number): string {
+    const notice = this.recoveryNotices.get(tabId);
+    if (!notice) return "";
+    this.recoveryNotices.delete(tabId);
+    return notice;
+  }
 
   /**
    * Wire popup/page capture on a BrowserContext so pages opened by the site
@@ -658,36 +916,36 @@ export class BrowserManager {
     if (tabId !== undefined || owner) {
       const resolved = this.resolveTab({ tabId, owner, force });
       const page = this.tabs.get(resolved);
-      if (!page) throw new Error(`Tab ${resolved} does not exist.`);
-      if (page.isClosed()) throw new Error(`Tab ${resolved} is closed.`);
+      if (!page || (await this.isPageDead(page))) {
+        const recovered = await this._recoverTab(resolved);
+        if (await this.isPageDead(recovered)) {
+          throw new Error(`Tab ${resolved} crashed and could not be restored.`);
+        }
+        this.touchTab(resolved, owner);
+        this.tabLastUrl.set(resolved, recovered.url());
+        return recovered;
+      }
       this.touchTab(resolved, owner);
+      this.tabLastUrl.set(resolved, page.url());
       return page;
     }
 
     // Legacy path: getPage() with no args at all
     const page = this.currentPage;
-    if (page && !page.isClosed()) {
+    if (!(await this.isPageDead(page))) {
       this.touchTab(this.currentTabId);
-      return page;
+      this.tabLastUrl.set(this.currentTabId, page!.url());
+      return page!;
     }
-    // Current tab missing or closed — open a fresh one with retry guard.
-    return this._openFreshPage();
-  }
 
-  private async _openFreshPage(): Promise<Page> {
-    try {
-      const newPage = await this.browserContext!.newPage();
-      this.currentTabId = this.allocateTab(newPage);
-      return newPage;
-    } catch (err) {
-      if (!isBrowserClosedError(err)) throw err;
-      await this.softReset();
-      await sleep(2000);
-      await this.initialize();
-      const newPage = await this.browserContext!.newPage();
-      this.currentTabId = this.allocateTab(newPage);
-      return newPage;
+    // Current tab missing or closed/crashed — recreate in-place and retry once.
+    const recovered = await this._recoverTab(this.currentTabId);
+    if (await this.isPageDead(recovered)) {
+      throw new Error(`Tab ${this.currentTabId} crashed and could not be restored.`);
     }
+    this.touchTab(this.currentTabId);
+    this.tabLastUrl.set(this.currentTabId, recovered.url());
+    return recovered;
   }
 
   /**
@@ -816,7 +1074,9 @@ export class BrowserManager {
     this.tabs.clear();
     this.tabOwners.clear();
     this.tabLastActivity.clear();
+    this.tabLastUrl.clear();
     this.ownerActiveTab.clear();
+    this.recoveryNotices.clear();
     clearAllSnapshots();
     this.primaryTabId = undefined;
     this.nextTabId = 1;
@@ -824,6 +1084,8 @@ export class BrowserManager {
     this.browserContext = undefined;
     this.browser = undefined;
     this.consoleLogs = [];
+    this.networkEvents = [];
+    this.nextNetworkEventId = 1;
     this.initialized = false;
   }
 
@@ -1160,8 +1422,9 @@ export class BrowserManager {
     // Settle detection for profile pages
     await context.addInitScript(SETTLE_INIT_SCRIPT);
 
-    // Wire popup capture on profile contexts so target=_blank pages created
-    // inside profiles get dialog + console capture (same as the default context).
+    // Wire network + popup capture on profile contexts so profile tabs get
+    // the same request/response and new-page tracking as the default context.
+    this._wireNetworkCapture(context);
     this._wirePopupCapture(context);
 
     const page = await context.newPage();
@@ -1453,13 +1716,17 @@ export class BrowserManager {
     this.tabs.clear();
     this.tabOwners.clear();
     this.tabLastActivity.clear();
+    this.tabLastUrl.clear();
     this.ownerActiveTab.clear();
     this.dialogPolicy.clear();
     this.lastDialogs.clear();
+    this.recoveryNotices.clear();
     this.primaryTabId = undefined;
     this.nextTabId = 1;
     this.currentTabId = 1;
     this.consoleLogs = [];
+    this.networkEvents = [];
+    this.nextNetworkEventId = 1;
     this.debugUrl = undefined;
     this.sessionViewerUrl = undefined;
     clearAllSnapshots();

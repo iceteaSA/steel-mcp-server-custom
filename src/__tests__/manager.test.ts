@@ -38,6 +38,7 @@ const mockEnv: Env = {
   RELAY_PUBLIC_URL: undefined,
   RELAY_BIND_ADDR: "127.0.0.1",
   TOOLSETS: undefined,
+  NETWORK_BUFFER_SIZE: 500,
 };
 
 /** Minimal EventEmitter so fake pages can drive close events. */
@@ -50,6 +51,7 @@ function fakePage(overrides: Partial<Record<string, unknown>> = {}): Page {
     if (handlers) for (const fn of handlers) fn(...args);
   };
   const page: any = {
+    _url: "about:blank",
     isClosed: () => false,
     // When close() is called, fire the stored "close" handlers — matching
     // the real Playwright behaviour that triggers page.on("close") listeners.
@@ -60,7 +62,14 @@ function fakePage(overrides: Partial<Record<string, unknown>> = {}): Page {
     on: (event: string, fn: (...args: unknown[]) => void) => {
       (events[event] ??= []).push(fn);
     },
-    url: () => "about:blank",
+    url: () => page._url,
+    goto: async (url: string) => {
+      page._url = url;
+    },
+    evaluate: async (fn: unknown, arg?: unknown) => {
+      if (typeof fn === "function") return (fn as (arg?: unknown) => unknown)(arg);
+      return arg;
+    },
     title: async () => "Test",
     // Expose for tests: fire a stored event handler without calling close().
     _emit: (event: string, ...args: unknown[]) => emit(event, ...args),
@@ -717,6 +726,219 @@ describe("dialog policy handling", () => {
 // Idempotent tab allocation — context.on("page") listener MUST NOT
 // double-allocate pages that _doNewTab already registered.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Network capture — ring buffer + body-on-demand
+// ---------------------------------------------------------------------------
+
+function fakeNetworkResponse(bodyText: string): any {
+  return {
+    body: async () => Buffer.from(bodyText, "utf8"),
+  };
+}
+
+function fakeContext(newPages: Page[] = []) {
+  const handlers: Record<string, Array<(...args: unknown[]) => void>> = {};
+  let pageIdx = 0;
+  return {
+    on: (event: string, fn: (...args: unknown[]) => void) => {
+      (handlers[event] ??= []).push(fn);
+    },
+    newPage: async () => {
+      const p = newPages[pageIdx++] ?? fakePage();
+      return p;
+    },
+    handlers,
+  };
+}
+
+describe("network capture ring buffer", () => {
+  it("evicts oldest events when buffer size is exceeded", () => {
+    const mgr = setupMgr();
+    mgr.env.NETWORK_BUFFER_SIZE = 3;
+    mgr.networkEvents = [];
+    mgr.nextNetworkEventId = 1;
+
+    for (let i = 0; i < 5; i++) {
+      (mgr as any).pushNetworkEvent({ id: mgr.nextNetworkEventId++, url: `https://x/${i}` });
+    }
+
+    expect(mgr.networkEvents).toHaveLength(3);
+    expect(mgr.networkEvents.map((e: any) => e.url)).toEqual([
+      "https://x/2",
+      "https://x/3",
+      "https://x/4",
+    ]);
+  });
+
+  it("keeps ids monotonic even after eviction", () => {
+    const mgr = setupMgr();
+    mgr.env.NETWORK_BUFFER_SIZE = 2;
+    mgr.networkEvents = [];
+    mgr.nextNetworkEventId = 1;
+
+    (mgr as any).pushNetworkEvent({ id: mgr.nextNetworkEventId++, url: "https://a/1" });
+    (mgr as any).pushNetworkEvent({ id: mgr.nextNetworkEventId++, url: "https://a/2" });
+    (mgr as any).pushNetworkEvent({ id: mgr.nextNetworkEventId++, url: "https://a/3" });
+
+    expect(mgr.networkEvents.map((e: any) => e.id)).toEqual([2, 3]);
+  });
+
+  it("clears response references when events are evicted", async () => {
+    const mgr = setupMgr();
+    mgr.env.NETWORK_BUFFER_SIZE = 2;
+    mgr.networkEvents = [];
+    mgr.nextNetworkEventId = 1;
+
+    (mgr as any).pushNetworkEvent({
+      id: 1,
+      url: "https://a/1",
+      response: fakeNetworkResponse("old"),
+    });
+    (mgr as any).pushNetworkEvent({
+      id: 2,
+      url: "https://a/2",
+      response: fakeNetworkResponse("keep1"),
+    });
+    (mgr as any).pushNetworkEvent({
+      id: 3,
+      url: "https://a/3",
+      response: fakeNetworkResponse("keep2"),
+    });
+
+    await expect(mgr.getResponseBody(1)).rejects.toThrow("body no longer available");
+    await expect(mgr.getResponseBody(2)).resolves.toBe("keep1");
+    await expect(mgr.getResponseBody(3)).resolves.toBe("keep2");
+  });
+
+  it("throws when body is no longer available", async () => {
+    const mgr = setupMgr();
+    mgr.env.NETWORK_BUFFER_SIZE = 1;
+    mgr.networkEvents = [];
+    mgr.nextNetworkEventId = 1;
+
+    (mgr as any).pushNetworkEvent({
+      id: 1,
+      url: "https://a/1",
+      response: fakeNetworkResponse("body"),
+    });
+    (mgr as any).pushNetworkEvent({
+      id: 2,
+      url: "https://a/2",
+      response: fakeNetworkResponse("evict"),
+    });
+
+    await expect(mgr.getResponseBody(1)).rejects.toThrow("body no longer available");
+  });
+});
+
+describe("network capture disabled", () => {
+  it("does not wire listeners when NETWORK_BUFFER_SIZE is 0", () => {
+    const mgr = setupMgr();
+    mgr.env.NETWORK_BUFFER_SIZE = 0;
+    mgr.networkEvents = [];
+    const context = fakeContext();
+    (mgr as any)._wireNetworkCapture(context);
+    expect(Object.keys(context.handlers)).toHaveLength(0);
+    expect(mgr.getNetworkEvents()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Crash auto-recovery in getPage
+// ---------------------------------------------------------------------------
+
+describe("getPage crash recovery", () => {
+  it("recreates a closed current tab under the same tabId", async () => {
+    const mgr = setupMgr();
+    mgr.initialized = true;
+    mgr.primaryTabId = 999;
+    mgr.tabs.set(999, fakePage());
+
+    const deadPage = fakePage({ isClosed: () => true, url: () => "https://dead.test/" });
+    const freshPage = fakePage({ url: () => "https://recovered.test/" });
+    const context = fakeContext([freshPage]);
+    mgr.browserContext = context as any;
+
+    mgr.tabs.set(1, deadPage);
+    (mgr as any).pageToTabId.set(deadPage, 1);
+    mgr.tabLastUrl.set(1, "https://recovered.test/");
+
+    const page = await mgr.getPage();
+
+    expect(page).toBe(freshPage);
+    expect((mgr as any).tabs.get(1)).toBe(freshPage);
+    expect((mgr as any).pageToTabId.get(freshPage)).toBe(1);
+    expect((freshPage as any)._url).toBe("https://recovered.test/");
+  });
+
+  it("recovers an explicit tabId when url() throws", async () => {
+    const mgr = setupMgr();
+    mgr.initialized = true;
+    mgr.primaryTabId = 999;
+    mgr.tabs.set(999, fakePage());
+
+    const deadPage = fakePage({
+      url: () => {
+        throw new Error("crashed");
+      },
+    });
+    const freshPage = fakePage({ url: () => "https://explicit.test/" });
+    const context = fakeContext([freshPage]);
+    mgr.browserContext = context as any;
+
+    mgr.tabs.set(5, deadPage);
+    (mgr as any).pageToTabId.set(deadPage, 5);
+    mgr.tabLastUrl.set(5, "https://explicit.test/");
+
+    const page = await mgr.getPage({ tabId: 5 });
+
+    expect(page).toBe(freshPage);
+    expect((mgr as any).tabs.get(5)).toBe(freshPage);
+    expect((mgr as any).pageToTabId.get(freshPage)).toBe(5);
+  });
+
+  it("sets and consumes the recovery notice once", async () => {
+    const mgr = setupMgr();
+    mgr.initialized = true;
+    mgr.primaryTabId = 999;
+    mgr.tabs.set(999, fakePage());
+
+    const deadPage = fakePage({ isClosed: () => true });
+    const freshPage = fakePage({ url: () => "https://noted.test/" });
+    const context = fakeContext([freshPage]);
+    mgr.browserContext = context as any;
+
+    mgr.tabs.set(1, deadPage);
+    (mgr as any).pageToTabId.set(deadPage, 1);
+    mgr.tabLastUrl.set(1, "https://noted.test/");
+
+    await mgr.getPage();
+
+    const notice = mgr.consumeRecoveryNotice(1);
+    expect(notice).toContain("⚠ tab 1 crashed and was restored");
+    expect(notice).toContain("https://noted.test/");
+    expect(mgr.consumeRecoveryNotice(1)).toBe("");
+  });
+
+  it("throws when the fresh page is also dead", async () => {
+    const mgr = setupMgr();
+    mgr.initialized = true;
+    mgr.primaryTabId = 999;
+    mgr.tabs.set(999, fakePage());
+
+    const deadPage = fakePage({ isClosed: () => true });
+    const alsoDead = fakePage({ isClosed: () => true });
+    const context = fakeContext([alsoDead]);
+    mgr.browserContext = context as any;
+
+    mgr.tabs.set(1, deadPage);
+    (mgr as any).pageToTabId.set(deadPage, 1);
+    mgr.tabLastUrl.set(1, "https://x/");
+
+    await expect(mgr.getPage()).rejects.toThrow(/crashed/i);
+  });
+});
 
 describe("idempotent tab allocation", () => {
   it("allocateTab returns the same tabId when called twice for the same page", () => {

@@ -618,3 +618,106 @@ export function assertSafeProfilePath(name: string, profilesDir: string): string
   }
   return resolvedPath;
 }
+
+// ---------------------------------------------------------------------------
+// Network event filtering — pure helpers for get_network
+// ---------------------------------------------------------------------------
+
+/** Lightweight shape used by filterNetworkEvents so the helper stays testable
+ * without importing the full BrowserManager type. */
+export interface NetworkEventLike {
+  id: number;
+  tabId?: number;
+  method: string;
+  url: string;
+  resourceType: string;
+  status?: number;
+  failed?: boolean;
+  contentType?: string;
+  sizeBytes?: number;
+  durationMs?: number;
+  at: number;
+}
+
+/**
+ * Match a URL against a pattern. Patterns wrapped in /.../ are treated as a
+ * RegExp (flags supported, e.g. /api/i); otherwise the pattern is a substring.
+ */
+export function matchesUrlPattern(url: string, pattern: string): boolean {
+  if (pattern.length >= 2 && pattern.startsWith("/") && pattern.endsWith("/")) {
+    try {
+      return new RegExp(pattern.slice(1, -1)).test(url);
+    } catch {
+      return false;
+    }
+  }
+  if (pattern.length >= 2 && pattern.startsWith("/") && /\/[imsuy]*$/.test(pattern)) {
+    // Regex with flags: /.../i
+    const lastSlash = pattern.lastIndexOf("/");
+    const body = pattern.slice(1, lastSlash);
+    const flags = pattern.slice(lastSlash + 1);
+    try {
+      return new RegExp(body, flags).test(url);
+    } catch {
+      return false;
+    }
+  }
+  return url.includes(pattern);
+}
+
+/**
+ * Match an event status against a filter token.
+ *   - "4xx", "5xx", etc. match the corresponding HTTP range.
+ *   - Exact digits match the exact status code.
+ */
+export function matchesNetworkStatus(
+  status: number | undefined,
+  failed: boolean | undefined,
+  filter: string,
+): boolean {
+  if (/^(\d)xx$/i.test(filter)) {
+    const first = parseInt(filter[0], 10);
+    return status !== undefined && status >= first * 100 && status < (first + 1) * 100;
+  }
+  if (/^\d+$/.test(filter)) {
+    return status === parseInt(filter, 10);
+  }
+  if (filter === "failed" || filter === "FAIL") {
+    return !!failed;
+  }
+  return false;
+}
+
+/**
+ * Pure filter for get_network. Preserves chronological order; applies limit
+ * from the newest end so callers see the most recent matches.
+ */
+export function filterNetworkEvents(
+  events: NetworkEventLike[],
+  filter: {
+    urlPattern?: string;
+    resourceType?: string;
+    status?: string;
+    tabId?: number;
+    limit?: number;
+  },
+): NetworkEventLike[] {
+  let result = events.slice();
+  if (filter.tabId !== undefined) {
+    result = result.filter((e) => e.tabId === filter.tabId);
+  }
+  if (filter.resourceType) {
+    result = result.filter((e) => e.resourceType === filter.resourceType);
+  }
+  if (filter.urlPattern) {
+    result = result.filter((e) => matchesUrlPattern(e.url, filter.urlPattern!));
+  }
+  if (filter.status) {
+    result = result.filter((e) => matchesNetworkStatus(e.status, e.failed, filter.status!));
+  }
+  const limit = filter.limit ?? 30;
+  if (limit > 0 && result.length > limit) {
+    result = result.slice(-limit);
+  }
+  return result;
+}
