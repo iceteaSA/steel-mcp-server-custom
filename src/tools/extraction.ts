@@ -93,14 +93,23 @@ export interface FetchResult {
 
 export async function fetchHttp(
   url: string,
-  opts: { client?: any; timeout?: number; extractContent?: boolean } = {},
+  opts: {
+    client?: any;
+    timeout?: number;
+    extractContent?: boolean;
+    maxCharsPerPage?: number;
+  } = {},
 ): Promise<FetchResult> {
   const extractContent = opts.extractContent ?? true;
+  const maxCharsPerPage = opts.maxCharsPerPage ?? 0;
   const client = opts.client ?? new Impit({ browser: "chrome", timeout: opts.timeout ?? 15_000 });
   const response = await client.fetch(url, { redirect: "follow" });
   const status: number = response.status;
   const html: string = await response.text();
-  const { text, title } = extractFromHtml(html, "", extractContent);
+  let { text, title } = extractFromHtml(html, "", extractContent);
+  if (maxCharsPerPage > 0 && text.length > maxCharsPerPage) {
+    text = text.slice(0, maxCharsPerPage) + `\n[TRUNCATED — ${text.length.toLocaleString()} total]`;
+  }
   const escalated = isSpaShell(html, text, status);
   const tag = `[http${status === 200 ? "" : ` ${status}`}]`;
   const contentText = `${tag} ${title || url}\nURL: ${url}\n\n${text}`;
@@ -537,39 +546,48 @@ CONTEXT BUDGET — output capped at maxCharsPerPage per URL (default 3K per URL)
           if (mode === "browser") return fetchBrowser(url);
           if (mode === "http") {
             try {
-              return await fetchHttp(url, { extractContent });
+              return await fetchHttp(url, { extractContent, maxCharsPerPage });
             } catch (err) {
               const error = err as Error;
-              const msg = `## ${url}\n[ERROR: ${cleanErrorMessage(error)}]`;
-              return { url, title: url, text: msg, path: "http" };
+              const msg = `[http] ${url}\n[ERROR: ${cleanErrorMessage(error)}]`;
+              return { url, title: url, text: msg, path: "http", escalated: false };
             }
           }
           // mode === "auto": try HTTP, escalate on shell/challenge.
           let httpResult: FetchResult;
           try {
-            httpResult = await fetchHttp(url, { extractContent });
+            httpResult = await fetchHttp(url, { extractContent, maxCharsPerPage });
           } catch (err) {
             // HTTP path failed entirely — fall back to browser.
-            const note = `## ${url}\n[HTTP path failed: ${cleanErrorMessage(err as Error)} — escalating to browser]`;
             try {
               const br = await fetchBrowser(url);
-              return { ...br, text: `${note}\n\n${br.text}` };
+              // Browser path was used (even though HTTP fell through) — note
+              // this in structuredContent but label the user-visible prefix
+              // [browser] since the browser path actually served the page.
+              const note = `[browser] HTTP fast-path failed; browser served this URL (${cleanErrorMessage(err as Error)})`;
+              return {
+                ...br,
+                text: `${note}\n\n${br.text}`,
+                escalated: true,
+              };
             } catch (err2) {
-              const err2Msg = `## ${url}\n[ERROR: ${cleanErrorMessage(err2 as Error)}]`;
-              return { url, title: url, text: err2Msg, path: "browser" };
+              const err2Msg = `[browser] ${url}\n[ERROR: ${cleanErrorMessage(err2 as Error)}]`;
+              return { url, title: url, text: err2Msg, path: "browser", escalated: false };
             }
           }
           if (httpResult.escalated) {
             try {
               const br = await fetchBrowser(url);
-              const note = `[auto] HTTP path returned an SPA shell or challenge; escalated to browser.`;
-              return { ...br, text: `${note}\n\n${br.text}` };
+              // Spec: prefix is `[browser]` when browser actually served the
+              // URL (even if auto escalated). escalated:true so structured
+              // consumers know auto chose to switch paths.
+              return { ...br, escalated: true };
             } catch (escalationErr) {
               // Browser escalation failed — keep whatever the http path gave us
               // so the caller at least sees the raw HTML/text shell response.
               // Surface the underlying error in the structured response for debugging.
               const fallbackText = `${httpResult.text}\n\n[escalation failed: ${cleanErrorMessage(escalationErr as Error)}]`;
-              return { ...httpResult, text: fallbackText };
+              return { ...httpResult, text: fallbackText, escalated: false };
             }
           }
           return httpResult;
