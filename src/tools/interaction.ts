@@ -710,71 +710,68 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
   register({
     name: "handle_dialog",
     title: "Handle Dialog",
-    description: `Accept or dismiss a browser dialog (alert, confirm, prompt) on a tab. Call without an action to inspect the pending or last dialog. Playwright dialogs block all page operations until handled — use this tool to unblock the page. An unhandled dialog auto-dismisses after 10 seconds.
+    description: `Set the dialog policy for a tab before an action that triggers alert/confirm/prompt. Playwright dialogs block the triggering action until resolved, so the policy must be armed in advance — the dialog is handled the instant it fires. Default policy is dismiss.
 
-Errors: no pending dialog (when action is given).`,
+Call without an action to view the current policy and last dialog.`,
     toolset: "core",
     inputSchema: {
       action: z
         .enum(["accept", "dismiss"])
         .optional()
-        .describe("Omit to view the pending/last dialog without changing state."),
+        .describe(
+          "Policy for dialogs (alert/confirm/prompt) that this tab raises during subsequent actions. Omit to view current policy + last dialog.",
+        ),
       promptText: z
         .string()
         .optional()
-        .describe("Text to provide for prompt() dialogs. Ignored for non-prompt types."),
+        .describe("Text to enter for prompt() dialogs when action is accept."),
+      once: z
+        .boolean()
+        .optional()
+        .describe("Apply the policy to only the next dialog, then revert to dismiss."),
       ...tabTarget,
     },
     annotations: {
       readOnlyHint: false,
       destructiveHint: false,
-      idempotentHint: false,
+      idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ action, promptText, tabId, owner, force }) => {
+    handler: async ({ action, promptText, once, tabId, owner, force }) => {
       try {
         const resolved = mgr.resolveTab({ tabId, owner, force });
 
-        // No action — view mode: report pending or last dialog.
+        // No action — view mode: report current policy and last dialog.
         if (!action) {
-          const pending = mgr.getPendingDialog(resolved);
-          if (pending) {
-            const age = Math.round((Date.now() - pending.at) / 1000);
-            const dv = pending.defaultValue ? ` default="${pending.defaultValue}"` : "";
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Pending dialog: ${pending.type} "${pending.message}"${dv} — ${age}s ago. Use action:"accept" or action:"dismiss" to resolve.`,
-                },
-              ],
-            };
-          }
+          const policy = mgr.getDialogPolicy(resolved);
           const last = mgr.getLastDialog(resolved);
+          const lines: string[] = [];
+          lines.push(
+            policy
+              ? `Dialog policy for tab ${resolved}: ${policy.action}${policy.promptText ? ` (prompt text: "${policy.promptText}")` : ""}${policy.once ? ", once" : ""}.`
+              : `Dialog policy for tab ${resolved}: default (dismiss).`,
+          );
           if (last) {
             const age = Math.round((Date.now() - last.at) / 1000);
-            const pt = last.promptText ? `promptText="${last.promptText}" ` : "";
-            const auto = last.autoDismissed ? " (auto)" : "";
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Last dialog (${age}s ago): ${last.type} "${last.message}" — ${last.action}${auto} ${pt}`,
-                },
-              ],
-            };
+            const pt = last.promptText ? ` promptText="${last.promptText}"` : "";
+            lines.push(
+              `Last dialog (${age}s ago): ${last.type} "${last.message}" — ${last.action}${last.autoHandled ? " (auto-handled)" : ""}${pt}.`,
+            );
+          } else {
+            lines.push("No dialog has appeared on this tab.");
           }
-          return { content: [{ type: "text", text: "No dialog." }] };
+          return { content: [{ type: "text", text: lines.join("\n") }] };
         }
 
-        // Action mode — resolve the pending dialog.
-        const result = await mgr.handleDialog(resolved, action, promptText);
-        const pt = result.promptText ? ` with promptText="${result.promptText}"` : "";
+        // Action mode — arm the policy for future dialogs on this tab.
+        mgr.setDialogPolicy(resolved, { action, promptText, once: once ?? false });
+        const pt = promptText ? ` (prompt text: "${promptText}")` : "";
+        const onceStr = once ? ", once" : "";
         return {
           content: [
             {
               type: "text",
-              text: `Dialog ${result.action}: ${result.type} "${result.message}"${pt}.`,
+              text: `Dialog policy for tab ${resolved}: ${action}${pt}${onceStr}. Dialogs raised by the next action(s) will be ${action === "accept" ? "accepted" : "dismissed"}.`,
             },
           ],
         };

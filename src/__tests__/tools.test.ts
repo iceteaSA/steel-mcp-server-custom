@@ -248,16 +248,31 @@ describe("non-browser tools", () => {
   });
 
   // handle_dialog in view mode works without a browser
-  it("handle_dialog (view) returns 'No dialog' when no dialogs exist", async () => {
+  it("handle_dialog (view) reports default policy and no dialog", async () => {
     const r = await client.tool(111, "handle_dialog");
     const text = client.getText(r);
     // This tool resolves a tabId without calling getPage(), so it works
     // even without an active browser. But the server may not have
     // initialized the BrowserManager yet, so resolveTab might not find
-    // the tab. Just verify it doesn't crash — either "No dialog" or
+    // the tab. Just verify it doesn't crash — either policy text or
     // an initialization error is acceptable in the non-browser test.
     if (!client.isError(r)) {
-      expect(text).toContain("No dialog");
+      expect(text).toContain("default (dismiss)");
+      expect(text).toContain("No dialog has appeared");
+    }
+  });
+
+  it("handle_dialog (set policy) reports the armed policy", async () => {
+    const r = await client.tool(111, "handle_dialog", {
+      action: "accept",
+      promptText: "geth collective",
+      once: true,
+    });
+    const text = client.getText(r);
+    if (!client.isError(r)) {
+      expect(text).toContain("accept");
+      expect(text).toContain("geth collective");
+      expect(text).toContain("once");
     }
   });
 

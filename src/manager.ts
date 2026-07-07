@@ -13,7 +13,7 @@ import fs from "fs/promises";
 import path from "path";
 import { sleep } from "./utils.js";
 
-import { chromium, Browser, BrowserContext, Page, type Dialog } from "playwright";
+import { chromium, Browser, BrowserContext, Page } from "playwright";
 import { Steel } from "steel-sdk";
 import { z } from "zod";
 import { EnvSchema } from "./env";
@@ -117,34 +117,29 @@ export class BrowserManager {
   // page would be registered twice.
   private pageToTabId = new WeakMap<Page, number>();
 
-  // Dialog management — per-tab pending/last dialog state.
-  // Playwright dialogs block page operations (clicks, fills, navigations) until
-  // handled — they must be surfaced to the agent for explicit accept/dismiss.
-  // Unhandled dialogs auto-dismiss after dialogAutoDismissMs.
-  private pendingDialogs: Map<
+  // Dialog management — per-tab policy + last dialog record.
+  // Playwright dialogs block page operations until handled, so we resolve them
+  // the instant they fire using a pre-armed policy (default: dismiss). The
+  // previous pending/timer model allowed a later tool call to decide, but the
+  // triggering action itself hangs until the dialog is resolved — a serial MCP
+  // client cannot call handle_dialog until the action returns.
+  private dialogPolicy = new Map<
+    number,
+    { action: "accept" | "dismiss"; promptText?: string; once?: boolean }
+  >();
+  private lastDialogs = new Map<
     number,
     {
-      dialog: Dialog;
       type: string;
       message: string;
       defaultValue: string;
-      at: number;
-      timer: NodeJS.Timeout;
-    }
-  > = new Map();
-  private lastDialogs: Map<
-    number,
-    {
-      type: string;
-      message: string;
-      promptText?: string;
       action: "accepted" | "dismissed";
-      autoDismissed: boolean;
+      promptText?: string;
+      autoHandled: boolean;
+      reported: boolean;
       at: number;
     }
-  > = new Map();
-  /** Auto-dismiss timeout for unhandled dialogs (ms). Override in tests. */
-  dialogAutoDismissMs = 10000;
+  >();
 
   constructor(private readonly env: Env) {}
 
@@ -261,54 +256,58 @@ export class BrowserManager {
     this.attachConsoleListener(page);
     this.pageToTabId.set(page, id);
     // Dialog capture: Playwright dialogs block all page operations until
-    // handled. Capture them here so the agent can accept/dismiss via the
-    // handle_dialog tool. beforeunload is auto-accepted to avoid blocking
-    // navigation; others are stored as pending for manual handling.
-    // The entire handler is wrapped in try/catch — if it rejects, the
-    // dialog is never resolved and the tab is permanently wedged.
+    // handled, so we resolve them immediately using the tab's pre-armed policy.
+    // Default policy is dismiss (Playwright's conservative default). The agent
+    // arms accept/accept+promptText via handle_dialog BEFORE the action that
+    // triggers the dialog. beforeunload is always accepted so navigation isn't
+    // blocked. The whole handler is wrapped in try/catch with a best-effort
+    // dismiss fallback so a listener bug never wedges the tab.
     page.on("dialog", async (dialog) => {
-      try {
-        const type = dialog.type();
-        const message = dialog.message();
-        const defaultValue = dialog.defaultValue();
+      const type = dialog.type();
+      const message = dialog.message();
+      const defaultValue = dialog.defaultValue();
 
+      try {
         if (type === "beforeunload") {
           // beforeunload: auto-accept — blocking navigation is never useful for an agent.
           await dialog.accept();
           this.lastDialogs.set(id, {
             type,
             message,
+            defaultValue,
             action: "accepted",
-            autoDismissed: false,
+            promptText: undefined,
+            autoHandled: true,
+            reported: true, // beforeunload is normal navigation noise; don't report
             at: Date.now(),
           });
           return;
         }
 
-        const timer = setTimeout(async () => {
-          this.pendingDialogs.delete(id);
-          try {
-            await dialog.dismiss();
-          } catch {
-            // dialog may have already been handled externally
-          }
-          this.lastDialogs.set(id, {
-            type,
-            message,
-            action: "dismissed",
-            autoDismissed: true,
-            at: Date.now(),
-          });
-        }, this.dialogAutoDismissMs);
+        const policy = this.dialogPolicy.get(id);
+        const action = policy?.action ?? "dismiss";
+        const promptText = policy?.promptText;
 
-        this.pendingDialogs.set(id, {
-          dialog,
+        if (action === "accept") {
+          await dialog.accept(promptText);
+        } else {
+          await dialog.dismiss();
+        }
+
+        this.lastDialogs.set(id, {
           type,
           message,
           defaultValue,
+          action: action === "accept" ? "accepted" : "dismissed",
+          promptText,
+          autoHandled: true,
+          reported: false,
           at: Date.now(),
-          timer,
         });
+
+        if (policy?.once) {
+          this.dialogPolicy.delete(id);
+        }
       } catch (err) {
         // Internal failure in the listener — dismiss best-effort so the
         // dialog does not wedge the tab permanently. Log the error so
@@ -339,11 +338,7 @@ export class BrowserManager {
         if (profile) profile.tabIds.delete(id);
       }
       // Clear dialog state when page closes — dialogs are gone when the page is gone.
-      const pending = this.pendingDialogs.get(id);
-      if (pending) {
-        clearTimeout(pending.timer);
-        this.pendingDialogs.delete(id);
-      }
+      this.dialogPolicy.delete(id);
       this.lastDialogs.delete(id);
     });
     return id;
@@ -813,11 +808,8 @@ export class BrowserManager {
     for (const [, profile] of this.profiles) {
       await profile.context.close().catch(() => {});
     }
-    // Clear pending dialog timers — stale timers on freed objects.
-    for (const [, p] of this.pendingDialogs) {
-      clearTimeout(p.timer);
-    }
-    this.pendingDialogs.clear();
+    // Clear per-tab dialog state.
+    this.dialogPolicy.clear();
     this.lastDialogs.clear();
     this.profiles.clear();
     this.tabToProfile.clear();
@@ -887,18 +879,8 @@ export class BrowserManager {
       if (profile) profile.tabIds.delete(id);
     }
 
-    // Clear any pending dialog — unhandled dialogs block Playwright page
-    // close with a timeout, so dismiss the dialog first, then close.
-    const pending = this.pendingDialogs.get(id);
-    if (pending) {
-      clearTimeout(pending.timer);
-      this.pendingDialogs.delete(id);
-      try {
-        await pending.dialog.dismiss();
-      } catch {
-        // dialog may already be handled — ignore
-      }
-    }
+    // Clear per-tab dialog policy and last dialog record.
+    this.dialogPolicy.delete(id);
     this.lastDialogs.delete(id);
 
     // Fire the actual page close — the allocateTab listener will run its
@@ -1382,21 +1364,29 @@ export class BrowserManager {
   }
 
   // ---------------------------------------------------------------------------
-  // Dialog management — per-tab pending/last dialog state
+  // Dialog management — per-tab policy + last dialog record
   // ---------------------------------------------------------------------------
 
   /**
-   * Return the pending dialog for a tab, or null if none.
+   * Arm a dialog policy for a tab. Dialogs raised by the next action(s) on
+   * this tab will be accepted/dismissed immediately as they fire. once=true
+   * removes the policy after it is applied once, reverting to the default.
    */
-  getPendingDialog(tabId: number): {
-    type: string;
-    message: string;
-    defaultValue: string;
-    at: number;
-  } | null {
-    const p = this.pendingDialogs.get(tabId);
-    if (!p) return null;
-    return { type: p.type, message: p.message, defaultValue: p.defaultValue, at: p.at };
+  setDialogPolicy(
+    tabId: number,
+    policy: { action: "accept" | "dismiss"; promptText?: string; once?: boolean },
+  ): void {
+    this.dialogPolicy.set(tabId, policy);
+  }
+
+  /**
+   * Return the armed dialog policy for a tab, or undefined if no policy is set
+   * (the default is dismiss).
+   */
+  getDialogPolicy(
+    tabId: number,
+  ): { action: "accept" | "dismiss"; promptText?: string; once?: boolean } | undefined {
+    return this.dialogPolicy.get(tabId);
   }
 
   /**
@@ -1405,9 +1395,11 @@ export class BrowserManager {
   getLastDialog(tabId: number): {
     type: string;
     message: string;
-    promptText?: string;
+    defaultValue: string;
     action: "accepted" | "dismissed";
-    autoDismissed: boolean;
+    promptText?: string;
+    autoHandled: boolean;
+    reported: boolean;
     at: number;
   } | null {
     const d = this.lastDialogs.get(tabId);
@@ -1416,71 +1408,17 @@ export class BrowserManager {
   }
 
   /**
-   * Accept or dismiss a pending dialog. Throws if no dialog is pending.
-   * Clears the auto-dismiss timer; records the dialog as lastDialog.
-   */
-  async handleDialog(
-    tabId: number,
-    action: "accept" | "dismiss",
-    promptText?: string,
-  ): Promise<{
-    type: string;
-    message: string;
-    action: string;
-    promptText?: string;
-  }> {
-    const pending = this.pendingDialogs.get(tabId);
-    if (!pending) {
-      throw new Error(
-        "No pending dialog for this tab. Use handle_dialog without an action to view dialog state.",
-      );
-    }
-
-    clearTimeout(pending.timer);
-    this.pendingDialogs.delete(tabId);
-
-    try {
-      if (action === "accept") {
-        await pending.dialog.accept(promptText);
-      } else {
-        await pending.dialog.dismiss();
-      }
-    } catch (err) {
-      throw new Error(`Failed to ${action} dialog: ${(err as Error).message}`);
-    }
-
-    const record = {
-      type: pending.type,
-      message: pending.message,
-      promptText,
-      action: (action === "accept" ? "accepted" : "dismissed") as "accepted" | "dismissed",
-      autoDismissed: false,
-      at: Date.now(),
-    };
-    this.lastDialogs.set(tabId, record);
-
-    return {
-      type: pending.type,
-      message: pending.message,
-      action: action === "accept" ? "accepted" : "dismissed",
-      promptText,
-    };
-  }
-
-  /**
    * Return a dialog-status notice string for action-tool output.
-   * Empty string when there is nothing to report.
-   * Pending dialog → warning with type/message.
-   * Recently auto-dismissed (within 30s) → info that it was auto-dismissed.
+   * Reports the last auto-handled dialog once, within a 5-second window of
+   * when it fired, so the just-completed action can mention it. Empty string
+   * when there is nothing to report.
    */
   dialogNotice(tabId: number): string {
-    const pending = this.pendingDialogs.get(tabId);
-    if (pending) {
-      return `\n⚠ dialog appeared: ${pending.type} "${pending.message}" — pending; use handle_dialog to accept/dismiss.`;
-    }
     const last = this.lastDialogs.get(tabId);
-    if (last && last.autoDismissed && Date.now() - last.at < 30000) {
-      return `\n⚠ dialog: ${last.type} "${last.message}" was auto-dismissed at ${new Date(last.at).toISOString()}.`;
+    if (last && last.autoHandled && !last.reported && Date.now() - last.at < 5000) {
+      last.reported = true;
+      const actionWord = last.action === "accepted" ? "accepted" : "dismissed";
+      return `\n⚠ dialog appeared: ${last.type} "${last.message}" — auto-${actionWord}. (Pre-set behavior with handle_dialog before the action to change it.)`;
     }
     return "";
   }

@@ -447,7 +447,7 @@ describe("allocateTab — idempotent re-registration", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Dialog capture — state machine for browser dialogs
+// Dialog policy handling — pre-armed accept/dismiss, no pending/timer model
 // ---------------------------------------------------------------------------
 
 import type { Dialog } from "playwright";
@@ -477,42 +477,9 @@ function allocateTestTab(mgr: any, owner?: string): [number, Page] {
   return [tabId, page];
 }
 
-describe("dialog capture", () => {
-  it("beforeunload dialogs are auto-accepted and recorded as lastDialog", async () => {
+describe("dialog policy handling", () => {
+  it("default policy dismisses dialogs immediately", async () => {
     const mgr = setupMgr();
-    let accepted = false;
-    const dialog = fakeDialog({
-      type: "beforeunload",
-      message: "Leave site?",
-      accept: async () => {
-        accepted = true;
-      },
-    });
-    const [tabId, _page] = allocateTestTab(mgr);
-    // Fire the dialog event — the handler is async so wait for it to settle.
-    (_page as any)._emit("dialog", dialog);
-    await new Promise((r) => setTimeout(r, 10));
-
-    // beforeunload should be accepted immediately
-    expect(accepted).toBe(true);
-
-    // No pending dialog — beforeunload bypasses pending state
-    expect(mgr.getPendingDialog(tabId)).toBeNull();
-
-    // autoDismissed: false — the dialog was auto-accepted, not auto-dismissed.
-    const last = mgr.getLastDialog(tabId);
-    expect(last).toBeTruthy();
-    expect(last!.type).toBe("beforeunload");
-    expect(last!.message).toBe("Leave site?");
-    expect(last!.action).toBe("accepted");
-    expect(last!.autoDismissed).toBe(false);
-    // dialogNotice does not report beforeunload (it is silently auto-accepted).
-    expect(mgr.dialogNotice(tabId)).toBe("");
-  });
-
-  it("alert dialogs are stored as pending with auto-dismiss timer", async () => {
-    const mgr = setupMgr();
-    mgr.dialogAutoDismissMs = 50; // short timeout for test
     let dismissed = false;
     const dialog = fakeDialog({
       type: "alert",
@@ -523,238 +490,201 @@ describe("dialog capture", () => {
     });
     const [tabId, _page] = allocateTestTab(mgr);
     (_page as any)._emit("dialog", dialog);
-
-    // Immediately pending
-    const pending = mgr.getPendingDialog(tabId);
-    expect(pending).toBeTruthy();
-    expect(pending!.type).toBe("alert");
-    expect(pending!.message).toBe("Hello!");
-
-    // Wait for auto-dismiss
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => setTimeout(r, 10));
 
     expect(dismissed).toBe(true);
-    expect(mgr.getPendingDialog(tabId)).toBeNull();
-
     const last = mgr.getLastDialog(tabId);
     expect(last).toBeTruthy();
     expect(last!.action).toBe("dismissed");
-    expect(last!.autoDismissed).toBe(true);
+    expect(last!.autoHandled).toBe(true);
   });
 
-  it("handleDialog accept: clears timer, accepts dialog, records lastDialog", async () => {
+  it("accept policy resolves dialogs immediately", async () => {
     const mgr = setupMgr();
-    let acceptedPromptText: string | undefined;
+    let accepted = false;
+    const dialog = fakeDialog({
+      type: "confirm",
+      message: "Proceed?",
+      accept: async () => {
+        accepted = true;
+      },
+      dismiss: async () => {
+        throw new Error("should not dismiss when policy is accept");
+      },
+    });
+    const [tabId, _page] = allocateTestTab(mgr);
+    mgr.setDialogPolicy(tabId, { action: "accept" });
+    (_page as any)._emit("dialog", dialog);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(accepted).toBe(true);
+    const last = mgr.getLastDialog(tabId);
+    expect(last!.action).toBe("accepted");
+  });
+
+  it("accept with promptText passes the text", async () => {
+    const mgr = setupMgr();
+    let acceptedText: string | undefined;
     const dialog = fakeDialog({
       type: "prompt",
       message: "Enter name:",
       defaultValue: "Alice",
       accept: async (text?: string) => {
-        acceptedPromptText = text;
+        acceptedText = text;
       },
     });
     const [tabId, _page] = allocateTestTab(mgr);
+    mgr.setDialogPolicy(tabId, { action: "accept", promptText: "geth collective" });
     (_page as any)._emit("dialog", dialog);
+    await new Promise((r) => setTimeout(r, 10));
 
-    const result = await mgr.handleDialog(tabId, "accept", "Bob");
-    expect(result.type).toBe("prompt");
-    expect(result.action).toBe("accepted");
-    expect(result.promptText).toBe("Bob");
-    expect(acceptedPromptText).toBe("Bob");
-
-    // Timer cleared, no longer pending
-    expect(mgr.getPendingDialog(tabId)).toBeNull();
-
+    expect(acceptedText).toBe("geth collective");
     const last = mgr.getLastDialog(tabId);
-    expect(last!.action).toBe("accepted");
-    expect(last!.autoDismissed).toBe(false);
+    expect(last!.promptText).toBe("geth collective");
   });
 
-  it("handleDialog dismiss: clears timer, dismisses dialog, records lastDialog", async () => {
+  it("once policy applies once then reverts to dismiss", async () => {
     const mgr = setupMgr();
-    let dismissed = false;
-    const dialog = fakeDialog({
+    const firstAccepted = { value: false };
+    const secondDismissed = { value: false };
+
+    const dialog1 = fakeDialog({
       type: "confirm",
-      message: "Are you sure?",
-      dismiss: async () => {
-        dismissed = true;
+      message: "First",
+      accept: async () => {
+        firstAccepted.value = true;
       },
     });
+    const dialog2 = fakeDialog({
+      type: "confirm",
+      message: "Second",
+      dismiss: async () => {
+        secondDismissed.value = true;
+      },
+    });
+
     const [tabId, _page] = allocateTestTab(mgr);
-    (_page as any)._emit("dialog", dialog);
+    mgr.setDialogPolicy(tabId, { action: "accept", once: true });
 
-    const result = await mgr.handleDialog(tabId, "dismiss");
-    expect(result.action).toBe("dismissed");
-    expect(dismissed).toBe(true);
-    expect(mgr.getPendingDialog(tabId)).toBeNull();
+    (_page as any)._emit("dialog", dialog1);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(firstAccepted.value).toBe(true);
+    expect(mgr.getDialogPolicy(tabId)).toBeUndefined();
 
+    (_page as any)._emit("dialog", dialog2);
+    await new Promise((r) => setTimeout(r, 10));
+    expect(secondDismissed.value).toBe(true);
     const last = mgr.getLastDialog(tabId);
     expect(last!.action).toBe("dismissed");
-    expect(last!.autoDismissed).toBe(false);
   });
 
-  it("handleDialog throws when no dialog is pending", async () => {
+  it("beforeunload is always accepted regardless of policy", async () => {
     const mgr = setupMgr();
+    let accepted = false;
+    const dialog = fakeDialog({
+      type: "beforeunload",
+      message: "Leave?",
+      accept: async () => {
+        accepted = true;
+      },
+      dismiss: async () => {
+        throw new Error("beforeunload should not be dismissed");
+      },
+    });
     const [tabId, _page] = allocateTestTab(mgr);
-    await expect(mgr.handleDialog(tabId, "accept")).rejects.toThrow("No pending dialog");
-  });
-
-  it("dialogNotice returns pending warning when dialog is pending", () => {
-    const mgr = setupMgr();
-    const dialog = fakeDialog({ type: "alert", message: "Oops!" });
-    const [tabId, _page] = allocateTestTab(mgr);
+    mgr.setDialogPolicy(tabId, { action: "dismiss" });
     (_page as any)._emit("dialog", dialog);
+    await new Promise((r) => setTimeout(r, 10));
 
-    const notice = mgr.dialogNotice(tabId);
-    expect(notice).toContain("⚠ dialog appeared");
-    expect(notice).toContain("alert");
-    expect(notice).toContain("Oops!");
-    expect(notice).toContain("handle_dialog");
+    expect(accepted).toBe(true);
+    // beforeunload is normal navigation noise and is not reported.
+    expect(mgr.dialogNotice(tabId)).toBe("");
   });
 
-  it("dialogNotice returns auto-dismissed warning for recent auto-dismiss (within 30s)", () => {
+  it("handler throw path best-effort dismisses and does not throw", async () => {
+    const mgr = setupMgr();
+    let dismissCalled = 0;
+    const dialog = fakeDialog({
+      type: "prompt",
+      message: "Boom",
+      accept: async () => {
+        throw new Error("accept crash");
+      },
+      dismiss: async () => {
+        dismissCalled++;
+      },
+    });
+    const [tabId, _page] = allocateTestTab(mgr);
+    mgr.setDialogPolicy(tabId, { action: "accept" });
+
+    // Should not throw out of the listener.
+    (_page as any)._emit("dialog", dialog);
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(dismissCalled).toBeGreaterThanOrEqual(1);
+  });
+
+  it("dialogNotice reports recent auto-handled dialog once", () => {
     const mgr = setupMgr();
     const [tabId, _page] = allocateTestTab(mgr);
     mgr.lastDialogs.set(tabId, {
       type: "confirm",
-      message: "Delete item?",
-      action: "dismissed",
-      autoDismissed: true,
-      at: Date.now(), // just now
+      message: "Proceed?",
+      defaultValue: "",
+      action: "accepted",
+      promptText: undefined,
+      autoHandled: true,
+      reported: false,
+      at: Date.now(),
     });
 
     const notice = mgr.dialogNotice(tabId);
-    expect(notice).toContain("⚠ dialog");
+    expect(notice).toContain("⚠ dialog appeared");
     expect(notice).toContain("confirm");
-    expect(notice).toContain("Delete item?");
-    expect(notice).toContain("auto-dismissed");
-  });
+    expect(notice).toContain("Proceed?");
+    expect(notice).toContain("auto-accepted");
 
-  it("dialogNotice returns empty when no dialogs and no recent auto-dismiss", () => {
-    const mgr = setupMgr();
-    const [tabId, _page] = allocateTestTab(mgr);
+    // Second call should be empty (reported flag flipped).
     expect(mgr.dialogNotice(tabId)).toBe("");
   });
 
-  it("dialogNotice returns empty when lastDialog autoDismissed is older than 30s", () => {
+  it("dialogNotice returns empty for old auto-handled dialogs", () => {
     const mgr = setupMgr();
     const [tabId, _page] = allocateTestTab(mgr);
     mgr.lastDialogs.set(tabId, {
       type: "alert",
       message: "Old",
+      defaultValue: "",
       action: "dismissed",
-      autoDismissed: true,
-      at: Date.now() - 31000, // 31s ago
+      promptText: undefined,
+      autoHandled: true,
+      reported: false,
+      at: Date.now() - 6000, // older than 5s window
     });
     expect(mgr.dialogNotice(tabId)).toBe("");
   });
 
-  it("dialogNotice returns empty when lastDialog was NOT auto-dismissed", () => {
-    const mgr = setupMgr();
-    const [tabId, _page] = allocateTestTab(mgr);
-    mgr.lastDialogs.set(tabId, {
-      type: "alert",
-      message: "Handled",
-      action: "accepted",
-      autoDismissed: false,
-      at: Date.now(),
-    });
-    expect(mgr.dialogNotice(tabId)).toBe("");
-  });
-
-  it("closeTab clears pending dialog timer and dismisses the dialog", async () => {
+  it("closeTab clears policy and lastDialog", async () => {
     const mgr = setupMgr();
     mgr.primaryTabId = 999;
     mgr.tabs.set(999, fakePage());
 
-    let dismissed = false;
-    const dialog = fakeDialog({
+    const [tabId, _page] = allocateTestTab(mgr);
+    mgr.setDialogPolicy(tabId, { action: "accept" });
+    mgr.lastDialogs.set(tabId, {
       type: "alert",
       message: "Test",
-      dismiss: async () => {
-        dismissed = true;
-      },
+      defaultValue: "",
+      action: "accepted",
+      promptText: undefined,
+      autoHandled: true,
+      reported: false,
+      at: Date.now(),
     });
-    const [tabId, _page] = allocateTestTab(mgr);
-    (_page as any)._emit("dialog", dialog);
-    expect(mgr.getPendingDialog(tabId)).toBeTruthy();
 
     await mgr.closeTab(tabId);
-
-    // Pending dialog should be dismissed
-    expect(dismissed).toBe(true);
-    expect(mgr.getPendingDialog(tabId)).toBeNull();
-  });
-
-  // The listener is wrapped in try/catch — if the handler body throws
-  // (e.g. dialog.dismiss() rejects), the catch block best-effort dismisses
-  // so the tab is never permanently wedged.
-  it("dialog listener try/catch: handler body exception is caught and dialog dismissed", async () => {
-    const mgr = setupMgr();
-    let _bestEffortDismissed = false;
-    // dialog.dismiss() throws on first call, but the catch block's
-    // second dismiss() call should succeed (the mock is lenient).
-    let dismissCalled = 0;
-    const dialog = fakeDialog({
-      type: "alert",
-      message: "Boom",
-      dismiss: async () => {
-        dismissCalled++;
-        if (dismissCalled === 1) throw new Error("crash");
-        _bestEffortDismissed = true;
-      },
-    });
-    const [tabId, _page] = allocateTestTab(mgr);
-    (_page as any)._emit("dialog", dialog);
-
-    // The timer fires after dialogAutoDismissMs (10000 by default).
-    // Speed it up.
-    mgr.dialogAutoDismissMs = 10;
-    // Replace the pending dialog's timer with a short one
-    const pending = mgr.pendingDialogs.get(tabId);
-    if (pending) {
-      clearTimeout(pending.timer);
-      pending.timer = setTimeout(async () => {
-        mgr.pendingDialogs.delete(tabId);
-        try {
-          await dialog.dismiss();
-        } catch {
-          // first dismiss call throws
-        }
-        mgr.lastDialogs.set(tabId, {
-          type: "alert",
-          message: "Boom",
-          action: "dismissed",
-          autoDismissed: true,
-          at: Date.now(),
-        });
-      }, 10);
-    }
-
-    await new Promise((r) => setTimeout(r, 30));
-
-    // The first dismiss threw, but the catch block in the dialog listener
-    // fired a second best-effort dismiss (after the timer's try/catch).
-    // The key invariant: pending dialog is cleared and the tab is not wedged.
-    expect(mgr.getPendingDialog(tabId)).toBeNull();
-  });
-
-  // Race condition: the auto-dismiss timer fires before the agent calls
-  // handleDialog. The timer deletes the pending dialog from the map;
-  // handleDialog must throw "No pending dialog" rather than silently
-  // operating on a stale handle.
-  it("handleDialog throws when timer already auto-dismissed the dialog", async () => {
-    const mgr = setupMgr();
-    mgr.dialogAutoDismissMs = 1; // fire immediately
-    const dialog = fakeDialog({ type: "alert", message: "Fast" });
-    const [tabId, _page] = allocateTestTab(mgr);
-    (_page as any)._emit("dialog", dialog);
-
-    // Let the timer fire and auto-dismiss
-    await new Promise((r) => setTimeout(r, 10));
-
-    expect(mgr.getPendingDialog(tabId)).toBeNull();
-    await expect(mgr.handleDialog(tabId, "accept")).rejects.toThrow("No pending dialog");
+    expect(mgr.getDialogPolicy(tabId)).toBeUndefined();
+    expect(mgr.getLastDialog(tabId)).toBeNull();
   });
 });
 
