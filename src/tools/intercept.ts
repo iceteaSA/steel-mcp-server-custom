@@ -3,6 +3,7 @@ import type { BrowserManager, Env } from "../manager.js";
 import { globalWait } from "../utils.js";
 import type { ToolRegistrar } from "./shared.js";
 import { tabTargetForce } from "./shared.js";
+import { assertTabOwner } from "./network.js";
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   register({
@@ -67,6 +68,14 @@ CONTEXT BUDGET — small confirmation output.`,
         // MUST run before the pattern guard so cross-owner denial fires
         // regardless of whether the caller passed a pattern.
         const resolved = mgr.resolveTab({ tabId, owner, force });
+
+        // Local owner-auth for tabId-only (no owner) accesses — closes the
+        // bypass where resolveTab skips ownership enforcement when owner
+        // is absent but tabId targets another owner's tab.
+        const auth = assertTabOwner(mgr, resolved, owner, force);
+        if (!auth.ok) {
+          return { isError: true, content: [{ type: "text", text: auth.error }] };
+        }
 
         // Actions that require a pattern — guard AFTER ownership check.
         if ((action === "fulfill" || action === "abort" || action === "continue") && !pattern) {

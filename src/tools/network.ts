@@ -14,7 +14,7 @@ import {
 } from "../helpers.js";
 import { withBackgroundTab, writeToFile } from "../utils.js";
 import type { ToolRegistrar } from "./shared.js";
-import { tabTarget } from "./shared.js";
+import { tabTarget, tabTargetForce } from "./shared.js";
 
 /**
  * Single owner-auth chokepoint for every `get_network` body fetch.
@@ -45,6 +45,36 @@ export function authorizeBodyFetch(
 }
 
 /**
+ * Owner-auth for a whole-tab operation. Mirrors authorizeBodyFetch but
+ * gates entire-tool access rather than a single response-body fetch.
+ *
+ * Rules:
+ *   force:true → allowed (operator override)
+ *   tab has no owner → allowed (unowned — anyone)
+ *   caller's owner matches tab owner → allowed
+ *   otherwise → DENIED
+ *
+ * The tabId-only bypass: resolveTab skips the ownership guard when owner
+ * is absent. This predicate closes that gap for tools that must not let
+ * a co-tenant target another owner's tab by its discovered tabId.
+ */
+export function assertTabOwner(
+  mgr: { getTabOwner: (tabId: number) => string | undefined },
+  tabId: number,
+  callerOwner: string | undefined,
+  force: boolean | undefined,
+): { ok: true } | { ok: false; error: string } {
+  if (force) return { ok: true };
+  const tabOwner = mgr.getTabOwner(tabId);
+  if (tabOwner === undefined) return { ok: true };
+  if (callerOwner !== undefined && callerOwner === tabOwner) return { ok: true };
+  return {
+    ok: false,
+    error: `Tab ${tabId} belongs to owner "${tabOwner}" — pass owner:"${tabOwner}" (or force:true) to operate on it.`,
+  };
+}
+
+/**
  * Serialize a list of NetworkEvents to HAR 1.2 format.
  * Pure function — callers supply the events; no manager dependency.
  */
@@ -54,7 +84,7 @@ export function buildHar(events: NetworkEvent[]): object {
       version: "1.2",
       creator: { name: "steel-mcp", version: "0.8.0" },
       entries: events.map((e) => ({
-        startedDateTime: new Date(e.at).toISOString(),
+        startedDateTime: new Date(e.at ?? Date.now()).toISOString(),
         time: e.durationMs ?? 0,
         request: {
           method: e.method,
@@ -581,7 +611,7 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
 CONTEXT BUDGET — HAR is always written to disk (no inline option).`,
     toolset: "network",
     inputSchema: {
-      ...tabTarget,
+      ...tabTargetForce,
       outputPath: z
         .string()
         .optional()
@@ -596,23 +626,42 @@ CONTEXT BUDGET — HAR is always written to disk (no inline option).`,
     handler: async ({
       tabId,
       owner,
+      force,
       outputPath,
     }: {
       tabId?: number;
       owner?: string;
+      force?: boolean;
       outputPath?: string;
     }) => {
       try {
-        const resolved =
-          tabId !== undefined || owner ? mgr.resolveTab({ tabId, owner }) : undefined;
+        // Refuse an unscoped dump of every owner's traffic.
+        if (tabId === undefined && owner === undefined) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: "export_har requires owner (your owner tag) or tabId to scope traffic — refusing to export all owners' traffic.",
+              },
+            ],
+          };
+        }
 
-        // Owner-scoped events: if an owner is given, only include events
-        // from that owner's tabs. The resolved tabId narrows further.
-        const events = mgr.getNetworkEvents({
-          tabId: resolved,
-          owner,
-          limit: 0, // no cap — export everything
-        });
+        // If a specific tab is named, it must be the caller's (or force).
+        if (tabId !== undefined) {
+          const auth = assertTabOwner(mgr, tabId, owner, force);
+          if (!auth.ok) {
+            return { isError: true, content: [{ type: "text", text: auth.error }] };
+          }
+        }
+
+        // Owner-only export: scope to ALL of that owner's tabs via
+        // getNetworkEvents' owner filter (which collects events from
+        // every tab owned by that agent). Do NOT pre-resolve to a
+        // single active tab — that misses events on the owner's other
+        // tabs.
+        const events = mgr.getNetworkEvents({ tabId, owner, limit: 0 });
 
         const har = buildHar(events);
         const filePath = await writeToFile(
