@@ -1648,6 +1648,23 @@ describe("buildHar", () => {
     expect(entry.startedDateTime).toBeTruthy();
     expect(() => new Date(entry.startedDateTime)).not.toThrow();
   });
+
+  it("startedDateTime is request-start (at - durationMs) per HAR 1.2", () => {
+    const events = [
+      {
+        id: 1,
+        at: 1000000,
+        durationMs: 200,
+        method: "GET",
+        url: "https://x",
+        resourceType: "xhr",
+      },
+    ];
+    const har = buildHar(events) as any;
+    const entry = har.log.entries[0];
+    expect(entry.startedDateTime).toBe(new Date(1000000 - 200).toISOString());
+    expect(entry.time).toBe(200);
+  });
 });
 
 describe("assertTabOwner", () => {

@@ -84,7 +84,9 @@ export function buildHar(events: NetworkEvent[]): object {
       version: "1.2",
       creator: { name: "steel-mcp", version: "0.8.0" },
       entries: events.map((e) => ({
-        startedDateTime: new Date(e.at ?? Date.now()).toISOString(),
+        // e.at is the event record (response) time; durationMs is elapsed.
+        // HAR 1.2 startedDateTime must be REQUEST-START = at - duration.
+        startedDateTime: new Date((e.at ?? Date.now()) - (e.durationMs ?? 0)).toISOString(),
         time: e.durationMs ?? 0,
         request: {
           method: e.method,
