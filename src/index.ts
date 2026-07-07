@@ -25,6 +25,7 @@ import {
   registerNetwork,
   registerCredentials,
   registerProfiles,
+  registerIntercept,
   registerAct,
 } from "./tools/index.js";
 import { llmConfigured } from "./llm.js";
@@ -64,6 +65,7 @@ registerSession(register, mgr, env);
 registerNetwork(register, mgr, env);
 registerCredentials(register, mgr, env);
 registerProfiles(register, mgr, env);
+registerIntercept(register, mgr, env);
 if (llmConfigured(env)) {
   registerAct(register, mgr, env);
 }

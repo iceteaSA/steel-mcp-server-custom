@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { z } from "zod";
 import type { BrowserContext } from "patchright";
-import type { BrowserManager, Env } from "../manager.js";
+import type { BrowserManager, Env, NetworkEvent } from "../manager.js";
 import {
   assertInsideRoot,
   cleanErrorMessage,
@@ -14,7 +14,7 @@ import {
 } from "../helpers.js";
 import { withBackgroundTab, writeToFile } from "../utils.js";
 import type { ToolRegistrar } from "./shared.js";
-import { tabTarget } from "./shared.js";
+import { tabTarget, tabTargetForce } from "./shared.js";
 
 /**
  * Single owner-auth chokepoint for every `get_network` body fetch.
@@ -41,6 +41,81 @@ export function authorizeBodyFetch(
   return {
     ok: false,
     error: `Response body for request #${event.id} belongs to owner "${tabOwner}"'s tab — pass owner:"${tabOwner}" to read it.`,
+  };
+}
+
+/**
+ * Owner-auth for a whole-tab operation. Mirrors authorizeBodyFetch but
+ * gates entire-tool access rather than a single response-body fetch.
+ *
+ * Rules:
+ *   force:true → allowed (operator override)
+ *   tab has no owner → allowed (unowned — anyone)
+ *   caller's owner matches tab owner → allowed
+ *   otherwise → DENIED
+ *
+ * resolveTab now enforces ownership at the chokepoint (even when owner is
+ * absent on an owned tab). This predicate is a belt-and-suspenders backstop
+ * for tools that validate after resolution.
+ */
+export function assertTabOwner(
+  mgr: { getTabOwner: (tabId: number) => string | undefined },
+  tabId: number,
+  callerOwner: string | undefined,
+  force: boolean | undefined,
+): { ok: true } | { ok: false; error: string } {
+  if (force) return { ok: true };
+  const tabOwner = mgr.getTabOwner(tabId);
+  if (tabOwner === undefined) return { ok: true };
+  if (callerOwner !== undefined && callerOwner === tabOwner) return { ok: true };
+  return {
+    ok: false,
+    error: `Tab ${tabId} belongs to owner "${tabOwner}" — pass owner:"${tabOwner}" (or force:true) to operate on it.`,
+  };
+}
+
+/**
+ * Serialize a list of NetworkEvents to HAR 1.2 format.
+ * Pure function — callers supply the events; no manager dependency.
+ */
+export function buildHar(events: NetworkEvent[]): object {
+  return {
+    log: {
+      version: "1.2",
+      creator: { name: "steel-mcp", version: "0.8.0" },
+      entries: events.map((e) => ({
+        // e.at is the event record (response) time; durationMs is elapsed.
+        // HAR 1.2 startedDateTime must be REQUEST-START = at - duration.
+        startedDateTime: new Date((e.at ?? Date.now()) - (e.durationMs ?? 0)).toISOString(),
+        time: e.durationMs ?? 0,
+        request: {
+          method: e.method,
+          url: e.url,
+          httpVersion: "HTTP/1.1",
+          headers: [],
+          queryString: [],
+          cookies: [],
+          headersSize: -1,
+          bodySize: -1,
+        },
+        response: {
+          status: e.status ?? 0,
+          statusText: "",
+          httpVersion: "HTTP/1.1",
+          headers: [],
+          cookies: [],
+          content: {
+            size: e.sizeBytes ?? 0,
+            mimeType: e.contentType ?? "",
+          },
+          redirectURL: "",
+          headersSize: -1,
+          bodySize: e.sizeBytes ?? -1,
+        },
+        cache: {},
+        timings: { send: 0, wait: e.durationMs ?? 0, receive: 0 },
+      })),
+    },
   };
 }
 
@@ -525,6 +600,92 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
           content: [{ type: "text", text: cleanErrorMessage(error) }],
           structuredContent: { events: [] },
         };
+      }
+    },
+  });
+
+  // export_har -----------------------------------------------------------------
+  register({
+    name: "export_har",
+    title: "Export HAR",
+    description: `Export captured network events as a HAR 1.2 file. Owner-scoped: when owner is given, only events from that owner's tabs are included. 
+
+CONTEXT BUDGET — HAR is always written to disk (no inline option).`,
+    toolset: "network",
+    inputSchema: {
+      ...tabTargetForce,
+      outputPath: z
+        .string()
+        .optional()
+        .describe("Absolute path to save the HAR. Defaults to OUTPUT_DIR/network.har."),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async ({
+      tabId,
+      owner,
+      force,
+      outputPath,
+    }: {
+      tabId?: number;
+      owner?: string;
+      force?: boolean;
+      outputPath?: string;
+    }) => {
+      try {
+        // Refuse an unscoped dump of every owner's traffic.
+        if (tabId === undefined && owner === undefined) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: "export_har requires owner (your owner tag) or tabId to scope traffic — refusing to export all owners' traffic.",
+              },
+            ],
+          };
+        }
+
+        // If a specific tab is named, it must be the caller's (or force).
+        // resolveTab enforces ownership at the chokepoint; this is a
+        // belt-and-suspenders backstop for export_har's own tabId path.
+        if (tabId !== undefined) {
+          const auth = assertTabOwner(mgr, tabId, owner, force);
+          if (!auth.ok) {
+            return { isError: true, content: [{ type: "text", text: auth.error }] };
+          }
+        }
+
+        // Owner-only export: scope to ALL of that owner's tabs via
+        // getNetworkEvents' owner filter (which collects events from
+        // every tab owned by that agent). Do NOT pre-resolve to a
+        // single active tab — that misses events on the owner's other
+        // tabs.
+        const events = mgr.getNetworkEvents({ tabId, owner, limit: 0 });
+
+        const har = buildHar(events);
+        const filePath = await writeToFile(
+          JSON.stringify(har, null, 2),
+          "network.har",
+          env,
+          outputPath,
+        );
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `HAR exported: ${filePath} (${events.length} entries)`,
+            },
+          ],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return { isError: true, content: [{ type: "text", text: error.message }] };
       }
     },
   });

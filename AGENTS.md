@@ -117,31 +117,32 @@ Invalid values cause the process to exit with a descriptive error.
 | `RELAY_BIND_ADDR` | `127.0.0.1` | Address the relay HTTP server binds to. Use `0.0.0.0` to accept external connections (only when behind a reverse proxy or firewall). |
 | `SETTLE_TIMEOUT_MS` | `5000` | Max time to wait for network idle + DOM quiet after action tools. `0` disables settle detection entirely. |
 | `NETWORK_BUFFER_SIZE` | `500` | Max request/response events kept for `get_network`. `0` disables capture (no listeners, empty results). |
-| `TOOLSETS` | all | Comma-separated toolset groups to activate: `core,tabs,extract,media,network,auth,debug,ai`. `core` is always active. Overridden by the `--toolsets` CLI flag. |
+| `TOOLSETS` | all | Comma-separated toolset groups to activate: `core,tabs,extract,media,network,auth,debug,ai,intercept`. `core` is always active. Overridden by the `--toolsets` CLI flag. |
 | `ACT_LLM_BASE_URL` | — | OpenAI-compatible endpoint for `act` / `extract_ai`. Base URL is used as-is; append `/v1` yourself if the provider expects it. Required to enable those tools. |
 | `ACT_LLM_MODEL` | — | Model name sent to the LLM endpoint (e.g. `gemma3`, `qwen2.5`). Required to enable `act` / `extract_ai`. |
 | `ACT_LLM_API_KEY` | — | Optional API key for the LLM endpoint. When unset, no `Authorization` header is sent (ollama-style). |
 
 ### `--toolsets` — Toolset Filtering
 
-Tools are grouped into 8 sets; pass any subset to trim the tool surface for
+Tools are grouped into 9 sets; pass any subset to trim the tool surface for
 context-budget-constrained agents:
 
 | Group    | Includes                                                          |
 |----------|-------------------------------------------------------------------|
-| `core`   | Always active. `go_to_url`, `history`, `click`, `fill`, `scroll`, `wait_for`, `press_key`, `handle_dialog`, `upload_file`, `snapshot`, `get_page_text`, `start_browser`, `stop_browser`. |
+| `core`   | Always active. `go_to_url`, `history`, `click`, `click_at`, `fill`, `scroll`, `wait_for`, `press_key`, `handle_dialog`, `upload_file`, `snapshot`, `page_state`, `get_page_text`, `mouse_move`, `mouse_down`, `mouse_up`, `start_browser`, `stop_browser`. |
 | `tabs`   | `list_tabs`, `new_tab`, `close_tabs`.                              |
 | `extract`| `get_links`, `get_attrs`, `evaluate`, `extract`, `fetch_urls`.     |
 | `media`  | `get_screenshot`, `download_file`.                                 |
-| `network`| `cookies`, `get_network`.                                         |
+| `network`| `cookies`, `get_network`, `export_har`.                           |
 | `auth`   | `create_profile`, `list_profiles`, `save_profile`, `delete_profile`, `credentials`, `use_credential`. |
 | `debug`  | `smoke_test`, `get_console`, `captcha_status`.                     |
 | `ai`     | `act`, `extract_ai` — only registered when `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` are set. |
+| `intercept` | `intercept` — network request interception (fulfill/abort/continue). |
 
 Precedence: `--toolsets a,b` CLI flag > `TOOLSETS` env var > all toolsets.
 Unknown names fail startup with a list of valid values.
 
-By default all 8 toolsets are active (34 tools); the `ai` toolset is gated on
+By default all 9 toolsets are active (41 tools); the `ai` toolset is gated on
 `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` — without those env vars, `act` and
 `extract_ai` are not registered, even if `--toolsets=ai` is passed.
 
@@ -237,6 +238,14 @@ src/
 **Browser layer:** Direct **Patchright** — `chromium` from the `patchright` package (a
 patched Playwright build that bypasses the `Runtime.enable` stealth fingerprint). All
 page APIs match standard Playwright.
+
+**Stealth config — STEEL vs LOCAL mode.** In STEEL mode the browser runs inside
+our custom Steel fork container, which adds stealth code modifications to the
+stock Steel image and includes the CapSolver plugin. Anti-bot evasion and CAPTCHA
+solving are handled there (plus the MCP's `captcha_status`/`go_to_url` CapSolver
+integration). Any residual fingerprint tell is tuned in the fork's mods, not the
+MCP layer. In LOCAL mode the MCP launches Chromium directly via Patchright and
+prefers `channel:"chrome"` (system Chrome) when available for stealth.
 - `page.viewportSize()` / `page.setViewportSize({ width, height })`
 - `page.screenshot(options)` — `PageScreenshotOptions`; `scale` is `'css'|'device'` not numeric
 - `page.goto(url, { waitUntil: "domcontentloaded" })` — use domcontentloaded not load
@@ -273,11 +282,11 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 | `press_key` | Press a key or combo (Enter, Escape, Control+A). Optional `selector`/`ref` to focus first |
 | `handle_dialog` | Pre-arm the dialog policy (`accept`/`dismiss`, optional `promptText`) before an action that triggers alert/confirm/prompt. Omit `action` to inspect current policy + last dialog |
 | `upload_file` | Upload files via `<input type=file>` or a custom upload button (`viaChooser: true`). Absolute host paths only |
-| `snapshot` | Page accessibility tree with `[ref=eN]` tokens. The preferred first look — refs feed `click`/`fill`/`get_attrs`/`extract` directly. `frame` targets an iframe; output appends a frames section. Default maxChars: 8K |
+| `snapshot` | Page accessibility tree with `@eN` ref tokens. The preferred first look — refs feed `click`/`fill`/`get_attrs`/`extract` directly. `filter` (default interactive), `diff` (delta vs baseline), `intent` (goal-scoped). `frame` targets an iframe; output appends a frames section. Default maxChars: 8K |
 | `get_page_text` | Extract text (auto-selects main content area). `extractContent` for Readability article extraction. `format: "markdown"` via turndown. `matchAll` for lists. Default maxChars: 5K |
 | `get_links` | Extract [{text, href}] with optional urlPattern filter. Accepts `ref` |
 | `get_attrs` | Extract specific attributes from matched elements (by `selector` or `ref`) |
-| `get_screenshot` | Screenshot (webp/jpeg/png, selector/clip/fullPage). Default outputMode: "file". Post-capture resize via @napi-rs/image (maxWidth, maxHeight, maxFileBytes) |
+| `get_screenshot` | Screenshot (webp/jpeg/png, selector/clip/fullPage). Default outputMode: "file". `annotate` overlays numbered labels on interactive elements with a number→ref/coordinate map. Post-capture resize via @napi-rs/image (maxWidth, maxHeight, maxFileBytes) |
 | `evaluate` | Run JS in page context, return JSON. maxChars cap (default 10K). outputMode: "file" for large output. `frame` targets an iframe |
 | `get_console` | Browser console messages (filter by level) |
 | `fetch_urls` | Batch-fetch 1–10 URLs in parallel. `mode: "auto"|"browser"|"http"` (impit TLS-impersonated fast-path with auto-escalation). Readability article extraction per URL |
@@ -295,14 +304,23 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 | `smoke_test` | Self-test: navigate, fingerprint, stealth, CapSolver checks. Headless-detection probe (sannysoft) |
 | `start_browser` | Start browser, get Session Viewer + Interactive + Relay URLs |
 | `stop_browser` | Stop browser (kills all tabs/profiles). `owner`+`force` override the multi-agent safety check |
-| `act` | LLM-driven bounded micro-loop over a snapshot (1–5 steps). Gated on `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` |
+| `act` | LLM-driven bounded micro-loop over a snapshot (1–5 steps). `useVision` sends screenshots alongside the a11y tree. Gated on `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` |
 | `extract_ai` | LLM structured extraction from the current page (text or html, optional JSON Schema). Gated on `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` |
+| `page_state` | Lightweight page observation (url, title, scroll%, element counts) — ~48 tokens, no full snapshot. Use to check "did the page change?" cheaply |
+| `intercept` | Intercept network requests per-tab (fulfill/abort/continue/unroute/list). Owner-isolated — mock APIs, block noise, simulate errors |
+| `export_har` | Export captured network events as HAR 1.2 file. Owner-scoped — requires owner or tabId |
+| `click_at` | Click at viewport-absolute coordinates (x, y). Vision/coordinate fallback for canvas, WebGL, custom widgets. Supports left/right/middle + multi-click |
+| `mouse_move` | Move mouse to viewport-absolute coordinates. Use before mouse_down/mouse_up for drag/hover sequences |
+| `mouse_down` | Press a mouse button at current position. Use with mouse_move + mouse_up for drag-and-drop |
+| `mouse_up` | Release a mouse button at current position. Use with mouse_move + mouse_down for drag-and-drop |
 
 **Ref targeting.** `click`, `fill`, `scroll`, `wait_for`, `press_key`,
-`get_attrs`, `extract`, and `upload_file` accept `ref: "eN"` in place of
+`get_attrs`, `extract`, and `upload_file` accept `ref: "@eN"` in place of
 `selector`. Refs come from `snapshot` and expire on navigation or page mutation —
 take a fresh snapshot after either. Pass exactly one of `selector` or `ref`.
-(`handle_dialog` accepts `tabId` + `owner` only — it has no `ref` or `force`.)
+(`click_at`, `mouse_move`, `mouse_down`, `mouse_up` are coordinate-based —
+no ref support. `handle_dialog` accepts `tabId` + `owner` only — no `ref` or
+`force`.)
 
 **Frame targeting.** `click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot`
 accept `frame: "<name>" | "<url-substring>" | "<0-based index>"` to target an iframe.
@@ -324,7 +342,7 @@ Child frames exclude the main frame; the index is 0-based within the child list.
 ### Snapshot-first interaction paradigm
 
 The preferred read is `snapshot`, not `get_page_text`. Snapshot returns the
-accessibility tree with stable `[ref=eN]` tokens; that structure is both
+accessibility tree with stable `@eN` ref tokens; that structure is both
 cheaper (no layout/walk costs) and more actionable — refs feed
 `click`/`fill`/`scroll`/`wait_for`/`get_attrs`/`extract`/`press_key` directly.
 Use `get_page_text` only when the agent needs the actual prose content of

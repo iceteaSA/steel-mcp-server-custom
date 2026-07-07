@@ -52,6 +52,23 @@ describe("toSelector", () => {
   it("rejects empty-string ref", () => {
     expect(() => toSelector({ ref: "" })).toThrow("Pass selector or ref");
   });
+
+  // Compact @eN ref format — @e5 and bare e5 both resolve to aria-ref=e5
+  it("accepts @eN ref format (compact output from snapshot)", () => {
+    expect(toSelector({ ref: "@e5" })).toBe("aria-ref=e5");
+    expect(toSelector({ ref: "@e42" })).toBe("aria-ref=e42");
+    expect(toSelector({ ref: "@e999" })).toBe("aria-ref=e999");
+  });
+
+  it("accepts bare eN ref format unchanged", () => {
+    expect(toSelector({ ref: "e5" })).toBe("aria-ref=e5");
+  });
+
+  it("throws on invalid @-prefixed ref (non-digit after @e)", () => {
+    expect(() => toSelector({ ref: "@x" })).toThrow("Invalid ref");
+    expect(() => toSelector({ ref: "@" })).toThrow("Invalid ref");
+    expect(() => toSelector({ ref: "@e" })).toThrow("Invalid ref");
+  });
 });
 
 // ---------------------------------------------------------------------------

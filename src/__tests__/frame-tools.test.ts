@@ -143,7 +143,7 @@ describe("snapshot frame isolation", () => {
   it("does NOT store the snapshot when a child frame is targeted", async () => {
     const { find } = buildRegistry();
     const snapshot = find("snapshot");
-    const result = await snapshot.handler({ frame: "child-frame" });
+    const result = await snapshot.handler({ frame: "child-frame", filter: "all" });
 
     expect(result.isError).toBeUndefined();
     expect(result.content[0].text).toContain("frame-tree");
@@ -153,6 +153,19 @@ describe("snapshot frame isolation", () => {
   it("appends a frames section when child frames exist", async () => {
     const { find } = buildRegistry();
     const snapshot = find("snapshot");
+    const result = await snapshot.handler({ filter: "all" });
+
+    const text = result.content[0].text;
+    expect(text).toContain("--- frames ---");
+    expect(text).toContain('[0] name="child-frame"');
+    expect(text).toContain("url=https://example.com/child");
+  });
+
+  it("includes frames section under default interactive filter", async () => {
+    const { find } = buildRegistry();
+    const snapshot = find("snapshot");
+    // No filter arg — defaults to "interactive", which strips non-interactive
+    // nodes. The frames block is appended AFTER filtering so it always survives.
     const result = await snapshot.handler({});
 
     const text = result.content[0].text;

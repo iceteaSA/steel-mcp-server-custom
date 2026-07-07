@@ -129,9 +129,9 @@ function addTab(mgr: any, owner?: string, overrides?: Partial<Record<string, unk
 // ---------------------------------------------------------------------------
 
 describe("resolveTab — explicit tabId", () => {
-  it("returns tabId when no owner check is needed (caller has no owner)", () => {
+  it("returns tabId for an unowned tab with no owner (legacy)", () => {
     const mgr = setupMgr();
-    const id = addTab(mgr, "agent-b");
+    const id = addTab(mgr); // unowned
     const result = mgr.resolveTab({ tabId: id });
     expect(result).toBe(id);
   });
@@ -150,6 +150,12 @@ describe("resolveTab — explicit tabId", () => {
     expect(result).toBe(id);
   });
 
+  it("throws TabOwnershipError when tab has owner but caller passes no owner", () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-b");
+    expect(() => mgr.resolveTab({ tabId: id })).toThrow(TabOwnershipError);
+  });
+
   it("throws TabOwnershipError when tab owner differs from caller and !force", () => {
     const mgr = setupMgr();
     const id = addTab(mgr, "agent-b");
@@ -160,6 +166,13 @@ describe("resolveTab — explicit tabId", () => {
     const mgr = setupMgr();
     const id = addTab(mgr, "agent-b");
     const result = mgr.resolveTab({ tabId: id, owner: "agent-a", force: true });
+    expect(result).toBe(id);
+  });
+
+  it("returns tabId for owned tab with force:true and no owner", () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-b");
+    const result = mgr.resolveTab({ tabId: id, force: true });
     expect(result).toBe(id);
   });
 
@@ -176,6 +189,23 @@ describe("resolveTab — explicit tabId", () => {
       expect(err.tabOwner).toBe("agent-b");
       expect(err.caller).toBe("agent-a");
       expect(err.message).toContain("Pass force:true to override");
+    }
+  });
+
+  it("TabOwnershipError with undefined caller produces no-owner message", () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-b");
+    try {
+      mgr.resolveTab({ tabId: id });
+      expect.unreachable("should have thrown");
+    } catch (e) {
+      expect(e instanceof TabOwnershipError).toBe(true);
+      const err = e as TabOwnershipError;
+      expect(err.tabId).toBe(id);
+      expect(err.tabOwner).toBe("agent-b");
+      expect(err.caller).toBeUndefined();
+      expect(err.message).toContain("you passed no owner");
+      expect(err.message).toContain('Pass owner:"agent-b"');
     }
   });
 });
@@ -1225,5 +1255,490 @@ describe("_recoverTab preserves owner through the full softReset→initialize pa
     // the profile definition does not survive the soft reset).
     expect(mgr.tabOwners.get(id)).toBe("agent-A");
     expect(mgr.ownerActiveTab.get("agent-A")).toBe(id);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Tab route registry — addRoute, listRoutes, removeRoutes, clearTabState
+// ---------------------------------------------------------------------------
+
+describe("tab route registry", () => {
+  it("addRoute registers a route; listRoutes shows it", () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-A");
+    const tabRoutes = (mgr as any).tabRoutes;
+    // Simulate a registered route entry directly (addRoute needs a real Page
+    // with .route() — we test the full handler path in the intercept tool
+    // tests). Here we push entries manually to test the registry bookkeeping.
+    tabRoutes.set(id, [
+      { pattern: "**/api/*", owner: "agent-A", unroute: async () => {} },
+      { pattern: "**/cdn/*", owner: "agent-A", unroute: async () => {} },
+    ]);
+
+    const routes = mgr.listRoutes(id);
+    expect(routes).toHaveLength(2);
+    expect(routes[0].pattern).toBe("**/api/*");
+    expect(routes[0].owner).toBe("agent-A");
+    expect(routes[1].pattern).toBe("**/cdn/*");
+  });
+
+  it("listRoutes returns empty array for unknown tab", () => {
+    const mgr = setupMgr();
+    expect(mgr.listRoutes(999)).toEqual([]);
+  });
+
+  it("removeRoutes(tabId) drops every route and returns count", async () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-B");
+    let unrouteCalls = 0;
+    const tabRoutes = (mgr as any).tabRoutes;
+    tabRoutes.set(id, [
+      {
+        pattern: "**/a/*",
+        owner: "agent-B",
+        unroute: async () => {
+          unrouteCalls++;
+        },
+      },
+      {
+        pattern: "**/b/*",
+        owner: "agent-B",
+        unroute: async () => {
+          unrouteCalls++;
+        },
+      },
+    ]);
+
+    const n = await mgr.removeRoutes(id);
+    expect(n).toBe(2);
+    expect(unrouteCalls).toBe(2);
+    // Registry should be cleaned up.
+    expect((mgr as any).tabRoutes.has(id)).toBe(false);
+    expect(mgr.listRoutes(id)).toEqual([]);
+  });
+
+  it("removeRoutes(tabId, pattern) unroutes only matching pattern", async () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-C");
+    let aUnrouted = false;
+    let bUnrouted = false;
+    const tabRoutes = (mgr as any).tabRoutes;
+    tabRoutes.set(id, [
+      {
+        pattern: "**/a/*",
+        owner: "agent-C",
+        unroute: async () => {
+          aUnrouted = true;
+        },
+      },
+      {
+        pattern: "**/b/*",
+        owner: "agent-C",
+        unroute: async () => {
+          bUnrouted = true;
+        },
+      },
+    ]);
+
+    const n = await mgr.removeRoutes(id, "**/a/*");
+    expect(n).toBe(1);
+    expect(aUnrouted).toBe(true);
+    expect(bUnrouted).toBe(false);
+
+    const remaining = mgr.listRoutes(id);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].pattern).toBe("**/b/*");
+  });
+
+  it("clearTabState clears tabRoutes for that tab", () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-D");
+    const tabRoutes = (mgr as any).tabRoutes;
+    tabRoutes.set(id, [{ pattern: "**/x/*", owner: "agent-D", unroute: async () => {} }]);
+
+    // clearTabState is called by closeTab — it must wipe tabRoutes.
+    mgr.clearTabState(id);
+    expect((mgr as any).tabRoutes.has(id)).toBe(false);
+  });
+
+  it("closeTab clears tabRoutes via clearTabState", async () => {
+    const mgr = setupMgr();
+    mgr.primaryTabId = 999;
+    mgr.tabs.set(999, fakePage());
+
+    const id = addTab(mgr, "agent-E");
+    const tabRoutes = (mgr as any).tabRoutes;
+    tabRoutes.set(id, [{ pattern: "**/y/*", owner: "agent-E", unroute: async () => {} }]);
+
+    await mgr.closeTab(id);
+    expect((mgr as any).tabRoutes.has(id)).toBe(false);
+  });
+
+  it("removeRoutes swallows unroute errors (page may be gone)", async () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-F");
+    const tabRoutes = (mgr as any).tabRoutes;
+    tabRoutes.set(id, [
+      {
+        pattern: "**/boom/*",
+        owner: "agent-F",
+        unroute: async () => {
+          throw new Error("page closed");
+        },
+      },
+    ]);
+
+    // Should not throw — the try/catch in removeRoutes catches it.
+    const n = await mgr.removeRoutes(id);
+    expect(n).toBe(1);
+    expect((mgr as any).tabRoutes.has(id)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Intercept tool guard tests — schema-level (pattern optional) +
+// ownership denial (resolveTab throws BEFORE pattern guard) +
+// pattern-required guard for fulfill/abort/continue.
+// ---------------------------------------------------------------------------
+
+import { register as registerIntercept } from "../tools/intercept.js";
+import type { ToolRegistrar } from "../tools/shared.js";
+
+function makeHandlerCapturer(): {
+  handlers: Record<string, (args: any) => any>;
+  register: ToolRegistrar;
+} {
+  const handlers: Record<string, (args: any) => any> = {};
+  const register = ((opts: any) => {
+    handlers[opts.name] = opts.handler;
+  }) as ToolRegistrar;
+  return { handlers, register };
+}
+
+describe("intercept tool guards", () => {
+  it("pattern is optional — handler receives undefined when omitted (MCP schema guard)", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    // fake mgr: resolveTab succeeds, getTabOwner matches caller so assertTabOwner passes
+    const mgr = {
+      resolveTab: () => 1,
+      getTabOwner: () => "agent-A",
+      listRoutes: () => [],
+      addRoute: async () => {},
+      removeRoutes: async () => 0,
+    } as any as BrowserManager;
+    const env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+    registerIntercept(register, mgr, env);
+    // list with no pattern, with matching owner — should succeed
+    const result = await handlers.intercept({ action: "list", owner: "agent-A" });
+    // Ownership passes, list should return routes (empty array)
+    expect(result.content[0].text).toBe("[]");
+  });
+
+  it("ownership denial fires BEFORE pattern guard for list (no pattern passed)", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    const mgr = {
+      resolveTab: () => {
+        const err = new Error(
+          'Tab 5 belongs to owner "agent-B" — you are "agent-A". Pass force:true to override, or target your own tab.',
+        );
+        err.name = "TabOwnershipError";
+        throw err;
+      },
+    } as any as BrowserManager;
+    const env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+    registerIntercept(register, mgr, env);
+
+    const result = await handlers.intercept({ action: "list", tabId: 5, owner: "agent-A" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("belongs to owner");
+    // Ownership error, NOT a missing-pattern error
+    expect(result.content[0].text).not.toContain("pattern is required");
+  });
+
+  it("ownership denial fires BEFORE pattern guard for fulfill (with pattern passed)", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    const mgr = {
+      resolveTab: () => {
+        const err = new Error(
+          'Tab 5 belongs to owner "agent-B" — you are "agent-A". Pass force:true to override, or target your own tab.',
+        );
+        err.name = "TabOwnershipError";
+        throw err;
+      },
+    } as any as BrowserManager;
+    const env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+    registerIntercept(register, mgr, env);
+
+    const result = await handlers.intercept({
+      action: "fulfill",
+      pattern: "**/api/*",
+      tabId: 5,
+      owner: "agent-A",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("belongs to owner");
+  });
+
+  it("pattern-required guard returns isError when fulfill has no pattern but ownership passes", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    const mgr = {
+      resolveTab: () => 1,
+      getTabOwner: () => "self",
+      listRoutes: () => [],
+      addRoute: async () => {},
+      removeRoutes: async () => 0,
+    } as any as BrowserManager;
+    const env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+    registerIntercept(register, mgr, env);
+
+    const result = await handlers.intercept({
+      action: "fulfill",
+      owner: "self",
+      // pattern intentionally omitted
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("pattern is required");
+    expect(result.content[0].text).toContain('"fulfill"');
+  });
+
+  it("intercept handler does NOT include outputSchema (removed — strict MCP path)", () => {
+    const captured: any[] = [];
+    const register = ((opts: any) => {
+      captured.push(opts);
+    }) as ToolRegistrar;
+    const mgr = {} as BrowserManager;
+    const env = {} as Env;
+    registerIntercept(register, mgr, env);
+
+    const spec = captured.find((s) => s.name === "intercept");
+    expect(spec).toBeTruthy();
+    expect(spec.outputSchema).toBeUndefined();
+  });
+
+  // SEC3 regression: tabId-only bypass — resolveTab skips ownership when
+  // owner is absent. assertTabOwner closes this gap.
+  it("tabId-only bypass: intercept fulfill on owned tab without owner → isError ownership", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    const mgr = {
+      resolveTab: () => 5,
+      getTabOwner: () => "agent-B",
+      listRoutes: () => [],
+      addRoute: async () => {},
+      removeRoutes: async () => 0,
+    } as any as BrowserManager;
+    const env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+    registerIntercept(register, mgr, env);
+
+    const result = await handlers.intercept({
+      action: "fulfill",
+      pattern: "**/api/*",
+      tabId: 5,
+      // owner intentionally omitted — the tabId-only bypass
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("belongs to owner");
+  });
+
+  it("tabId-only bypass: intercept list with no owner on owned tab → isError ownership", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    const mgr = {
+      resolveTab: () => 5,
+      getTabOwner: () => "agent-B",
+      listRoutes: () => [],
+      addRoute: async () => {},
+      removeRoutes: async () => 0,
+    } as any as BrowserManager;
+    const env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+    registerIntercept(register, mgr, env);
+
+    const result = await handlers.intercept({
+      action: "list",
+      tabId: 5,
+      // owner intentionally omitted
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("belongs to owner");
+    // Must NOT be a pattern error
+    expect(result.content[0].text).not.toContain("pattern is required");
+  });
+
+  it("intercept with force:true on another owner's tab → allowed", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    let called = false;
+    const mgr = {
+      resolveTab: () => 5,
+      getTabOwner: () => "agent-B",
+      listRoutes: () => [],
+      addRoute: async () => {
+        called = true;
+      },
+      removeRoutes: async () => 0,
+    } as any as BrowserManager;
+    const env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+    registerIntercept(register, mgr, env);
+
+    const result = await handlers.intercept({
+      action: "fulfill",
+      pattern: "**/api/*",
+      tabId: 5,
+      force: true,
+      // owner intentionally omitted — force overrides
+    });
+    expect(result.isError).toBeUndefined();
+    expect(called).toBe(true);
+    expect(result.content[0].text).toContain("Interception armed");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// export_har tool guards — traffic-observation leak + multi-tab completeness
+// ---------------------------------------------------------------------------
+
+import { register as registerNetwork, buildHar, assertTabOwner } from "../tools/network.js";
+
+describe("export_har tool guards", () => {
+  it("unscoped (no owner, no tabId) → refused", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    const mgr = {
+      resolveTab: () => 1,
+      getTabOwner: () => undefined,
+      getNetworkEvents: () => [],
+    } as any as BrowserManager;
+    const env = { OUTPUT_DIR: "/tmp", OUTPUT_ROOT: "/tmp" } as Env;
+    registerNetwork(register, mgr, env);
+
+    const result = await handlers.export_har({});
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("refusing to export all owners' traffic");
+  });
+
+  it("tabId-only bypass: export_har on owned tab without owner → isError ownership", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    const mgr = {
+      resolveTab: () => 5,
+      getTabOwner: () => "agent-B",
+      getNetworkEvents: () => [],
+    } as any as BrowserManager;
+    const env = { OUTPUT_DIR: "/tmp", OUTPUT_ROOT: "/tmp" } as Env;
+    registerNetwork(register, mgr, env);
+
+    const result = await handlers.export_har({ tabId: 5 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("belongs to owner");
+  });
+
+  it("multi-tab completeness: owner-only passes owner to getNetworkEvents (not resolved single tab)", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    let calledWith: any = undefined;
+    const mgr = {
+      resolveTab: () => 1,
+      getTabOwner: () => "agent-A",
+      getNetworkEvents: (filter: any) => {
+        calledWith = filter;
+        return [
+          {
+            id: 1,
+            at: Date.now(),
+            tabId: 1,
+            method: "GET",
+            url: "https://a/1",
+            resourceType: "xhr",
+          },
+          {
+            id: 2,
+            at: Date.now(),
+            tabId: 2,
+            method: "POST",
+            url: "https://a/2",
+            resourceType: "fetch",
+          },
+        ];
+      },
+    } as any as BrowserManager;
+    const env = { OUTPUT_DIR: "/tmp", OUTPUT_ROOT: "/tmp" } as Env;
+    registerNetwork(register, mgr, env);
+
+    const result = await handlers.export_har({ owner: "agent-A" });
+    expect(result.isError).toBeUndefined();
+    // Must call getNetworkEvents with owner, NOT a resolved single tabId.
+    expect(calledWith.owner).toBe("agent-A");
+    expect(calledWith.tabId).toBeUndefined();
+    expect(result.content[0].text).toContain("(2 entries)");
+  });
+});
+
+describe("buildHar", () => {
+  it("missing at timestamp does NOT throw — uses Date.now() fallback", () => {
+    const events = [
+      { id: 1, at: undefined as any, method: "GET", url: "https://x", resourceType: "xhr" },
+    ];
+    const har = buildHar(events) as any;
+    const entry = har.log.entries[0];
+    // Must be a valid ISO date string, no RangeError thrown
+    expect(entry.startedDateTime).toBeTruthy();
+    expect(() => new Date(entry.startedDateTime)).not.toThrow();
+  });
+
+  it("startedDateTime is request-start (at - durationMs) per HAR 1.2", () => {
+    const events = [
+      {
+        id: 1,
+        at: 1000000,
+        durationMs: 200,
+        method: "GET",
+        url: "https://x",
+        resourceType: "xhr",
+      },
+    ];
+    const har = buildHar(events) as any;
+    const entry = har.log.entries[0];
+    expect(entry.startedDateTime).toBe(new Date(1000000 - 200).toISOString());
+    expect(entry.time).toBe(200);
+  });
+});
+
+describe("assertTabOwner", () => {
+  const fakeGetOwner = (map: Record<number, string>) => (tabId: number) => map[tabId];
+
+  it("force:true → ok regardless of owner", () => {
+    const r = assertTabOwner({ getTabOwner: fakeGetOwner({ 5: "agent-B" }) }, 5, undefined, true);
+    expect(r.ok).toBe(true);
+  });
+
+  it("unowned tab → ok", () => {
+    const r = assertTabOwner({ getTabOwner: fakeGetOwner({}) }, 5, undefined, undefined);
+    expect(r.ok).toBe(true);
+  });
+
+  it("matching owner → ok", () => {
+    const r = assertTabOwner(
+      { getTabOwner: fakeGetOwner({ 5: "agent-A" }) },
+      5,
+      "agent-A",
+      undefined,
+    );
+    expect(r.ok).toBe(true);
+  });
+
+  it("owned tab + no caller owner → DENIED", () => {
+    const r = assertTabOwner(
+      { getTabOwner: fakeGetOwner({ 5: "agent-B" }) },
+      5,
+      undefined,
+      undefined,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("belongs to owner");
+  });
+
+  it("owned tab + wrong caller owner → DENIED", () => {
+    const r = assertTabOwner(
+      { getTabOwner: fakeGetOwner({ 5: "agent-B" }) },
+      5,
+      "agent-A",
+      undefined,
+    );
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toContain("belongs to owner");
   });
 });

@@ -15,6 +15,8 @@ interface LlmJsonOptions<T> {
   schema: z.ZodType<T>;
   maxTokens?: number;
   timeoutMs?: number;
+  /** When present, builds a multimodal user message with this base64 data URI as an image part. */
+  imageDataUri?: string;
 }
 
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -34,10 +36,25 @@ export async function llmJson<T>(env: Env, opts: LlmJsonOptions<T>): Promise<T> 
   let firstRaw = "";
   let secondRaw = "";
 
-  const messages: Array<{ role: "system" | "user"; content: string }> = [
+  type MessageContent =
+    | string
+    | Array<{ type: "text"; text: string } | { type: "image_url"; image_url: { url: string } }>;
+
+  const messages: Array<{ role: "system" | "user"; content: MessageContent }> = [
     { role: "system", content: opts.system },
-    { role: "user", content: opts.user },
   ];
+
+  if (opts.imageDataUri) {
+    messages.push({
+      role: "user",
+      content: [
+        { type: "text", text: opts.user },
+        { type: "image_url", image_url: { url: opts.imageDataUri } },
+      ],
+    });
+  } else {
+    messages.push({ role: "user", content: opts.user });
+  }
 
   // DeepSeek (and any provider strictly following the OpenAI json_object spec)
   // rejects requests whose prompt messages do not contain the literal word
@@ -48,7 +65,11 @@ export async function llmJson<T>(env: Env, opts: LlmJsonOptions<T>): Promise<T> 
   // already contains "JSON" so this only matters on the first attempt;
   // idempotent across iterations because the appended instruction sticks.
   const JSON_OBJECT_INSTRUCTION = "Respond with a single valid JSON object and nothing else.";
-  if (!messages.some((m) => /json/i.test(m.content))) {
+  const contentContainsJson = (content: MessageContent): boolean => {
+    if (typeof content === "string") return /json/i.test(content);
+    return content.some((part) => part.type === "text" && /json/i.test(part.text));
+  };
+  if (!messages.some((m) => contentContainsJson(m.content))) {
     const sys = messages[0];
     if (sys.role === "system") {
       messages[0] = { ...sys, content: `${sys.content}\n\n${JSON_OBJECT_INSTRUCTION}` };

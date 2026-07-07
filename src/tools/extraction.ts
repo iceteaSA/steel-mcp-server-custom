@@ -27,7 +27,15 @@ import {
   toSelector,
   decorateRefError,
 } from "./shared.js";
-import { captureSnapshot, storeSnapshot } from "../snapshot.js";
+import {
+  captureSnapshot,
+  diffSnapshots,
+  filterTree,
+  getStoredSnapshot,
+  storeSnapshot,
+  truncateForDisplay,
+  applyIntent,
+} from "../snapshot.js";
 
 // Singleton — configured once, reused across calls.
 const turndown = new TurndownService({
@@ -268,6 +276,14 @@ export async function runFetchUrls(
     structuredContent: { results: structured },
   };
 }
+
+/** Snapshot filter schema (no zod default — the handler owns the effective default). */
+export const snapshotFilterSchema = z
+  .enum(["interactive", "all", "visible"])
+  .optional()
+  .describe(
+    "Element filter. interactive (default): only actionable elements + structural ancestors (3-5x fewer nodes). all: full tree. visible: drop hidden.",
+  );
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // get_page_text -------------------------------------------------------------
@@ -1206,7 +1222,7 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
   register({
     name: "snapshot",
     title: "Page Snapshot",
-    description: `See the page as an accessibility tree with stable element refs ([ref=eN]). THE preferred first look at any page: ~10x cheaper than get_page_text for understanding structure, and refs feed click/fill/get_attrs/extract directly (pass ref instead of selector). Refs expire on navigation or page mutation — take a fresh snapshot after either. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main); the output appends a frames section listing child frames when present.
+    description: `See the page as an accessibility tree with stable element refs (@eN). THE preferred first look at any page: ~10x cheaper than get_page_text for understanding structure, and refs feed click/fill/get_attrs/extract directly (pass ref instead of selector). Refs expire on navigation or page mutation — take a fresh snapshot after either. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main); the output appends a frames section listing child frames when present. Default filter "interactive" shows only actionable elements (3-5x fewer nodes).
 
 CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
     toolset: "core",
@@ -1221,6 +1237,19 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         .describe(
           "Cap output (default 8000). Over-budget output is truncated at a line boundary — scope with selector instead of raising this.",
         ),
+      filter: snapshotFilterSchema,
+      diff: z
+        .boolean()
+        .optional()
+        .describe(
+          "Return only elements changed since the last snapshot of this tab (delta), not the full tree. Returns the raw delta of the full tree; filter and intent are not applied in diff mode.",
+        ),
+      intent: z
+        .enum(["login", "search", "read_content", "fill_form", "navigate", "buy", "extract_data"])
+        .optional()
+        .describe(
+          "Goal-scoped filter applied AFTER interactive/visible filter (e.g. 'login' keeps only form elements + login-related text).",
+        ),
       ...tabTarget,
       ...frameTarget,
     },
@@ -1230,27 +1259,123 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, maxChars, tabId, owner, frame }) => {
+    handler: async ({ selector, maxChars, filter, diff, intent, tabId, owner, frame }) => {
       try {
         const resolvedTabId = mgr.resolveTab({ tabId, owner });
         const page = await mgr.getPage({ tabId, owner });
         const ctx = resolveFrame(page, frame);
-        const result = await captureSnapshot(ctx, resolvedTabId, { selector, maxChars });
 
+        // Capture the full untruncated tree.
+        const result = await captureSnapshot(ctx, resolvedTabId, { selector, noTruncate: true });
+
+        // ----- diff mode: return delta vs stored baseline -----
+        // Diff operates on the full raw tree so no change is missed.
+        // Filter and intent are not applied in diff mode.
+        if (diff && frame === undefined) {
+          const prev = getStoredSnapshot(resolvedTabId);
+          storeSnapshot(resolvedTabId, result.text);
+          if (prev === undefined) {
+            const shown = truncateForDisplay(result.text, maxChars ?? 8000);
+            return {
+              content: [{ type: "text", text: `(no baseline — captured fresh)\n${shown}` }],
+            };
+          }
+          const delta = diffSnapshots(prev, result.text, { maxChars: maxChars ?? 8000 });
+          return { content: [{ type: "text", text: delta }] };
+        }
+
+        // Store the raw tree (no frames block) — baseline must not include
+        // the frames metadata or actionFeedback diffs will phantom-diff it
+        // every time child frame URLs change.
+        if (frame === undefined) {
+          storeSnapshot(resolvedTabId, result.text);
+        }
+
+        // When an intent is given, its own role set narrows the FULL tree (base
+        // "all"), so content intents (read_content / extract_data) aren't pre-stripped
+        // by the interactive default. An explicit filter arg is still honored.
+        const baseFilter = intent ? (filter ?? "all") : (filter ?? "interactive");
+        const filtered = filterTree(result.text, baseFilter);
+        const scoped = intent ? applyIntent(filtered, intent) : filtered;
+
+        // Build the frames block first so we can reserve its budget — maxChars
+        // must be a hard cap on the whole output, frames included.
         const childFrames = page.frames().slice(1);
+        let framesBlock = "";
         if (childFrames.length > 0) {
           const list = childFrames
             .map((f, i) => `[${i}] name="${f.name()}" url=${f.url()}`)
             .join("\n");
-          result.text += `\n--- frames ---\n${list}`;
+          framesBlock = `\n--- frames ---\n${list}`;
         }
+        const contentBudget = Math.max(200, (maxChars ?? 8000) - framesBlock.length);
+        const displayText = truncateForDisplay(scoped, contentBudget);
+        const output = displayText + framesBlock;
 
-        // Only store main-page snapshots; frame-scoped snapshots would corrupt
-        // the per-tab baseline that actionFeedback diffs against.
-        if (frame === undefined) {
-          storeSnapshot(resolvedTabId, result.text);
-        }
-        return { content: [{ type: "text", text: result.text }] };
+        return { content: [{ type: "text", text: output }] };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          isError: true,
+          content: [{ type: "text", text: cleanErrorMessage(error) }],
+        };
+      }
+    },
+  });
+
+  // page_state — lightweight page observation ---------------------------------
+  register({
+    name: "page_state",
+    title: "Page State",
+    toolset: "core",
+    description: `Lightweight page observation (url, title, scroll%, element counts) — ~48 tokens, no full snapshot. Use to check "did the page change?" cheaply.
+
+CONTEXT BUDGET — tiny fixed output.`,
+    inputSchema: {
+      ...tabTarget,
+    },
+    outputSchema: {
+      url: z.string().optional(),
+      title: z.string().optional(),
+      scrollPercent: z.number().optional(),
+      elementCount: z.number().optional(),
+      interactiveCount: z.number().optional(),
+      hasDialog: z.boolean().optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({ tabId, owner }) => {
+      try {
+        const page = await mgr.getPage({ tabId, owner });
+        const s = await page.evaluate(() => {
+          const de = document.documentElement;
+          const max = de.scrollHeight - de.clientHeight;
+          const interactive = document.querySelectorAll(
+            "a[href],button,input,select,textarea,[role=button],[role=link],[role=textbox],[tabindex]:not([tabindex='-1'])",
+          ).length;
+          return {
+            url: location.href,
+            title: document.title,
+            scrollPercent: max > 0 ? Math.round((de.scrollTop / max) * 100) : 0,
+            elementCount: document.querySelectorAll("*").length,
+            interactiveCount: interactive,
+          };
+        });
+
+        // Dialogs are auto-resolved immediately by the per-tab policy (see
+        // handle_dialog), so there is no meaningful "pending dialog" to report.
+        // Fixed false in v1.
+        const hasDialog = false;
+
+        const out = { ...s, hasDialog };
+        return {
+          content: [{ type: "text", text: JSON.stringify(out) }],
+          structuredContent: out,
+        };
       } catch (err) {
         const error = err as Error;
         return {

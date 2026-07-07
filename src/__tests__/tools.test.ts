@@ -133,7 +133,7 @@ describe("non-browser tools", () => {
   it("tools/list returns expected tools with correct names", async () => {
     const r = await client.call(100, "tools/list");
     const names = r.result?.tools?.map((t) => t.name).sort() || [];
-    expect(names.length).toBe(34);
+    expect(names.length).toBe(41);
 
     // Verify removed tools are gone
     const removed = [
@@ -168,6 +168,10 @@ describe("non-browser tools", () => {
       "handle_dialog",
       "upload_file",
       "press_key",
+      "click_at",
+      "mouse_move",
+      "mouse_down",
+      "mouse_up",
     ];
     for (const name of expected) {
       expect(names).toContain(name);

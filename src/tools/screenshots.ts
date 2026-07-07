@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
 import { writeToFile } from "../utils.js";
 import { cleanErrorMessage } from "../helpers.js";
+import { captureSnapshot, filterTree } from "../snapshot.js";
 import type { ToolRegistrar } from "./shared.js";
 import { tabTarget } from "./shared.js";
 
@@ -177,6 +178,12 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
         .describe(
           "Max bytes before auto-switching to file mode. Default: MAX_INLINE_BYTES env var (512000). Set lower to protect context budget.",
         ),
+      annotate: z
+        .boolean()
+        .optional()
+        .describe(
+          "Overlay numbered labels on interactive elements and return a number→ref/coordinate map. When true, labels are drawn onto the screenshot so you can correlate visual position to actionable targets (refs usable by click/click_at). The returned marks array maps number→{ref, x, y} (centre coordinates).",
+        ),
       ...tabTarget,
     },
     annotations: {
@@ -198,6 +205,7 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
       maxHeight,
       maxFileBytes,
       maxInlineBytes,
+      annotate,
       tabId,
       owner,
     }) => {
@@ -228,7 +236,93 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
           }
         }
         const page = await mgr.getPage({ tabId, owner });
+        const resolvedTabId = mgr.resolveTab({ tabId, owner });
         const effectiveQuality = quality ?? env.DEFAULT_SCREENSHOT_QUALITY;
+
+        // Annotate — overlay numbered labels on interactive elements and return
+        // a marks map so the agent can correlate visual position to refs.
+        let marks: Array<{ n: number; ref: string; x: number; y: number }> | undefined;
+        let annotateNote = "";
+        if (annotate) {
+          try {
+            const snap = await captureSnapshot(page, resolvedTabId, {
+              noTruncate: true,
+            });
+            const interactive = filterTree(snap.text, "interactive");
+            // Extract all @eN refs from interactive lines.
+            const refRe = /@e\d+/g;
+            const refs = [...new Set(interactive.match(refRe) ?? [])];
+
+            // Cap at MAX_MARKS to avoid N serial CDP round-trips on pages with
+            // hundreds of interactive elements. Resolve boundingBoxes in parallel.
+            const MAX_MARKS = 50;
+            const refsToMark = refs.slice(0, MAX_MARKS);
+
+            const resolved = await Promise.all(
+              refsToMark.map(async (ref) => {
+                const box = await page
+                  .locator(`aria-ref=${ref.slice(1)}`)
+                  .boundingBox()
+                  .catch(() => null);
+                return box ? { ref: ref.slice(1), box } : null;
+              }),
+            );
+
+            const withBoxes = resolved.filter(
+              (
+                r,
+              ): r is {
+                ref: string;
+                box: { x: number; y: number; width: number; height: number };
+              } => r !== null,
+            );
+
+            const boxes = withBoxes.map((r, i) => ({
+              n: i + 1,
+              ref: r.ref,
+              x: r.box.x,
+              y: r.box.y,
+              w: r.box.width,
+              h: r.box.height,
+            }));
+
+            if (refs.length > MAX_MARKS) {
+              annotateNote = ` (marked first ${MAX_MARKS} of ${refs.length} interactive elements)`;
+            }
+
+            marks = boxes.map((b) => ({
+              n: b.n,
+              ref: b.ref,
+              x: b.x + b.w / 2,
+              y: b.y + b.h / 2,
+            }));
+
+            // Inject labels — data passed as ARGUMENT (browser-isolate safe).
+            // Each mark draws a red border + number badge via fixed-position divs.
+            await page.evaluate(
+              (items: Array<{ n: number; x: number; y: number; w: number; h: number }>) => {
+                const layer = document.createElement("div");
+                layer.id = "__mcp_marks";
+                layer.style.cssText =
+                  "position:fixed;inset:0;pointer-events:none;z-index:2147483647";
+                for (const m of items) {
+                  const b = document.createElement("div");
+                  b.style.cssText = `position:fixed;left:${m.x}px;top:${m.y}px;width:${m.w}px;height:${m.h}px;border:2px solid #e11;box-sizing:border-box`;
+                  const lab = document.createElement("div");
+                  lab.textContent = String(m.n);
+                  lab.style.cssText = `position:fixed;left:${m.x}px;top:${Math.max(0, m.y - 14)}px;background:#e11;color:#fff;font:12px/14px monospace;padding:0 3px`;
+                  layer.appendChild(b);
+                  layer.appendChild(lab);
+                }
+                document.body.appendChild(layer);
+              },
+              boxes.map(({ n, x, y, w, h }) => ({ n, x, y, w, h })),
+            );
+          } catch {
+            // Annotate is best-effort — silently skip on failure.
+            marks = undefined;
+          }
+        }
         const effectiveMaxInlineBytes = maxInlineBytes ?? env.MAX_INLINE_BYTES;
 
         const origVp = page.viewportSize() ?? {
@@ -304,6 +398,10 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
           if (scale !== 1.0) {
             await page.setViewportSize(origVp).catch(() => {});
           }
+          // Remove annotate overlay, if any.
+          if (annotate) {
+            await page.evaluate(() => document.getElementById("__mcp_marks")?.remove());
+          }
         }
 
         // Post-capture: resize + compress via @napi-rs/image (no viewport mutation)
@@ -326,19 +424,23 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
             outputMode === "inline"
               ? `\n(Auto-switched to file mode: output exceeded ${effectiveMaxInlineBytes.toLocaleString()} bytes)`
               : "";
-          return {
+          const result: any = {
             content: [
               {
                 type: "text",
-                text: `Screenshot saved to: ${filePath}\nSize: ${buffer.length.toLocaleString()} bytes${autoNote}`,
+                text: `Screenshot saved to: ${filePath}\nSize: ${buffer.length.toLocaleString()} bytes${annotateNote}${autoNote}`,
               },
             ],
           };
+          if (marks && marks.length > 0) {
+            result.structuredContent = { marks };
+          }
+          return result;
         }
 
-        return {
+        const result: any = {
           content: [
-            { type: "text", text: "Screenshot taken." },
+            { type: "text", text: `Screenshot taken.${annotateNote}` },
             {
               type: "image",
               data: buffer.toString("base64"),
@@ -346,6 +448,10 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
             },
           ],
         };
+        if (marks && marks.length > 0) {
+          result.structuredContent = { marks };
+        }
+        return result;
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };

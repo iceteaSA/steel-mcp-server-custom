@@ -133,13 +133,13 @@ describe("waitForSettled", () => {
 import { actionFeedback } from "../utils.js";
 import { storeSnapshot, getStoredSnapshot, clearAllSnapshots } from "../snapshot.js";
 
-const SNAP_FIXTURE = `- heading "Welcome" [ref=e1]
-- textbox "Search" [ref=e2]
-- button "Go" [ref=e3]`;
+const SNAP_FIXTURE = `- heading "Welcome" @e1
+- textbox "Search" @e2
+- button "Go" @e3`;
 
-const SNAP_CHANGED = `- heading "Welcome" [ref=e4]
-- textbox "Search": hello [ref=e5]
-- button "Go" [ref=e6]`;
+const SNAP_CHANGED = `- heading "Welcome" @e4
+- textbox "Search": hello @e5
+- button "Go" @e6`;
 
 function ariaPage(snapshot: string) {
   return {
@@ -181,7 +181,7 @@ describe("actionFeedback", () => {
     // Build a long snapshot (>3K chars for display, <15K for realistic store).
     const lines: string[] = [];
     for (let i = 0; i < 120; i++) {
-      lines.push(`- text "This is a reasonably long line number ${i}" [ref=e${i}]`);
+      lines.push(`- text "This is a reasonably long line number ${i}" @e${i}`);
     }
     const longSnap = lines.join("\n");
     const page = ariaPage(longSnap);
@@ -213,7 +213,7 @@ describe("actionFeedback", () => {
   // S5: >1500-line stored snapshot triggers early bail (no capture, no diff).
   it("returns empty when stored snapshot exceeds 1500 lines (early bail)", async () => {
     clearAllSnapshots();
-    const hugeLines = Array.from({ length: 1501 }, (_, i) => `- text "Line ${i}" [ref=e${i}]`);
+    const hugeLines = Array.from({ length: 1501 }, (_, i) => `- text "Line ${i}" @e${i}`);
     storeSnapshot(1, hugeLines.join("\n"));
 
     const result = await actionFeedback(ariaPage(SNAP_FIXTURE), 1);
