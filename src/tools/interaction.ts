@@ -2,7 +2,7 @@ import fs from "fs/promises";
 
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
-import { afterAction, actionFeedback } from "../utils.js";
+import { afterAction, actionFeedback, globalWait } from "../utils.js";
 import {
   assertInsideRoot,
   cleanErrorMessage,
@@ -901,6 +901,188 @@ Errors: missing file paths, path escapes UPLOAD_ROOT, selector timeout, element 
         return {
           isError: true,
           content: [{ type: "text", text: decorateRefError(error, sel) }],
+        };
+      }
+    },
+  });
+
+  // click_at — coordinate-level click (vision fallback for canvas/WebGL/ custom  --
+  // widgets the a11y tree cannot address). Follows the press_key canonical pattern.
+  // page.mouse coordinates are viewport-absolute; the frame param is accepted for
+  // API consistency but does not affect targeting.
+  register({
+    name: "click_at",
+    title: "Click at Coordinates",
+    description: `Click at specific page coordinates (x, y). Use as a vision fallback when the accessibility tree cannot address a target — canvas, WebGL, custom-drawn widgets, coordinate-based interactions. Supports left/middle/right buttons and multi-click.
+
+page.mouse coordinates are viewport-absolute — the optional frame param is accepted for API consistency but does not change the coordinate space. Prefer click (with selector/ref) when the a11y tree covers the target.`,
+    toolset: "core",
+    inputSchema: {
+      ...tabTargetForce,
+      ...frameTarget,
+      x: z.number().describe("X coordinate (viewport-absolute pixels)."),
+      y: z.number().describe("Y coordinate (viewport-absolute pixels)."),
+      button: z
+        .enum(["left", "right", "middle"])
+        .optional()
+        .describe("Mouse button. Default: 'left'."),
+      clickCount: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Number of clicks. Default: 1 (single click). Use 2 for double-click."),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ x, y, button, clickCount, tabId, owner, force }) => {
+      try {
+        const page = await mgr.getPage({ tabId, owner, force });
+        const urlBefore = page.url();
+
+        await page.mouse.click(x, y, {
+          button: button ?? "left",
+          clickCount: clickCount ?? 1,
+        });
+        await globalWait(env);
+
+        const urlAfter = page.url();
+        const navigated = urlAfter !== urlBefore;
+        const resolved = mgr.resolveTab({ tabId, owner, force });
+        if (navigated) {
+          mgr.setTabLastUrl(resolved, urlAfter);
+        }
+        const feedback = await actionFeedback(page, resolved, { navigated });
+        const feedbackText = feedback ? `\n${feedback}` : "";
+        const dialogText = mgr.dialogNotice(resolved);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Clicked at (${x}, ${y}).${feedbackText}${dialogText}`,
+            },
+          ],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          isError: true,
+          content: [{ type: "text", text: cleanErrorMessage(error) }],
+        };
+      }
+    },
+  });
+
+  // mouse_move — move the mouse to viewport-absolute coordinates (drag/hover --
+  // sequences). Thin wrapper on page.mouse.move.
+  register({
+    name: "mouse_move",
+    title: "Move Mouse",
+    description: `Move the mouse to specific viewport-absolute coordinates (x, y). Use before mouse_down/mouse_up for drag sequences, or to trigger hover effects on custom elements. Does not click — pair with mouse_down then mouse_up for drag.`,
+    toolset: "core",
+    inputSchema: {
+      ...tabTargetForce,
+      x: z.number().describe("X coordinate (viewport-absolute pixels)."),
+      y: z.number().describe("Y coordinate (viewport-absolute pixels)."),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ x, y, tabId, owner, force }) => {
+      try {
+        const page = await mgr.getPage({ tabId, owner, force });
+        await page.mouse.move(x, y);
+        await globalWait(env);
+        return {
+          content: [{ type: "text", text: `Mouse moved to (${x}, ${y}).` }],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          isError: true,
+          content: [{ type: "text", text: cleanErrorMessage(error) }],
+        };
+      }
+    },
+  });
+
+  // mouse_down — press a mouse button at the current position (drag sequences).
+  register({
+    name: "mouse_down",
+    title: "Mouse Down",
+    description: `Press a mouse button at the current position. Use with mouse_move + mouse_up for drag-and-drop sequences. Does not release — pair with mouse_up.`,
+    toolset: "core",
+    inputSchema: {
+      ...tabTargetForce,
+      button: z
+        .enum(["left", "right", "middle"])
+        .optional()
+        .describe("Mouse button to press. Default: 'left'."),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ button, tabId, owner, force }) => {
+      try {
+        const page = await mgr.getPage({ tabId, owner, force });
+        await page.mouse.down({ button: button ?? "left" });
+        await globalWait(env);
+        return {
+          content: [{ type: "text", text: `Mouse button "${button ?? "left"}" pressed.` }],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          isError: true,
+          content: [{ type: "text", text: cleanErrorMessage(error) }],
+        };
+      }
+    },
+  });
+
+  // mouse_up — release a mouse button (drag sequences).
+  register({
+    name: "mouse_up",
+    title: "Mouse Up",
+    description: `Release a mouse button at the current position. Use with mouse_move + mouse_down for drag-and-drop sequences.`,
+    toolset: "core",
+    inputSchema: {
+      ...tabTargetForce,
+      button: z
+        .enum(["left", "right", "middle"])
+        .optional()
+        .describe("Mouse button to release. Default: 'left'."),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ button, tabId, owner, force }) => {
+      try {
+        const page = await mgr.getPage({ tabId, owner, force });
+        await page.mouse.up({ button: button ?? "left" });
+        await globalWait(env);
+        return {
+          content: [{ type: "text", text: `Mouse button "${button ?? "left"}" released.` }],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          isError: true,
+          content: [{ type: "text", text: cleanErrorMessage(error) }],
         };
       }
     },

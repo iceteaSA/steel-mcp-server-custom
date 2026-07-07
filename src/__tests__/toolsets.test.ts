@@ -217,7 +217,7 @@ describe("ALL_TOOLSETS", () => {
 // ---------------------------------------------------------------------------
 
 describe("tools/list wire-level completeness", () => {
-  it("all 37 tools have title, description, annotations; 10 have outputSchema", async () => {
+  it("all 41 tools have title, description, annotations; 10 have outputSchema", async () => {
     const server = new McpServer(
       { name: "test", version: "0.0.0" },
       { capabilities: { tools: {} } },
@@ -239,8 +239,8 @@ describe("tools/list wire-level completeness", () => {
     registerProfiles(register, stubMgr, stubEnv);
     registerIntercept(register, stubMgr, stubEnv);
 
-    // 37 tools total (without act/extract_ai since ACT_LLM env not set)
-    expect(toolCount()).toBe(37);
+    // 41 tools total (without act/extract_ai since ACT_LLM env not set)
+    expect(toolCount()).toBe(41);
 
     // Create client-server pair
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -253,7 +253,7 @@ describe("tools/list wire-level completeness", () => {
     const tools = result.tools;
 
     // Exact tool count on the wire
-    expect(tools.length).toBe(37);
+    expect(tools.length).toBe(41);
 
     for (const tool of tools) {
       const name = tool.name;

@@ -65,6 +65,12 @@ CONTEXT BUDGET — returns a plain-text transcript; each step is one line.`,
         .max(5)
         .default(1)
         .describe("Maximum number of LLM-chosen actions to execute. Default: 1."),
+      useVision: z
+        .boolean()
+        .optional()
+        .describe(
+          "When true, each step sends the current page as a screenshot image along with the accessibility snapshot. Enables the LLM to ground decisions on visual layout. Falls back to text-only if the configured model lacks vision support.",
+        ),
       ...tabTarget,
     },
     annotations: {
@@ -138,6 +144,7 @@ export async function runAct(
     tabId?: number;
     owner?: string;
     force?: boolean;
+    useVision?: boolean;
   },
   mgr: BrowserManager,
   env: Env,
@@ -151,7 +158,7 @@ export async function runAct(
   const execPressKey = deps.execPressKey ?? defaultExecPressKey;
   const execScroll = deps.execScroll ?? defaultExecScroll;
 
-  const { instruction, maxSteps, tabId, owner, force } = args;
+  const { instruction, maxSteps, tabId, owner, force, useVision } = args;
   const page = await mgr.getPage({ tabId, owner, force });
   const resolvedTabId = mgr.resolveTab({ tabId, owner, force });
   const startedAt = Date.now();
@@ -184,12 +191,44 @@ export async function runAct(
       const snapshot = await captureSnapshot(page, resolvedTabId, { maxChars: 8000 });
       const userPrompt = `${instruction}\n\nCurrent page:\n${snapshot.text}`;
 
-      const decision = await llmJson(env, {
-        system: systemPrompt,
-        user: userPrompt,
-        schema: ACT_ACTION_SCHEMA,
-        timeoutMs: remainingMs(),
-      });
+      // Vision grounding: when useVision, capture a modest screenshot and
+      // pass it as a multimodal image part so the model can ground decisions
+      // on visual layout. Falls back to text-only when the endpoint rejects
+      // image content (non-vision model).
+      let imageDataUri: string | undefined;
+      if (useVision) {
+        try {
+          const buf = await page.screenshot({ type: "jpeg", quality: 55 });
+          imageDataUri = `data:image/jpeg;base64,${buf.toString("base64")}`;
+        } catch {
+          // Screenshot capture failed — proceed text-only (no vision).
+        }
+      }
+
+      let decision: z.infer<typeof ACT_ACTION_SCHEMA>;
+      try {
+        decision = await llmJson(env, {
+          system: systemPrompt,
+          user: userPrompt,
+          schema: ACT_ACTION_SCHEMA,
+          timeoutMs: remainingMs(),
+          ...(imageDataUri ? { imageDataUri } : {}),
+        });
+      } catch (err) {
+        // If vision mode failed (non-vision model or endpoint error),
+        // retry once text-only.
+        if (imageDataUri) {
+          decision = await llmJson(env, {
+            system: systemPrompt,
+            user: userPrompt,
+            schema: ACT_ACTION_SCHEMA,
+            timeoutMs: remainingMs(),
+          });
+          steps.push("[vision unavailable, text-only]");
+        } else {
+          throw err;
+        }
+      }
 
       if (decision.action === "done" || decision.action === "stuck") {
         steps.push(
