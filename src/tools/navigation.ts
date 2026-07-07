@@ -218,11 +218,13 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         }
 
         // Update snapshot baseline (silent when readPage already reports content).
-        const navFeedback = await actionFeedback(page, mgr.resolveTab({ tabId, owner, force }), {
+        const resolved = mgr.resolveTab({ tabId, owner, force });
+        const navFeedback = await actionFeedback(page, resolved, {
           navigated: true,
           silent: readPage,
         });
 
+        const dialogText = mgr.dialogNotice(resolved);
         const warningPrefix = priorWarning ? `[WARNING: ${priorWarning}]\n` : "";
         return {
           content: [
@@ -235,7 +237,8 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
                 waitMsg +
                 mediaNote +
                 pageText +
-                (navFeedback ? `\n${navFeedback}` : ""),
+                (navFeedback ? `\n${navFeedback}` : "") +
+                dialogText,
             },
           ],
         };
@@ -284,10 +287,12 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         // Snapshot feedback — compute navigated from actual URL comparison.
         // Reload is always a navigation even if the URL stays the same
         // (content may have changed), and no-ops report navigated:false.
-        const histFeedback = await actionFeedback(page, mgr.resolveTab({ tabId, owner, force }), {
+        const resolved = mgr.resolveTab({ tabId, owner, force });
+        const histFeedback = await actionFeedback(page, resolved, {
           navigated: afterUrl !== beforeUrl || action === "reload",
         });
         const feedbackText = histFeedback ? `\n${histFeedback}` : "";
+        const dialogText = mgr.dialogNotice(resolved);
 
         const verb =
           action === "back" ? "Went back" : action === "forward" ? "Went forward" : "Reloaded";
@@ -304,7 +309,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
           content: [
             {
               type: "text",
-              text: `${verb}${suffix}.\nCurrent URL: ${afterUrl}${titlePart}${feedbackText}`,
+              text: `${verb}${suffix}.\nCurrent URL: ${afterUrl}${titlePart}${feedbackText}${dialogText}`,
             },
           ],
         };

@@ -165,6 +165,9 @@ describe("non-browser tools", () => {
       "create_profile",
       "fetch_urls",
       "extract",
+      "handle_dialog",
+      "upload_file",
+      "press_key",
     ];
     for (const name of expected) {
       expect(names).toContain(name);
@@ -244,7 +247,7 @@ describe("non-browser tools", () => {
     expect(client.getText(r)).toContain("Pass selector OR ref, not both");
   });
 
-  // D2: handle_dialog in view mode works without a browser
+  // handle_dialog in view mode works without a browser
   it("handle_dialog (view) returns 'No dialog' when no dialogs exist", async () => {
     const r = await client.tool(111, "handle_dialog");
     const text = client.getText(r);
@@ -258,13 +261,13 @@ describe("non-browser tools", () => {
     }
   });
 
-  // D2: schema validation — upload_file rejects empty files array
+  // Schema validation — upload_file rejects empty files array
   it("upload_file with missing files array returns isError", async () => {
     const r = await client.tool(112, "upload_file", { selector: "#file" });
     expect(client.isError(r)).toBe(true);
   });
 
-  // D2: upload_file with non-existent file path returns isError before touching browser
+  // upload_file with non-existent file path returns isError before touching browser
   it("upload_file with non-existent file returns isError", async () => {
     const r = await client.tool(113, "upload_file", {
       selector: "#file",
@@ -274,7 +277,7 @@ describe("non-browser tools", () => {
     expect(client.getText(r)).toContain("not found");
   });
 
-  // D2: upload_file with both selector+ref returns isError
+  // upload_file with both selector+ref returns isError
   it("upload_file with both selector and ref returns isError", async () => {
     const r = await client.tool(114, "upload_file", {
       selector: "#file",
@@ -403,7 +406,7 @@ describe("browser tools", () => {
     expect(text).toBeTruthy();
   });
 
-  // D2: upload_file with a real tmp file (happy path to exercise stat check)
+  // upload_file with a real tmp file (exercises stat validation + upload path)
   (steelAvailable ? it : it.skip)(
     "upload_file with a real file returns success when file exists",
     async () => {
@@ -431,7 +434,7 @@ describe("browser tools", () => {
     20000,
   );
 
-  // D2: press_key with unknown key returns isError
+  // press_key with unknown key returns isError
   (steelAvailable ? it : it.skip)(
     "press_key with unknown key returns isError with examples",
     async () => {

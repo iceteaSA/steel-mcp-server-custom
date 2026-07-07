@@ -111,6 +111,10 @@ export class BrowserManager {
   private profiles: Map<string, { context: BrowserContext; tabIds: Set<number> }> = new Map();
   private tabToProfile: Map<number, string> = new Map(); // tabId → profileName
 
+  // Tracks pages that have been through allocateTab so we can detect
+  // externally-created popup windows (S2 — context "page" event).
+  private allocatedPages = new WeakSet<Page>();
+
   // Dialog management — per-tab pending/last dialog state.
   // Playwright dialogs block page operations (clicks, fills, navigations) until
   // handled — they must be surfaced to the agent for explicit accept/dismiss.
@@ -231,53 +235,67 @@ export class BrowserManager {
     if (owner) this.tabOwners.set(id, owner);
     this.tabLastActivity.set(id, Date.now());
     this.attachConsoleListener(page);
-    // Auto-cleanup tab bookkeeping if the page closes externally.
+    this.allocatedPages.add(page);
     // Dialog capture: Playwright dialogs block all page operations until
     // handled. Capture them here so the agent can accept/dismiss via the
     // handle_dialog tool. beforeunload is auto-accepted to avoid blocking
     // navigation; others are stored as pending for manual handling.
+    // The entire handler is wrapped in try/catch — if it rejects, the
+    // dialog is never resolved and the tab is permanently wedged.
     page.on("dialog", async (dialog) => {
-      const type = dialog.type();
-      const message = dialog.message();
-      const defaultValue = dialog.defaultValue();
+      try {
+        const type = dialog.type();
+        const message = dialog.message();
+        const defaultValue = dialog.defaultValue();
 
-      if (type === "beforeunload") {
-        // beforeunload: auto-accept — blocking navigation is never useful for an agent.
-        await dialog.accept();
-        this.lastDialogs.set(id, {
+        if (type === "beforeunload") {
+          // beforeunload: auto-accept — blocking navigation is never useful for an agent.
+          await dialog.accept();
+          this.lastDialogs.set(id, {
+            type,
+            message,
+            action: "accepted",
+            autoDismissed: true,
+            at: Date.now(),
+          });
+          return;
+        }
+
+        const timer = setTimeout(async () => {
+          this.pendingDialogs.delete(id);
+          try {
+            await dialog.dismiss();
+          } catch {
+            // dialog may have already been handled externally
+          }
+          this.lastDialogs.set(id, {
+            type,
+            message,
+            action: "dismissed",
+            autoDismissed: true,
+            at: Date.now(),
+          });
+        }, this.dialogAutoDismissMs);
+
+        this.pendingDialogs.set(id, {
+          dialog,
           type,
           message,
-          action: "accepted",
-          autoDismissed: true,
+          defaultValue,
           at: Date.now(),
+          timer,
         });
-        return;
-      }
-
-      const timer = setTimeout(async () => {
-        this.pendingDialogs.delete(id);
+      } catch (err) {
+        // Internal failure in the listener — dismiss best-effort so the
+        // dialog does not wedge the tab permanently. Log the error so
+        // operators can diagnose listener bugs.
+        console.error(`[steel-mcp] dialog handler error for tab ${id}:`, (err as Error).message);
         try {
           await dialog.dismiss();
         } catch {
-          // dialog may have already been handled externally
+          // nothing more we can do
         }
-        this.lastDialogs.set(id, {
-          type,
-          message,
-          action: "dismissed",
-          autoDismissed: true,
-          at: Date.now(),
-        });
-      }, this.dialogAutoDismissMs);
-
-      this.pendingDialogs.set(id, {
-        dialog,
-        type,
-        message,
-        defaultValue,
-        at: Date.now(),
-        timer,
-      });
+      }
     });
 
     page.on("close", () => {
@@ -496,6 +514,19 @@ export class BrowserManager {
     }
 
     this.initialized = true;
+
+    // Register popup/new-page detection after both paths have set up
+    // browserContext. Pages created by the site (target=_blank, window.open)
+    // bypass allocateTab — this listener catches them and wires them into the
+    // tab registry with full dialog/console capture.
+    // Guarded by allocatedPages so pages already through allocateTab
+    // (_openFreshPage, newTab, initialPage) are not double-registered.
+    this.browserContext!.on("page", (popup) => {
+      if (!this.allocatedPages.has(popup)) {
+        this.allocateTab(popup);
+      }
+    });
+
     this.startIdleSweeper();
 
     // Health check: prove the context is actually usable before returning.

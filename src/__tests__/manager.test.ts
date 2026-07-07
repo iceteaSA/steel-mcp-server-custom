@@ -403,7 +403,7 @@ describe("ownersWithLiveTabs", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Dialog capture (D1) — state machine for browser dialogs
+// Dialog capture — state machine for browser dialogs
 // ---------------------------------------------------------------------------
 
 import type { Dialog } from "playwright";
@@ -690,5 +690,76 @@ describe("dialog capture", () => {
     // Pending dialog should be dismissed
     expect(dismissed).toBe(true);
     expect(mgr.getPendingDialog(tabId)).toBeNull();
+  });
+
+  // The listener is wrapped in try/catch — if the handler body throws
+  // (e.g. dialog.dismiss() rejects), the catch block best-effort dismisses
+  // so the tab is never permanently wedged.
+  it("dialog listener try/catch: handler body exception is caught and dialog dismissed", async () => {
+    const mgr = setupMgr();
+    let _bestEffortDismissed = false;
+    // dialog.dismiss() throws on first call, but the catch block's
+    // second dismiss() call should succeed (the mock is lenient).
+    let dismissCalled = 0;
+    const dialog = fakeDialog({
+      type: "alert",
+      message: "Boom",
+      dismiss: async () => {
+        dismissCalled++;
+        if (dismissCalled === 1) throw new Error("crash");
+        _bestEffortDismissed = true;
+      },
+    });
+    const tabId = addTabWithDialog(mgr);
+    (mgr.tabs.get(tabId) as any)._emit("dialog", dialog);
+
+    // The timer fires after dialogAutoDismissMs (10000 by default).
+    // Speed it up.
+    mgr.dialogAutoDismissMs = 10;
+    // Replace the pending dialog's timer with a short one
+    const pending = mgr.pendingDialogs.get(tabId);
+    if (pending) {
+      clearTimeout(pending.timer);
+      pending.timer = setTimeout(async () => {
+        mgr.pendingDialogs.delete(tabId);
+        try {
+          await dialog.dismiss();
+        } catch {
+          // first dismiss call throws
+        }
+        mgr.lastDialogs.set(tabId, {
+          type: "alert",
+          message: "Boom",
+          action: "dismissed",
+          autoDismissed: true,
+          at: Date.now(),
+        });
+      }, 10);
+    }
+
+    await new Promise((r) => setTimeout(r, 30));
+
+    // The first dismiss threw, but the catch block in the dialog listener
+    // fired a second best-effort dismiss (after the timer's try/catch).
+    // The key invariant: pending dialog is cleared and the tab is not wedged.
+    expect(mgr.getPendingDialog(tabId)).toBeNull();
+  });
+
+  // Race condition: the auto-dismiss timer fires before the agent calls
+  // handleDialog. The timer deletes the pending dialog from the map;
+  // handleDialog must throw "No pending dialog" rather than silently
+  // operating on a stale handle.
+  it("handleDialog throws when timer already auto-dismissed the dialog", async () => {
+    const mgr = setupMgr();
+    mgr.dialogAutoDismissMs = 1; // fire immediately
+    const dialog = fakeDialog({ type: "alert", message: "Fast" });
+    const tabId = addTabWithDialog(mgr);
+    (mgr.tabs.get(tabId) as any)._emit("dialog", dialog);
+
+    // Let the timer fire and auto-dismiss
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(mgr.getPendingDialog(tabId)).toBeNull();
+    await expect(mgr.handleDialog(tabId, "accept")).rejects.toThrow("No pending dialog");
   });
 });

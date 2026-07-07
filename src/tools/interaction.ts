@@ -822,14 +822,42 @@ Errors: missing file paths, selector timeout, element not found.`,
       try {
         sel = toSelector({ selector, ref });
 
-        // Validate every file exists on disk before touching the page.
+        // Reject non-absolute paths — relative paths are ambiguous on the
+        // MCP server host and the spec requires absolute host paths.
+        const nonAbsolute = (files as string[]).filter((f) => !f.startsWith("/"));
+        if (nonAbsolute.length > 0) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `File paths must be absolute (start with /). Rejected: ${nonAbsolute.join(", ")}`,
+              },
+            ],
+          };
+        }
+
+        // Validate every file exists and is a regular file (not a directory).
         const missing: string[] = [];
-        for (const f of files) {
+        const dirs: string[] = [];
+        for (const f of files as string[]) {
           try {
-            await fs.stat(f);
+            const st = await fs.stat(f);
+            if (!st.isFile()) dirs.push(f);
           } catch {
             missing.push(f);
           }
+        }
+        if (dirs.length > 0) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `Paths are directories (not files): ${dirs.join(", ")}`,
+              },
+            ],
+          };
         }
         if (missing.length > 0) {
           return {
@@ -846,11 +874,31 @@ Errors: missing file paths, selector timeout, element not found.`,
         const page = await mgr.getPage({ tabId, owner, force });
 
         if (viaChooser) {
-          const [chooser] = await Promise.all([
-            page.waitForEvent("filechooser", { timeout: 10000 }),
-            page.locator(sel).click(),
-          ]);
-          await chooser.setFiles(files);
+          try {
+            const [chooser] = await Promise.all([
+              page.waitForEvent("filechooser", { timeout: 10000 }),
+              page.locator(sel).click(),
+            ]);
+            await chooser.setFiles(files);
+          } catch (err) {
+            const raw = (err as Error).message;
+            // filechooser timeout: the click likely succeeded but no
+            // file picker appeared (wrong target, browser config, etc.).
+            // Separate this from a click failure so the agent knows what happened.
+            if (/filechooser.*timeout/i.test(raw)) {
+              const currentUrl = page.url().substring(0, 200);
+              return {
+                isError: true,
+                content: [
+                  {
+                    type: "text",
+                    text: `Clicked ${sel} but no file chooser appeared within 10s. The click may have fired — verify the target opens a native file picker.\nCurrent URL: ${currentUrl}`,
+                  },
+                ],
+              };
+            }
+            throw err;
+          }
         } else {
           await page.locator(sel).setInputFiles(files, { timeout: 10000 });
         }
