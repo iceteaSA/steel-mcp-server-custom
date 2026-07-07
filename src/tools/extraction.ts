@@ -16,7 +16,7 @@ import {
   type Link,
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
-import { tabTarget, tabTargetForce } from "./shared.js";
+import { tabTarget, tabTargetForce, toSelector, decorateRefError } from "./shared.js";
 import { captureSnapshot, storeSnapshot } from "../snapshot.js";
 
 // Singleton — configured once, reused across calls.
@@ -593,14 +593,19 @@ CONTEXT BUDGET — output capped at limit (default 50).`,
   register({
     name: "get_attrs",
     title: "Get Attributes",
-    description: `Extract specific attributes from elements matching a CSS selector. Special attrs: "text" = innerText, "html" = outerHTML. Use for data-*, aria-*, src, alt, href, or structured data extraction — returns a JSON array of objects. Do NOT use for simple link lists — get_links is faster and deduplicates.
+    description: `Extract specific attributes from elements matching a CSS selector or snapshot ref. Special attrs: "text" = innerText, "html" = outerHTML. Use for data-*, aria-*, src, alt, href, or structured data extraction — returns a JSON array of objects. Pass a ref from snapshot instead of a selector to target elements directly. Do NOT use for simple link lists — get_links is faster and deduplicates.
 
 CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPerAttr to bound long values.`,
     toolset: "extract",
     inputSchema: {
       selector: z
         .string()
+        .optional()
         .describe("CSS selector for elements to extract from (e.g. 'article', '.product-card')."),
+      ref: z
+        .string()
+        .optional()
+        .describe("Accessibility ref from snapshot (e.g. 'e5'). Use instead of selector."),
       attrs: z
         .array(z.string())
         .describe(
@@ -629,7 +634,8 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, attrs, limit = 50, maxCharsPerAttr = 2000, tabId, owner }) => {
+    handler: async ({ selector, ref, attrs, limit = 50, maxCharsPerAttr = 2000, tabId, owner }) => {
+      const sel = toSelector({ selector, ref });
       try {
         const page = await mgr.getPage({ tabId, owner });
         const results = await page.evaluate(
@@ -668,14 +674,14 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
               return out;
             });
           },
-          { sel: selector, attrNames: attrs, maxChars: maxCharsPerAttr },
+          { sel, attrNames: attrs, maxChars: maxCharsPerAttr },
         );
 
         const capped = limit > 0 ? results.slice(0, limit) : results;
         const truncated = capped.length < results.length;
         const body =
           capped.length === 0
-            ? `[]\n(selector "${selector}" matched no elements)`
+            ? `[]\n(selector "${sel}" matched no elements)`
             : "[\n" + capped.map((r) => JSON.stringify(r)).join(",\n") + "\n]";
         return {
           content: [
@@ -692,7 +698,10 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
         };
       } catch (err) {
         const error = err as Error;
-        return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
+        return {
+          isError: true,
+          content: [{ type: "text", text: decorateRefError(error, sel) }],
+        };
       }
     },
   });
@@ -826,14 +835,19 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
   register({
     name: "extract",
     title: "Declarative Extract",
-    description: `Declarative structured extraction from repeating elements. Pass a CSS selector and a field map (field name → sub-selector or sub-selector@attribute) to produce a JSON array of records. Use "." as the field spec to extract the root element's own text. Replaces fragile evaluate() for scraping lists, tables, or repeating DOM structures — do NOT use for single-element extraction (use get_attrs or get_page_text).
+    description: `Declarative structured extraction from repeating elements. Pass a CSS selector (or snapshot ref) and a field map (field name → sub-selector or sub-selector@attribute) to produce a JSON array of records. Use "." as the field spec to extract the root element's own text. When using a ref from snapshot, nested field-map selectors remain CSS-relative (scoped to the ref's subtree). Replaces fragile evaluate() for scraping lists, tables, or repeating DOM structures — do NOT use for single-element extraction (use get_attrs or get_page_text).
 
 CONTEXT BUDGET — output capped at limit (default 20 items).`,
     toolset: "extract",
     inputSchema: {
       selector: z
         .string()
+        .optional()
         .describe("CSS selector for the repeating elements (e.g. '.product-card', 'tr.result')."),
+      ref: z
+        .string()
+        .optional()
+        .describe("Accessibility ref from snapshot (e.g. 'e5'). Use instead of selector."),
       fields: z
         .record(z.string(), z.string())
         .describe(
@@ -860,12 +874,13 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, fields, limit = 20, tabId, owner }) => {
+    handler: async ({ selector, ref, fields, limit = 20, tabId, owner }) => {
+      const sel = toSelector({ selector, ref });
       try {
         const page = await mgr.getPage({ tabId, owner });
 
         const evalArg = {
-          sel: selector,
+          sel,
           fieldMap: fields as Record<string, string>,
           maxItems: limit,
         };
@@ -901,7 +916,7 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
 
         if (results.length === 0) {
           return {
-            content: [{ type: "text", text: `[]\n(selector "${selector}" matched no elements)` }],
+            content: [{ type: "text", text: `[]\n(selector "${sel}" matched no elements)` }],
             structuredContent: { results: [] },
           };
         }
@@ -914,7 +929,7 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
       } catch (err) {
         return {
           isError: true,
-          content: [{ type: "text", text: cleanErrorMessage(err as Error) }],
+          content: [{ type: "text", text: decorateRefError(err as Error, sel) }],
         };
       }
     },

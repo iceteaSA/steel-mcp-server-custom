@@ -140,6 +140,58 @@ export const tabTargetForce = {
 // Unknown names throw with the list of valid names.
 // -----------------------------------------------------------------------------
 
+// -----------------------------------------------------------------------------
+// toSelector — resolve {selector, ref} to a CSS selector string.
+//
+// Exactly one of selector or ref must be provided.  ref format: e<digits>
+// (e.g. "e5").  Returns aria-ref=${ref} or the raw selector unchanged.
+// -----------------------------------------------------------------------------
+
+export function toSelector(args: { selector?: string; ref?: string }): string {
+  const hasSelector = args.selector !== undefined && args.selector !== "";
+  const hasRef = args.ref !== undefined && args.ref !== "";
+
+  if (!hasSelector && !hasRef) {
+    throw new Error("Pass selector or ref (from snapshot).");
+  }
+  if (hasSelector && hasRef) {
+    throw new Error("Pass selector OR ref, not both.");
+  }
+
+  if (hasRef) {
+    const ref = args.ref!;
+    if (!/^e\d+$/.test(ref)) {
+      throw new Error(`Invalid ref "${ref}" — expected format e<digits> (e.g. "e5").`);
+    }
+    return `aria-ref=${ref}`;
+  }
+
+  return args.selector!;
+}
+
+// -----------------------------------------------------------------------------
+// decorateRefError — append a "stale ref" hint when an aria-ref query fails.
+// -----------------------------------------------------------------------------
+
+const ARIA_REF_PREFIX = "aria-ref=";
+
+export function decorateRefError(err: unknown, usedSelector: string): string {
+  const raw = err instanceof Error ? err.message : String(err ?? "");
+  const isRefQuery = raw.includes(ARIA_REF_PREFIX) || usedSelector.startsWith(ARIA_REF_PREFIX);
+  const isTimeoutOrNotFound = /timeout|not found|not exist|not visible|not attached|waiting/i.test(
+    raw,
+  );
+
+  if (isRefQuery && isTimeoutOrNotFound) {
+    return raw + " Ref may be stale — take a fresh snapshot.";
+  }
+  return raw;
+}
+
+// -----------------------------------------------------------------------------
+// resolveToolsets — CLI + env → validated Set<Toolset>
+// -----------------------------------------------------------------------------
+
 export function resolveToolsets(
   cliArg: string | undefined,
   envVal: string | undefined,

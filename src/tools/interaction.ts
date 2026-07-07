@@ -10,21 +10,26 @@ import {
   interpretCheckboxValue,
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
-import { tabTarget, tabTargetForce } from "./shared.js";
+import { tabTarget, tabTargetForce, toSelector, decorateRefError } from "./shared.js";
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // click ---------------------------------------------------------------------
   register({
     name: "click",
     title: "Click Element",
-    description: `Click a page element identified by CSS selector. Reports navigation if the URL changes. Optionally wait for a selector or text to appear after clicking (saves a separate wait_for call). Use for buttons, links, and interactive elements — do NOT use for form inputs (use fill instead).`,
+    description: `Click a page element identified by CSS selector or snapshot ref. Reports navigation if the URL changes. Optionally wait for a selector or text to appear after clicking (saves a separate wait_for call). Use for buttons, links, and interactive elements — do NOT use for form inputs (use fill instead). Refs come from the snapshot tool; refresh after navigation or page mutation.`,
     toolset: "core",
     inputSchema: {
       selector: z
         .string()
+        .optional()
         .describe(
           "CSS selector of the element to click (e.g. 'button[type=submit]', '#login', 'a.nav-link').",
         ),
+      ref: z
+        .string()
+        .optional()
+        .describe("Accessibility ref from snapshot (e.g. 'e5'). Use instead of selector."),
       waitFor: z
         .string()
         .optional()
@@ -61,6 +66,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
     },
     handler: async ({
       selector,
+      ref,
       waitFor,
       waitForText,
       waitTimeout = 10000,
@@ -69,10 +75,11 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
       owner,
       force,
     }) => {
+      const sel = toSelector({ selector, ref });
       try {
         const page = await mgr.getPage({ tabId, owner, force });
         const beforeUrl = page.url();
-        await page.click(selector, { timeout });
+        await page.click(sel, { timeout });
         await globalWait(env);
 
         let waitMsg = "";
@@ -100,10 +107,13 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         const afterUrl = page.url();
         const navigated = afterUrl !== beforeUrl;
         const navMsg = navigated ? `\nNavigated to: ${afterUrl}` : "";
-        return { content: [{ type: "text", text: `Clicked: ${selector}${navMsg}${waitMsg}` }] };
+        return { content: [{ type: "text", text: `Clicked: ${sel}${navMsg}${waitMsg}` }] };
       } catch (err) {
         const error = err as Error;
-        return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
+        return {
+          isError: true,
+          content: [{ type: "text", text: decorateRefError(error, sel) }],
+        };
       }
     },
   });
@@ -112,7 +122,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "fill",
     title: "Fill Form",
-    description: `Fill one or more form fields on the page. Auto-detects field types (text, select, checkbox, radio). Pass submitSelector to click a submit button after filling. Use for any form interaction (login, search, registration, checkout) — do NOT use click on form elements; fill handles all input types correctly.`,
+    description: `Fill one or more form fields on the page. Auto-detects field types (text, select, checkbox, radio). Pass submitSelector to click a submit button after filling. Each field accepts selector or snapshot ref. Use for any form interaction (login, search, registration, checkout) — do NOT use click on form elements; fill handles all input types correctly.`,
     toolset: "core",
     inputSchema: {
       fields: z
@@ -120,9 +130,14 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           z.object({
             selector: z
               .string()
+              .optional()
               .describe(
                 "CSS selector. For radios: match the group (e.g. 'input[name=size]') — value param picks which option.",
               ),
+            ref: z
+              .string()
+              .optional()
+              .describe("Accessibility ref from snapshot (e.g. 'e5'). Use instead of selector."),
             value: z
               .string()
               .describe(
@@ -177,14 +192,17 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
       owner,
       force,
     }) => {
-      // Batched kind-detection: one evaluate call checks existence for ALL
-      // fields and auto-detects kinds for fields lacking an explicit `kind`.
-      // This avoids N per-field round-trips, eliminates TOCTOU, and means
-      // explicit-kind missing selectors are also caught before any mutation.
-
+      // Resolve refs to selectors before the main logic.
+      // Mutates f.selector in-place so the rest of the handler sees
+      // resolved selectors without further changes.
       type FieldKind = "text" | "check" | "radio" | "select";
 
       try {
+        // Resolve per-field selector/ref pairs.
+        for (const f of fields as any[]) {
+          f.selector = toSelector({ selector: f.selector, ref: f.ref });
+        }
+
         const page = await mgr.getPage({ tabId, owner, force });
 
         // One batch existence check for every selector (explicit + implicit).
@@ -209,12 +227,14 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           .filter((f: { selector: string }) => infoMap[f.selector] === null)
           .map((f: { selector: string }) => f.selector);
         if (missing.length > 0 && !skipMissing) {
+          const hasAriaRef = missing.some((s: string) => s.startsWith("aria-ref="));
+          const hint = hasAriaRef ? " Ref may be stale — take a fresh snapshot." : "";
           return {
             isError: true,
             content: [
               {
                 type: "text",
-                text: `Selector(s) not found: ${missing.join(", ")}. Use skipMissing=true to ignore missing fields.`,
+                text: `Selector(s) not found: ${missing.join(", ")}.${hint} Use skipMissing=true to ignore missing fields.`,
               },
             ],
           };
@@ -277,7 +297,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
               content: [
                 {
                   type: "text",
-                  text: `Failed on field "${f.selector}": ${(err as Error).message}\nFilled before failure: ${filled.map((x) => x.selector).join(", ") || "(none)"}`,
+                  text: `Failed on field "${f.selector}": ${decorateRefError(err, f.selector)}\nFilled before failure: ${filled.map((x) => x.selector).join(", ") || "(none)"}`,
                 },
               ],
             };
@@ -311,7 +331,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "scroll",
     title: "Scroll Page",
-    description: `Scroll the page up or down by a pixel amount. Optionally extract visible text after scrolling with readAfterScroll (saves a follow-up get_page_text call). Use to reveal lazy-loaded content or read long pages in segments. Do NOT use as a substitute for navigation — use go_to_url to load a new page.
+    description: `Scroll the page (or a specific scrollable element) up or down by a pixel amount. Optionally extract visible text after scrolling with readAfterScroll (saves a follow-up get_page_text call). Pass selector or snapshot ref to target a scrollable container instead of the window. Use to reveal lazy-loaded content or read long pages in segments. Do NOT use as a substitute for navigation — use go_to_url to load a new page.
 
 CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars (default 3K).`,
     toolset: "core",
@@ -322,6 +342,14 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         .default(500)
         .optional()
         .describe("Number of pixels to scroll. Default: 500."),
+      selector: z
+        .string()
+        .optional()
+        .describe("CSS selector of a scrollable element. Omit to scroll the window."),
+      ref: z
+        .string()
+        .optional()
+        .describe("Accessibility ref from snapshot (e.g. 'e5'). Use instead of selector."),
       readAfterScroll: z
         .boolean()
         .default(false)
@@ -345,17 +373,40 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
     handler: async ({
       direction,
       pixels = 500,
+      selector,
+      ref,
       readAfterScroll = false,
       maxChars = 3000,
       tabId,
       owner,
       force,
     }) => {
+      const sel = selector || ref ? toSelector({ selector, ref }) : null;
       try {
         const page = await mgr.getPage({ tabId, owner, force });
         const dy = direction === "up" ? -pixels : pixels;
         const result = await page.evaluate(
-          ({ yDelta }: { yDelta: number }) => {
+          ({ yDelta, scrollSelector }: { yDelta: number; scrollSelector: string | null }) => {
+            if (scrollSelector) {
+              const el = document.querySelector(scrollSelector);
+              if (!el)
+                return {
+                  before: 0,
+                  after: 0,
+                  pageHeight: 0,
+                  viewportHeight: 0,
+                  elementMissing: true,
+                };
+              const before = el.scrollTop;
+              el.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
+              const after = el.scrollTop;
+              return {
+                before,
+                after,
+                pageHeight: el.scrollHeight,
+                viewportHeight: el.clientHeight,
+              };
+            }
             const before = window.scrollY;
             window.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
             const after = window.scrollY;
@@ -366,8 +417,17 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
             const viewportHeight = window.innerHeight;
             return { before, after, pageHeight, viewportHeight };
           },
-          { yDelta: dy },
+          { yDelta: dy, scrollSelector: sel },
         );
+
+        // If the targeted element wasn't found, report it.
+        if ((result as any).elementMissing) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: `Scroll target "${sel}" not found.` }],
+          };
+        }
+
         await globalWait(env);
         const actual = Math.abs(result.after - result.before);
         const noOp = actual === 0;
@@ -380,7 +440,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
           result.pageHeight > 0
             ? Math.round(((result.after + result.viewportHeight) / result.pageHeight) * 100)
             : 0;
-        const posInfo = `\nPosition: ${Math.round(result.after)}px / ${result.pageHeight}px (${Math.min(pct, 100)}% through page)`;
+        const posInfo = `\nPosition: ${Math.round(result.after)}px / ${result.pageHeight}px (${Math.min(pct, 100)}% through ${sel ? "element" : "page"})`;
 
         let pageText = "";
         if (readAfterScroll) {
@@ -418,7 +478,12 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         };
       } catch (err) {
         const error = err as Error;
-        return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: sel ? decorateRefError(error, sel) : cleanErrorMessage(error) },
+          ],
+        };
       }
     },
   });
@@ -427,13 +492,17 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
   register({
     name: "wait_for",
     title: "Wait for Condition",
-    description: `Wait for a condition before proceeding: a CSS selector to appear, text to appear on the page, or text to disappear. On timeout, reports the current page URL and title for diagnosis. Use after navigation or clicks to wait for dynamic content to load. Do NOT use as a sleep substitute — the timeout is a should-not-happen guard, not a pacing mechanism.`,
+    description: `Wait for a condition before proceeding: a CSS selector (or snapshot ref) to appear, text to appear on the page, or text to disappear. On timeout, reports the current page URL and title for diagnosis. Use after navigation or clicks to wait for dynamic content to load. Do NOT use as a sleep substitute — the timeout is a should-not-happen guard, not a pacing mechanism.`,
     toolset: "core",
     inputSchema: {
       selector: z
         .string()
         .optional()
         .describe("CSS selector to wait for (e.g. '#results', '.loaded')."),
+      ref: z
+        .string()
+        .optional()
+        .describe("Accessibility ref from snapshot (e.g. 'e5'). Use instead of selector."),
       text: z.string().optional().describe("Text string to wait for anywhere on the page."),
       textGone: z
         .string()
@@ -454,17 +523,18 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, text, textGone, timeout = 10000, tabId, owner, force }) => {
+    handler: async ({ selector, ref, text, textGone, timeout = 10000, tabId, owner, force }) => {
+      const sel = selector || ref ? toSelector({ selector, ref }) : undefined;
       try {
         const page = await mgr.getPage({ tabId, owner, force });
 
-        if (!selector && !text && !textGone) {
+        if (!sel && !text && !textGone) {
           return {
             isError: true,
             content: [
               {
                 type: "text",
-                text: "At least one of 'selector', 'text', or 'textGone' must be provided.",
+                text: "At least one of 'selector' (or 'ref'), 'text', or 'textGone' must be provided.",
               },
             ],
           };
@@ -473,8 +543,8 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         const start = Date.now();
         const conditions: Promise<void>[] = [];
 
-        if (selector) {
-          conditions.push(page.waitForSelector(selector, { timeout }).then(() => undefined));
+        if (sel) {
+          conditions.push(page.waitForSelector(sel, { timeout }).then(() => undefined));
         }
         if (text) {
           conditions.push(
@@ -499,7 +569,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         const elapsed = Date.now() - start;
 
         const parts: string[] = [];
-        if (selector) parts.push(`selector "${selector}"`);
+        if (sel) parts.push(`selector "${sel}"`);
         if (text) parts.push(`text "${text}"`);
         if (textGone) parts.push(`text gone "${textGone}"`);
 
@@ -522,12 +592,13 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         } catch {
           /* */
         }
+        const msg = sel ? decorateRefError(error, sel) : cleanErrorMessage(error);
         return {
           isError: true,
           content: [
             {
               type: "text",
-              text: `wait_for timed out or failed: ${cleanErrorMessage(error)}${context}`,
+              text: `wait_for timed out or failed: ${msg}${context}`,
             },
           ],
         };
