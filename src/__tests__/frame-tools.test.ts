@@ -143,7 +143,7 @@ describe("snapshot frame isolation", () => {
   it("does NOT store the snapshot when a child frame is targeted", async () => {
     const { find } = buildRegistry();
     const snapshot = find("snapshot");
-    const result = await snapshot.handler({ frame: "child-frame" });
+    const result = await snapshot.handler({ frame: "child-frame", filter: "all" });
 
     expect(result.isError).toBeUndefined();
     expect(result.content[0].text).toContain("frame-tree");
@@ -153,7 +153,7 @@ describe("snapshot frame isolation", () => {
   it("appends a frames section when child frames exist", async () => {
     const { find } = buildRegistry();
     const snapshot = find("snapshot");
-    const result = await snapshot.handler({});
+    const result = await snapshot.handler({ filter: "all" });
 
     const text = result.content[0].text;
     expect(text).toContain("--- frames ---");

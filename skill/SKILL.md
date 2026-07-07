@@ -46,23 +46,27 @@ Need the tool list/schemas? `mcp-gateway_gateway_list_tools({ server: "steel" })
 ## Snapshot-First — The Default Read
 
 The preferred first look at any page is `snapshot`, not `get_page_text`.
-`snapshot` returns the accessibility tree with stable `[ref=eN]` tokens.
+`snapshot` returns the accessibility tree with compact `@eN` ref tokens.
 That structure is both cheaper (no layout/walk costs) and more actionable —
 refs feed `click` / `fill` / `scroll` / `wait_for` / `get_attrs` / `extract`
 / `press_key` directly. No selector guessing.
 
+The default `filter:"interactive"` shows only actionable elements (buttons,
+links, inputs) plus their structural ancestors — typically 3-5× fewer nodes
+than the full tree. Pass `filter:"all"` when you need the complete tree.
+
 ```
-# 1. Snapshot the page
+# 1. Snapshot the page (filter:"interactive" is the default)
 snapshot(tabId: 7)
 → [Tab 7] https://example.com/login
-  generic [ref=e1] "Sign in to your account"
-  textbox  "Email"    [ref=e2]
-  textbox  "Password" [ref=e3]
-  button   "Sign in"  [ref=e4]
+  generic @e1 "Sign in to your account"
+  textbox  "Email"    @e2
+  textbox  "Password" @e3
+  button   "Sign in"  @e4
 
-# 2. Click / fill by ref
-fill(fields: [{ref: "e2", value: "me@example.com"}, {ref: "e3", value: "..."}], tabId: 7)
-click(ref: "e4", tabId: 7)
+# 2. Click / fill by ref (pass @e2 or bare e2 — both are accepted)
+fill(fields: [{ref: "@e2", value: "me@example.com"}, {ref: "@e3", value: "..."}], tabId: 7)
+click(ref: "@e4", tabId: 7)
 
 # 3. Read the action feedback (snapshot-diff line in the result)
 #    "2 fields changed" / "3 elements changed" — tells you the click landed.
@@ -267,7 +271,7 @@ snapshot(tabId: 7)
 
 # 2. Snapshot into the iframe to get refs for its elements
 snapshot(frame: "payment-iframe", tabId: 7)
-→ [ref=e1] ... (refs scoped to the iframe DOM)
+→ @e1 ... (refs scoped to the iframe DOM)
 
 # 3. Act on iframe elements
 fill(ref: "e3", value: "4111...", frame: "payment-iframe", tabId: 7)
@@ -287,11 +291,11 @@ if those tools aren't registered.
 ```
 # Bounded micro-loop: 1-5 LLM-chosen actions over the current snapshot
 act(instruction: "Sign in with email me@example.com and password from credentials 'myapp'", maxSteps: 5, tabId: 7)
-→ step 1: click [ref=e4]  "Email"
-  step 2: fill [ref=e4]   "me@example.com"
-  step 3: click [ref=e7]  "Password"
-  step 4: fill [ref=e7]   "***ret"
-  step 5: click [ref=e12] "Sign in"
+→ step 1: click @e4  "Email"
+  step 2: fill @e4   "me@example.com"
+  step 3: click @e7  "Password"
+  step 4: fill @e7   "***ret"
+  step 5: click @e12 "Sign in"
   done: Dashboard heading appears.
 
 # Structured extraction with an optional JSON Schema

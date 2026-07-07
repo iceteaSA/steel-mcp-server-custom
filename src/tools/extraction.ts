@@ -27,7 +27,7 @@ import {
   toSelector,
   decorateRefError,
 } from "./shared.js";
-import { captureSnapshot, storeSnapshot } from "../snapshot.js";
+import { captureSnapshot, filterTree, storeSnapshot, truncateForDisplay } from "../snapshot.js";
 
 // Singleton — configured once, reused across calls.
 const turndown = new TurndownService({
@@ -1206,7 +1206,7 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
   register({
     name: "snapshot",
     title: "Page Snapshot",
-    description: `See the page as an accessibility tree with stable element refs ([ref=eN]). THE preferred first look at any page: ~10x cheaper than get_page_text for understanding structure, and refs feed click/fill/get_attrs/extract directly (pass ref instead of selector). Refs expire on navigation or page mutation — take a fresh snapshot after either. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main); the output appends a frames section listing child frames when present.
+    description: `See the page as an accessibility tree with stable element refs (@eN). THE preferred first look at any page: ~10x cheaper than get_page_text for understanding structure, and refs feed click/fill/get_attrs/extract directly (pass ref instead of selector). Refs expire on navigation or page mutation — take a fresh snapshot after either. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main); the output appends a frames section listing child frames when present. Default filter "interactive" shows only actionable elements (3-5x fewer nodes).
 
 CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
     toolset: "core",
@@ -1221,6 +1221,13 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         .describe(
           "Cap output (default 8000). Over-budget output is truncated at a line boundary — scope with selector instead of raising this.",
         ),
+      filter: z
+        .enum(["interactive", "all", "visible"])
+        .default("interactive")
+        .optional()
+        .describe(
+          "Element filter. interactive (default): only actionable elements + structural ancestors (3-5x fewer nodes). all: full tree. visible: drop hidden.",
+        ),
       ...tabTarget,
       ...frameTarget,
     },
@@ -1230,27 +1237,37 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, maxChars, tabId, owner, frame }) => {
+    handler: async ({ selector, maxChars, filter, tabId, owner, frame }) => {
       try {
         const resolvedTabId = mgr.resolveTab({ tabId, owner });
         const page = await mgr.getPage({ tabId, owner });
         const ctx = resolveFrame(page, frame);
-        const result = await captureSnapshot(ctx, resolvedTabId, { selector, maxChars });
+
+        // Capture the full untruncated tree — the stored baseline must be
+        // complete (filter:"all") so actionFeedback diff and future filter:"all"
+        // calls see the entire page, not a pre-filtered slice.
+        const result = await captureSnapshot(ctx, resolvedTabId, { selector, noTruncate: true });
 
         const childFrames = page.frames().slice(1);
+        let fullText = result.text;
         if (childFrames.length > 0) {
           const list = childFrames
             .map((f, i) => `[${i}] name="${f.name()}" url=${f.url()}`)
             .join("\n");
-          result.text += `\n--- frames ---\n${list}`;
+          fullText += `\n--- frames ---\n${list}`;
         }
 
         // Only store main-page snapshots; frame-scoped snapshots would corrupt
         // the per-tab baseline that actionFeedback diffs against.
         if (frame === undefined) {
-          storeSnapshot(resolvedTabId, result.text);
+          storeSnapshot(resolvedTabId, fullText);
         }
-        return { content: [{ type: "text", text: result.text }] };
+
+        // Filter THEN truncate for display only — the stored baseline stays full.
+        const filtered = filterTree(fullText, filter ?? "interactive");
+        const displayText = truncateForDisplay(filtered, maxChars ?? 8000);
+
+        return { content: [{ type: "text", text: displayText }] };
       } catch (err) {
         const error = err as Error;
         return {

@@ -206,9 +206,12 @@ export function toSelector(args: { selector?: string; ref?: string }): string {
   }
 
   if (hasRef) {
-    const ref = args.ref!;
+    // Strip leading "@" — compact snapshot format emits @eN; bare eN also accepted.
+    const ref = args.ref!.startsWith("@") ? args.ref!.slice(1) : args.ref!;
     if (!/^e\d+$/.test(ref)) {
-      throw new Error(`Invalid ref "${ref}" — expected format e<digits> (e.g. "e5").`);
+      throw new Error(
+        `Invalid ref "${args.ref}" — expected format e<digits> or @e<digits> (e.g. "e5" or "@e5").`,
+      );
     }
     return `aria-ref=${ref}`;
   }
