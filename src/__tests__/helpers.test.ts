@@ -64,6 +64,16 @@ describe("checkFingerprintConsistency", () => {
     expect(result.find((r) => r.check === "UA/platform consistency")?.pass).toBe(true);
   });
 
+  it("passes a linux-consistent fingerprint", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "Linux x86_64",
+    });
+    expect(result.find((r) => r.check === "UA/platform consistency")?.pass).toBe(true);
+  });
+
   it("flags UA Windows + platform MacIntel as mismatch", () => {
     const result = checkFingerprintConsistency({
       ...base,
@@ -77,6 +87,28 @@ describe("checkFingerprintConsistency", () => {
     expect(uaCheck.observed).toContain("Windows NT");
   });
 
+  it("passes webdriver=false", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      webdriver: false,
+    });
+    expect(result.find((r) => r.check === "webdriver hidden")?.pass).toBe(true);
+  });
+
+  it("passes webdriver=undefined", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      webdriver: undefined,
+    });
+    expect(result.find((r) => r.check === "webdriver hidden")?.pass).toBe(true);
+  });
+
   it("fails when webdriver is true", () => {
     const result = checkFingerprintConsistency({
       ...base,
@@ -86,6 +118,31 @@ describe("checkFingerprintConsistency", () => {
       webdriver: true,
     });
     expect(result.find((r) => r.check === "webdriver hidden")?.pass).toBe(false);
+  });
+
+  it("passes when userAgentData.platform matches navigator.platform", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      userAgentData: { platform: "macOS" },
+    });
+    expect(result.find((r) => r.check === "UA/platform consistency")?.pass).toBe(true);
+    expect(result.find((r) => r.check === "UA/platform consistency")?.observed).toContain(
+      "userAgentData.platform=macOS",
+    );
+  });
+
+  it("fails when userAgentData.platform mismatches navigator.platform", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      userAgentData: { platform: "Windows" },
+    });
+    expect(result.find((r) => r.check === "UA/platform consistency")?.pass).toBe(false);
   });
 
   it("fails when languages is empty", () => {

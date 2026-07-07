@@ -254,15 +254,15 @@ export interface FingerprintCheck {
 export function checkFingerprintConsistency(fp: FingerprintInput): FingerprintCheck[] {
   const results: FingerprintCheck[] = [];
 
-  // 1. webdriver — the strongest bot tell.
-  const webdriverOk = fp.webdriver === false || fp.webdriver === undefined || fp.webdriver === null;
+  // The bot tell is webdriver === true; false and undefined are both normal
+  // for real browsers, so only the true value fails.
   results.push({
     check: "webdriver hidden",
     observed: `webdriver=${String(fp.webdriver)}`,
-    pass: webdriverOk,
+    pass: fp.webdriver !== true,
   });
 
-  // 2. UA/platform consistency — rough family match.
+  // Rough family match between the UA platform token and navigator.platform.
   const uaFamily = inferUaPlatformFamily(fp.userAgent);
   const navFamily = normalizePlatformFamily(fp.platform);
   const uaDataFamily = fp.userAgentData?.platform
@@ -283,7 +283,6 @@ export function checkFingerprintConsistency(fp: FingerprintInput): FingerprintCh
     pass: familyMatch && uaDataMatch,
   });
 
-  // 3. languages
   const langs = Array.isArray(fp.languages) ? fp.languages : [];
   results.push({
     check: "languages non-empty",
@@ -291,14 +290,14 @@ export function checkFingerprintConsistency(fp: FingerprintInput): FingerprintCh
     pass: langs.length > 0,
   });
 
-  // 4. plugins — reported as a signal, not a hard fail.
+  // plugins.length is a signal (headless Chromium often reports 0), not a fail.
   results.push({
     check: "plugins count",
     observed: `plugins=${fp.pluginsCount}`,
     pass: true,
   });
 
-  // 5. timeZone — validate that the browser reports a real IANA zone.
+  // Validate that the browser reports a real IANA time zone.
   let tzValid = false;
   if (fp.timeZone) {
     try {
@@ -314,7 +313,7 @@ export function checkFingerprintConsistency(fp: FingerprintInput): FingerprintCh
     pass: tzValid,
   });
 
-  // 6. screen dimensions — signal only.
+  // Screen dimensions are reported as a signal, not a hard-fail check.
   if (fp.screen) {
     results.push({
       check: "screen dimensions",

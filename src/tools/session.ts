@@ -101,7 +101,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "smoke_test",
     title: "Smoke Test",
-    description: `Self-test: navigates to example.com and bot.sannysoft.com, checks fingerprint consistency against the real browser identity, reports headless-detection failures, and verifies CapSolver balance. Use after browser restarts or config changes to verify stealth posture. Creates and cleans up its own test tab — does not affect your active tabs.`,
+    description: `Self-test: navigates to example.com and bot.sannysoft.com, checks fingerprint consistency against the real browser identity, reports headless-detection failures, restores the WebGL spoofing check, and verifies CapSolver balance. Use after browser restarts or config changes to verify stealth posture. Creates and cleans up its own test tab — does not affect your active tabs.`,
     toolset: "debug",
     inputSchema: {},
     annotations: {
@@ -111,14 +111,17 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
       openWorldHint: true,
     },
     handler: async () => {
+      let tabId: number | undefined;
       try {
         // Background tab so the test never moves the caller's active pointer.
-        const { tabId, page } = await mgr.newTab(
+        const { tabId: tid, page } = await mgr.newTab(
           "https://example.com",
           "smoke:test",
           undefined,
           false,
         );
+        tabId = tid;
+
         const results: Array<{ check: string; pass: boolean; detail: string }> = [];
         const identity: {
           userAgent?: string;
@@ -128,7 +131,11 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           screen?: { width: number; height: number };
         } = {};
 
-        // 1. Connectivity
+        type ProbeResult =
+          | { ok: true; failures: string[] }
+          | { ok: false; reason: string; failures: [] };
+        let probe: ProbeResult = { ok: false, reason: "probe not started", failures: [] };
+
         try {
           const title = await page.title();
           results.push({
@@ -140,7 +147,6 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           results.push({ check: "Navigation", pass: false, detail: (e as Error).message });
         }
 
-        // 2. Fingerprint consistency — collect real browser identity.
         try {
           const raw = await page.evaluate(() => {
             const uaData = (
@@ -188,45 +194,74 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           });
         }
 
-        // 3. Headless-detection probe on bot.sannysoft.com
-        let sannysoftFailures: string[] = [];
+        try {
+          const renderer = await page.evaluate(() => {
+            const c = document.createElement("canvas");
+            const gl = c.getContext("webgl");
+            if (!gl) return "none";
+            const ext = gl.getExtension("WEBGL_debug_renderer_info");
+            return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "no ext";
+          });
+          const webglOk =
+            renderer !== "none" &&
+            typeof renderer === "string" &&
+            !renderer.includes("SwiftShader");
+          results.push({
+            check: "WebGL spoofed",
+            pass: webglOk,
+            detail: String(renderer).slice(0, 60),
+          });
+        } catch (e) {
+          results.push({ check: "WebGL spoofed", pass: false, detail: (e as Error).message });
+        }
+
         try {
           await page.goto("https://bot.sannysoft.com", {
             waitUntil: "domcontentloaded",
             timeout: 20000,
           });
-          // Wait for the test table to populate (passed/warn/failed cells).
-          await page
+          const cellsReady = await page
             .waitForFunction(
               () => document.querySelectorAll("td.failed, td.passed, td.warn").length >= 3,
               { timeout: 15000 },
             )
-            .catch(() => {});
-          // Give dynamic tests a moment to settle.
-          await sleep(2000);
+            .then(() => true)
+            .catch(() => false);
 
-          sannysoftFailures = await page.evaluate(() => {
-            const failures: string[] = [];
-            for (const row of document.querySelectorAll("tr")) {
-              const cells = Array.from(row.querySelectorAll("td, th"));
-              if (cells.length < 2) continue;
-              const failedCell = cells.find((c) => c.classList.contains("failed"));
-              if (!failedCell) continue;
-              const label = (cells[0].textContent ?? "").trim().replace(/\s+/g, " ");
-              const status = (failedCell.textContent ?? "").trim().replace(/\s+/g, " ");
-              failures.push(`${label}: ${status || "failed"}`);
-            }
-            return failures;
-          });
+          if (!cellsReady) {
+            probe = {
+              ok: false,
+              reason: "result table did not populate (timed out)",
+              failures: [],
+            };
+          } else {
+            // Give dynamic tests a moment to settle.
+            await sleep(2000);
+
+            const scraped = await page.evaluate(() => {
+              const failures: string[] = [];
+              for (const row of document.querySelectorAll("tr")) {
+                const cells = Array.from(row.querySelectorAll("td, th"));
+                if (cells.length < 2) continue;
+                const failedCell = cells.find((c) => c.classList.contains("failed"));
+                if (!failedCell) continue;
+                const label = (cells[0].textContent ?? "").trim().replace(/\s+/g, " ");
+                const status = (failedCell.textContent ?? "").trim().replace(/\s+/g, " ");
+                failures.push(`${label}: ${status || "failed"}`);
+              }
+              return failures;
+            });
+            probe = { ok: true, failures: scraped };
+          }
         } catch (e) {
-          results.push({
-            check: "Headless detection probe",
-            pass: false,
-            detail: (e as Error).message,
-          });
+          probe = { ok: false, reason: (e as Error).message, failures: [] };
         }
+        results.push({
+          check: "Headless detection probe",
+          pass: probe.ok,
+          detail: probe.ok ? `${probe.failures.length} failure(s)` : probe.reason,
+        });
 
-        // 4. Canvas noise
         try {
           const noised = await page.evaluate(() => {
             const c = document.createElement("canvas");
@@ -247,7 +282,6 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           results.push({ check: "Canvas noise", pass: false, detail: (e as Error).message });
         }
 
-        // 5. CapSolver
         const apiKey = process.env.CAPSOLVER_API_KEY;
         if (apiKey) {
           try {
@@ -270,10 +304,6 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           results.push({ check: "CapSolver", pass: false, detail: "No API key set" });
         }
 
-        // Clean up temp tab
-        await mgr.closeTab(tabId).catch(() => {});
-
-        // Build human-readable sections.
         const lines: string[] = [];
         lines.push("Connectivity:");
         const nav = results.find((r) => r.check === "Navigation");
@@ -297,12 +327,24 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         }
 
         lines.push("\nHeadless detection:");
-        if (sannysoftFailures.length === 0) {
-          lines.push("No failures reported by bot.sannysoft.com");
-        } else {
-          for (const f of sannysoftFailures.slice(0, 20)) {
-            lines.push(`- ${f}`);
+        if (probe.ok) {
+          if (probe.failures.length === 0) {
+            lines.push("Probe ran: 0 failures reported by bot.sannysoft.com");
+          } else {
+            lines.push("Probe ran; failures:");
+            for (const f of probe.failures.slice(0, 20)) {
+              lines.push(`- ${f}`);
+            }
           }
+        } else {
+          lines.push(`Headless detection probe unavailable: ${probe.reason}`);
+        }
+
+        lines.push("\nStealth checks:");
+        for (const r of results.filter((r) =>
+          ["Canvas noise", "WebGL spoofed", "CapSolver"].includes(r.check),
+        )) {
+          lines.push(`${r.pass ? "✓" : "✗"} ${r.check}: ${r.detail}`);
         }
 
         lines.push("\nIdentity:");
@@ -325,7 +367,11 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           content: [{ type: "text", text: lines.join("\n") }],
           structuredContent: {
             checks: results,
-            headlessFailures: sannysoftFailures.slice(0, 20),
+            headlessDetection: {
+              available: probe.ok,
+              reason: probe.ok ? undefined : probe.reason,
+              failures: probe.failures.slice(0, 20),
+            },
             identity,
           },
         };
@@ -340,6 +386,8 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
             },
           ],
         };
+      } finally {
+        if (tabId !== undefined) await mgr.closeTab(tabId).catch(() => {});
       }
     },
   });
