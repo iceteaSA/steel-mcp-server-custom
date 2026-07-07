@@ -2,7 +2,7 @@ import fs from "fs/promises";
 
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
-import { afterAction, actionFeedback, globalWait } from "../utils.js";
+import { afterAction, actionFeedback } from "../utils.js";
 import {
   assertInsideRoot,
   cleanErrorMessage,
@@ -948,7 +948,7 @@ page.mouse coordinates are viewport-absolute — the optional frame param is acc
           button: button ?? "left",
           clickCount: clickCount ?? 1,
         });
-        await globalWait(env);
+        await afterAction(page, env);
 
         const urlAfter = page.url();
         const navigated = urlAfter !== urlBefore;
@@ -1000,7 +1000,7 @@ page.mouse coordinates are viewport-absolute — the optional frame param is acc
       try {
         const page = await mgr.getPage({ tabId, owner, force });
         await page.mouse.move(x, y);
-        await globalWait(env);
+        await afterAction(page, env);
         return {
           content: [{ type: "text", text: `Mouse moved to (${x}, ${y}).` }],
         };
@@ -1037,7 +1037,7 @@ page.mouse coordinates are viewport-absolute — the optional frame param is acc
       try {
         const page = await mgr.getPage({ tabId, owner, force });
         await page.mouse.down({ button: button ?? "left" });
-        await globalWait(env);
+        await afterAction(page, env);
         return {
           content: [{ type: "text", text: `Mouse button "${button ?? "left"}" pressed.` }],
         };
@@ -1074,7 +1074,7 @@ page.mouse coordinates are viewport-absolute — the optional frame param is acc
       try {
         const page = await mgr.getPage({ tabId, owner, force });
         await page.mouse.up({ button: button ?? "left" });
-        await globalWait(env);
+        await afterAction(page, env);
         return {
           content: [{ type: "text", text: `Mouse button "${button ?? "left"}" released.` }],
         };

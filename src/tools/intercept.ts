@@ -67,11 +67,10 @@ CONTEXT BUDGET — small confirmation output.`,
         // access so no agent can touch another owner's tab routes.
         // MUST run before the pattern guard so cross-owner denial fires
         // regardless of whether the caller passed a pattern.
+        // (resolveTab is the primary enforcement; this is a backstop.)
         const resolved = mgr.resolveTab({ tabId, owner, force });
 
-        // Local owner-auth for tabId-only (no owner) accesses — closes the
-        // bypass where resolveTab skips ownership enforcement when owner
-        // is absent but tabId targets another owner's tab.
+        // Belt-and-suspenders owner-auth — resolveTab is primary.
         const auth = assertTabOwner(mgr, resolved, owner, force);
         if (!auth.ok) {
           return { isError: true, content: [{ type: "text", text: auth.error }] };

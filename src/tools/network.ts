@@ -54,9 +54,9 @@ export function authorizeBodyFetch(
  *   caller's owner matches tab owner → allowed
  *   otherwise → DENIED
  *
- * The tabId-only bypass: resolveTab skips the ownership guard when owner
- * is absent. This predicate closes that gap for tools that must not let
- * a co-tenant target another owner's tab by its discovered tabId.
+ * resolveTab now enforces ownership at the chokepoint (even when owner is
+ * absent on an owned tab). This predicate is a belt-and-suspenders backstop
+ * for tools that validate after resolution.
  */
 export function assertTabOwner(
   mgr: { getTabOwner: (tabId: number) => string | undefined },
@@ -651,6 +651,8 @@ CONTEXT BUDGET — HAR is always written to disk (no inline option).`,
         }
 
         // If a specific tab is named, it must be the caller's (or force).
+        // resolveTab enforces ownership at the chokepoint; this is a
+        // belt-and-suspenders backstop for export_har's own tabId path.
         if (tabId !== undefined) {
           const auth = assertTabOwner(mgr, tabId, owner, force);
           if (!auth.ok) {

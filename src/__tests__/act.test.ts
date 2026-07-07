@@ -22,7 +22,7 @@ function makeFakeLocator() {
     evaluate: mock(() =>
       Promise.resolve({ before: 0, after: 500, pageHeight: 2000, viewportHeight: 800 }),
     ),
-    ariaSnapshot: mock(() => Promise.resolve('- button "Submit" [ref=e1]')),
+    ariaSnapshot: mock(() => Promise.resolve('- button "Submit" @e1')),
   };
 }
 
@@ -102,7 +102,7 @@ describe("runAct", () => {
   it("returns a done transcript on a single step", async () => {
     const page = makeFakePage();
     const mgr = makeFakeMgr(page);
-    mockCaptureSnapshot.mockResolvedValue({ text: "- button [ref=e1]", generation: 1 });
+    mockCaptureSnapshot.mockResolvedValue({ text: "- button @e1", generation: 1 });
     mockLlmJson.mockResolvedValue({ action: "done", reason: "Task complete" });
 
     const text = await runAct(
@@ -121,7 +121,7 @@ describe("runAct", () => {
   it("executes a multi-step action sequence then done", async () => {
     const page = makeFakePage();
     const mgr = makeFakeMgr(page);
-    mockCaptureSnapshot.mockResolvedValue({ text: "- form [ref=e2]", generation: 1 });
+    mockCaptureSnapshot.mockResolvedValue({ text: "- form @e2", generation: 1 });
     mockLlmJson
       .mockResolvedValueOnce({ action: "click", ref: "e1", reason: "open form" })
       .mockResolvedValueOnce({ action: "fill", ref: "e2", value: "hello", reason: "enter text" })
@@ -163,7 +163,7 @@ describe("runAct", () => {
   it("stops at maxSteps without done", async () => {
     const page = makeFakePage();
     const mgr = makeFakeMgr(page);
-    mockCaptureSnapshot.mockResolvedValue({ text: "- button [ref=e1]", generation: 1 });
+    mockCaptureSnapshot.mockResolvedValue({ text: "- button @e1", generation: 1 });
     mockLlmJson.mockResolvedValue({ action: "click", ref: "e1", reason: "keep going" });
 
     const text = await runAct(
@@ -182,7 +182,7 @@ describe("runAct", () => {
   it("transcript includes scroll actions", async () => {
     const page = makeFakePage();
     const mgr = makeFakeMgr(page);
-    mockCaptureSnapshot.mockResolvedValue({ text: "- region [ref=e5]", generation: 1 });
+    mockCaptureSnapshot.mockResolvedValue({ text: "- region @e5", generation: 1 });
     mockLlmJson
       .mockResolvedValueOnce({ action: "scroll", ref: "e5", value: "down", reason: "see more" })
       .mockResolvedValueOnce({ action: "done", reason: "enough" });
@@ -212,7 +212,7 @@ describe("runAct", () => {
   it("includes the transcript so far when an action fails", async () => {
     const page = makeFakePage();
     const mgr = makeFakeMgr(page);
-    mockCaptureSnapshot.mockResolvedValue({ text: "- button [ref=e1]", generation: 1 });
+    mockCaptureSnapshot.mockResolvedValue({ text: "- button @e1", generation: 1 });
     mockLlmJson.mockResolvedValue({ action: "click", ref: "e1", reason: "open form" });
 
     const fakeLocator = makeFakeLocator();
@@ -231,7 +231,7 @@ describe("runAct", () => {
     const originalDateNow = Date.now;
     Date.now = () => now;
 
-    mockCaptureSnapshot.mockResolvedValue({ text: "- button [ref=e1]", generation: 1 });
+    mockCaptureSnapshot.mockResolvedValue({ text: "- button @e1", generation: 1 });
     mockLlmJson.mockImplementation(async () => {
       now = 60_001; // advance past the cap during the LLM call
       return { action: "click", ref: "e1", reason: "click" };
@@ -254,7 +254,7 @@ describe("runAct", () => {
   it("executes a click when the model omits reason (gemma-4 case)", async () => {
     const page = makeFakePage();
     const mgr = makeFakeMgr(page);
-    mockCaptureSnapshot.mockResolvedValue({ text: "- link [ref=e6]", generation: 1 });
+    mockCaptureSnapshot.mockResolvedValue({ text: "- link @e6", generation: 1 });
     // exact gemma-4 payload — no reason field at all
     mockLlmJson.mockResolvedValue({ action: "click", ref: "e6" });
 
@@ -298,7 +298,7 @@ describe("runAct", () => {
   it("passes an imageDataUri to llmJson when useVision is true", async () => {
     const page = makeFakePage();
     const mgr = makeFakeMgr(page);
-    mockCaptureSnapshot.mockResolvedValue({ text: "- button [ref=e1]", generation: 1 });
+    mockCaptureSnapshot.mockResolvedValue({ text: "- button @e1", generation: 1 });
     mockLlmJson.mockResolvedValue({ action: "done", reason: "ok" });
 
     await runAct(
@@ -317,7 +317,7 @@ describe("runAct", () => {
   it("does NOT pass imageDataUri when useVision is absent", async () => {
     const page = makeFakePage();
     const mgr = makeFakeMgr(page);
-    mockCaptureSnapshot.mockResolvedValue({ text: "- button [ref=e1]", generation: 1 });
+    mockCaptureSnapshot.mockResolvedValue({ text: "- button @e1", generation: 1 });
     mockLlmJson.mockResolvedValue({ action: "done", reason: "ok" });
 
     await runAct({ instruction: "click", maxSteps: 1 }, mgr, baseEnv as any, baseDeps);
@@ -330,7 +330,7 @@ describe("runAct", () => {
   it("falls back to text-only when vision-enabled llmJson fails, and appends a note", async () => {
     const page = makeFakePage();
     const mgr = makeFakeMgr(page);
-    mockCaptureSnapshot.mockResolvedValue({ text: "- button [ref=e1]", generation: 1 });
+    mockCaptureSnapshot.mockResolvedValue({ text: "- button @e1", generation: 1 });
     // First call (vision) fails, second (text-only) succeeds.
     mockLlmJson
       .mockRejectedValueOnce(new Error("400: model does not support images"))
@@ -351,7 +351,7 @@ describe("runAct", () => {
   it("still runs text-only when screenshot capture itself fails", async () => {
     const page = makeFakePage();
     const mgr = makeFakeMgr(page);
-    mockCaptureSnapshot.mockResolvedValue({ text: "- button [ref=e1]", generation: 1 });
+    mockCaptureSnapshot.mockResolvedValue({ text: "- button @e1", generation: 1 });
     mockLlmJson.mockResolvedValue({ action: "done", reason: "ok" });
     // Simulate screenshot failure.
     (page.screenshot as any).mockRejectedValue(new Error("viewport error"));

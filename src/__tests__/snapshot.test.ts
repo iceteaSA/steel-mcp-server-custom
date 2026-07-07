@@ -774,6 +774,43 @@ describe("snapshot handler (diff + intent)", () => {
     expect(text).not.toContain("Title");
     expect(text).not.toContain("Intro");
   });
+
+  // maxChars must be a hard cap on the whole output, frames included.
+  it("respects maxChars when frames block is appended", async () => {
+    // Build a snapshot just under 200 chars so that with a frames block
+    // (30+ chars) the total would exceed a tight maxChars.
+    const tree = '- heading "A" @e1\n- heading "B" @e2\n- heading "C" @e3\n- heading "D" @e4\n';
+    const { register, handlers } = makeRegistrar();
+    const mainFrame = { name: () => "", url: () => "https://test/" };
+    const childFrame = {
+      name: () => "child",
+      url: () => "https://test/frame",
+    };
+    const mockPage = {
+      locator: (_sel: string) => ({
+        ariaSnapshot: async (_opts?: unknown) => tree,
+      }),
+      frames: () => [mainFrame, childFrame],
+    } as any;
+    const mgr = {
+      getPage: async () => mockPage,
+      resolveTab: () => 1,
+    } as unknown as BrowserManager;
+
+    clearAllSnapshots();
+    registerExtraction(register, mgr, env);
+    // Choose a maxChars that is tight — contentBudget reserves frames budget.
+    const result = await handlers.snapshot({ maxChars: 120 });
+    const text = result.content[0].text as string;
+    expect(result.isError).toBeUndefined();
+    // frames must be present
+    expect(text).toContain("--- frames ---");
+    expect(text).toContain('[0] name="child"');
+    // total output must not exceed maxChars (tiny margin for floor)
+    expect(text.length).toBeLessThanOrEqual(125);
+    // content was truncated to fit
+    expect(text).toContain("\n");
+  });
 });
 
 // ---------------------------------------------------------------------------

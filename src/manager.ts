@@ -72,10 +72,14 @@ export class TabOwnershipError extends Error {
   constructor(
     public readonly tabId: number,
     public readonly tabOwner: string,
-    public readonly caller: string,
+    public readonly caller: string | undefined,
   ) {
+    const who =
+      caller !== undefined
+        ? `you are "${caller}"`
+        : `you passed no owner. Pass owner:"${tabOwner}" or force:true.`;
     super(
-      `Tab ${tabId} belongs to owner "${tabOwner}" — you are "${caller}". ` +
+      `Tab ${tabId} belongs to owner "${tabOwner}" — ${who}. ` +
         `Pass force:true to override, or target your own tab.`,
     );
     this.name = "TabOwnershipError";
@@ -293,13 +297,16 @@ export class BrowserManager {
    * 4. neither → return currentTabId (global active tab pointer)
    */
   resolveTab(opts: { tabId?: number; owner?: string; force?: boolean }): number {
-    // Explicit tabId + optional ownership check
+    // Explicit tabId + ownership enforcement
     if (opts.tabId !== undefined) {
-      if (opts.owner) {
-        const tabOwner = this.tabOwners.get(opts.tabId);
-        if (tabOwner !== undefined && tabOwner !== opts.owner && !opts.force) {
-          throw new TabOwnershipError(opts.tabId, tabOwner, opts.owner);
-        }
+      const tabOwner = this.tabOwners.get(opts.tabId);
+      // Owner-isolation: if the tab has an owner, the caller MUST present the
+      // matching owner (or force). Omitting owner on an owned tab is treated as
+      // cross-owner (we cannot distinguish the real owner who forgot from an
+      // attacker), so it is denied. Closes the tabId-no-owner bypass across
+      // every tool that resolves a tab through here.
+      if (tabOwner !== undefined && !opts.force && opts.owner !== tabOwner) {
+        throw new TabOwnershipError(opts.tabId, tabOwner, opts.owner);
       }
       return opts.tabId;
     }

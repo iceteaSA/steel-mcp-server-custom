@@ -165,7 +165,7 @@ export async function runAct(
   const WALL_CAP_MS = 60_000;
 
   const systemPrompt =
-    "You drive a browser via an accessibility tree. Each element may have [ref=eN]. Given the user's instruction and the current tree, choose the SINGLE next action. Use the ref of the target element. action=done when the instruction is satisfied; action=stuck if impossible. Only click/fill/press_key/scroll are available. Include a short `reason` string explaining the choice when useful — it is optional but encouraged for transparency.";
+    "You drive a browser via an accessibility tree. Each element may have @eN. Given the user's instruction and the current tree, choose the SINGLE next action. Use the ref of the target element. action=done when the instruction is satisfied; action=stuck if impossible. Only click/fill/press_key/scroll are available. Include a short `reason` string explaining the choice when useful — it is optional but encouraged for transparency.";
 
   const steps: string[] = [];
 

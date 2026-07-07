@@ -1297,18 +1297,20 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         const baseFilter = intent ? (filter ?? "all") : (filter ?? "interactive");
         const filtered = filterTree(result.text, baseFilter);
         const scoped = intent ? applyIntent(filtered, intent) : filtered;
-        const displayText = truncateForDisplay(scoped, maxChars ?? 8000);
 
-        // Append frames metadata AFTER filtering so it always survives — frame
-        // names/indices are not interactive roles and would be stripped otherwise.
+        // Build the frames block first so we can reserve its budget — maxChars
+        // must be a hard cap on the whole output, frames included.
         const childFrames = page.frames().slice(1);
-        let output = displayText;
+        let framesBlock = "";
         if (childFrames.length > 0) {
           const list = childFrames
             .map((f, i) => `[${i}] name="${f.name()}" url=${f.url()}`)
             .join("\n");
-          output += `\n--- frames ---\n${list}`;
+          framesBlock = `\n--- frames ---\n${list}`;
         }
+        const contentBudget = Math.max(200, (maxChars ?? 8000) - framesBlock.length);
+        const displayText = truncateForDisplay(scoped, contentBudget);
+        const output = displayText + framesBlock;
 
         return { content: [{ type: "text", text: output }] };
       } catch (err) {

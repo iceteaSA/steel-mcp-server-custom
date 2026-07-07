@@ -129,9 +129,9 @@ function addTab(mgr: any, owner?: string, overrides?: Partial<Record<string, unk
 // ---------------------------------------------------------------------------
 
 describe("resolveTab — explicit tabId", () => {
-  it("returns tabId when no owner check is needed (caller has no owner)", () => {
+  it("returns tabId for an unowned tab with no owner (legacy)", () => {
     const mgr = setupMgr();
-    const id = addTab(mgr, "agent-b");
+    const id = addTab(mgr); // unowned
     const result = mgr.resolveTab({ tabId: id });
     expect(result).toBe(id);
   });
@@ -150,6 +150,12 @@ describe("resolveTab — explicit tabId", () => {
     expect(result).toBe(id);
   });
 
+  it("throws TabOwnershipError when tab has owner but caller passes no owner", () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-b");
+    expect(() => mgr.resolveTab({ tabId: id })).toThrow(TabOwnershipError);
+  });
+
   it("throws TabOwnershipError when tab owner differs from caller and !force", () => {
     const mgr = setupMgr();
     const id = addTab(mgr, "agent-b");
@@ -160,6 +166,13 @@ describe("resolveTab — explicit tabId", () => {
     const mgr = setupMgr();
     const id = addTab(mgr, "agent-b");
     const result = mgr.resolveTab({ tabId: id, owner: "agent-a", force: true });
+    expect(result).toBe(id);
+  });
+
+  it("returns tabId for owned tab with force:true and no owner", () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-b");
+    const result = mgr.resolveTab({ tabId: id, force: true });
     expect(result).toBe(id);
   });
 
@@ -176,6 +189,23 @@ describe("resolveTab — explicit tabId", () => {
       expect(err.tabOwner).toBe("agent-b");
       expect(err.caller).toBe("agent-a");
       expect(err.message).toContain("Pass force:true to override");
+    }
+  });
+
+  it("TabOwnershipError with undefined caller produces no-owner message", () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-b");
+    try {
+      mgr.resolveTab({ tabId: id });
+      expect.unreachable("should have thrown");
+    } catch (e) {
+      expect(e instanceof TabOwnershipError).toBe(true);
+      const err = e as TabOwnershipError;
+      expect(err.tabId).toBe(id);
+      expect(err.tabOwner).toBe("agent-b");
+      expect(err.caller).toBeUndefined();
+      expect(err.message).toContain("you passed no owner");
+      expect(err.message).toContain('Pass owner:"agent-b"');
     }
   });
 });
