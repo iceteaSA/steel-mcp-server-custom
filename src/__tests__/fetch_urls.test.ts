@@ -418,4 +418,52 @@ describe("fetch_urls runtime routing (impit mocked)", () => {
     expect(r.escalated).toBe(true);
     expect(browserCalls).toBe(0);
   });
+
+  it("mode:'auto' on a real article with tiny maxCharsPerPage: escalated:false (cap does not trigger escalation), [http] label, body truncated", async () => {
+    // Regression: tiny maxCharsPerPage must not turn a real (long) article
+    // into a false-positive shell that would trigger auto-escalation to the
+    // browser path. Cap is applied ONLY to the returned text; the
+    // escalation decision is anchored to the FULL extracted text.
+    const longBody = "real article body. ".repeat(200); // ~4000 chars
+    const mod = await stubImpitAndReimport(async () => ({
+      status: 200,
+      ok: true,
+      headers: { get: () => "text/html" },
+      text: async () => ARTICLE_HTML_FN(longBody),
+    }));
+
+    let browserCalls = 0;
+    const mgr = {
+      newTab: async () => {
+        browserCalls++;
+        throw new Error("auto must NOT escalate a real article just because maxCharsPerPage=50");
+      },
+      closeTab: async () => {},
+    };
+
+    const env = { GLOBAL_WAIT_SECONDS: 0, OUTPUT_DIR: "/tmp" };
+    const handler = captureFetchUrlsHandler(mod, mgr, env);
+    const result: any = await handler({
+      urls: ["https://example.com/real-article"],
+      mode: "auto",
+      extractContent: true,
+      maxCharsPerPage: 50,
+    });
+    expect(result.isError).toBeFalsy();
+    const r = result.structuredContent.results[0];
+    expect(r.path).toBe("http");
+    expect(r.text.startsWith("[http]")).toBe(true);
+    // The escalation decision is anchored to the FULL text, not the
+    // truncated slice — a 4 KB real article must NOT be flagged as a shell.
+    expect(r.escalated).toBe(false);
+    // The returned body is capped with the truncation marker.
+    expect(r.text).toMatch(/\[TRUNCATED — \d[\d,]* total\]/);
+    // …and the slice before the marker is bounded by the cap.
+    const markerIdx = r.text.indexOf("[TRUNCATED");
+    const body = r.text.slice(0, markerIdx);
+    // First char of body is somewhere after the "[http] title\nURL: url\n\n"
+    // prefix; we only assert the prefix + slice combined stay small.
+    expect(body.length).toBeLessThan(150);
+    expect(browserCalls).toBe(0);
+  });
 });

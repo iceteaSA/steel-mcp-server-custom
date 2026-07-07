@@ -106,13 +106,21 @@ export async function fetchHttp(
   const response = await client.fetch(url, { redirect: "follow" });
   const status: number = response.status;
   const html: string = await response.text();
-  let { text, title } = extractFromHtml(html, "", extractContent);
-  if (maxCharsPerPage > 0 && text.length > maxCharsPerPage) {
-    text = text.slice(0, maxCharsPerPage) + `\n[TRUNCATED — ${text.length.toLocaleString()} total]`;
+  // Decide escalation on the FULL extracted text + html. A tiny
+  // maxCharsPerPage must not turn a real article into a false-positive
+  // shell — that would trigger an unnecessary browser-path retry.
+  const { text: fullText, title } = extractFromHtml(html, "", extractContent);
+  const escalated = isSpaShell(html, fullText, status);
+  // Cap only the returned text — keep the escalation decision anchored
+  // to the un-truncated content.
+  let outText = fullText;
+  if (maxCharsPerPage > 0 && outText.length > maxCharsPerPage) {
+    outText =
+      outText.slice(0, maxCharsPerPage) +
+      `\n[TRUNCATED — ${fullText.length.toLocaleString()} total]`;
   }
-  const escalated = isSpaShell(html, text, status);
   const tag = `[http${status === 200 ? "" : ` ${status}`}]`;
-  const contentText = `${tag} ${title || url}\nURL: ${url}\n\n${text}`;
+  const contentText = `${tag} ${title || url}\nURL: ${url}\n\n${outText}`;
   return { url, title: title || url, text: contentText, path: "http", escalated, status };
 }
 
