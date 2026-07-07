@@ -34,10 +34,26 @@ export async function llmJson<T>(env: Env, opts: LlmJsonOptions<T>): Promise<T> 
   let firstRaw = "";
   let secondRaw = "";
 
-  const messages = [
-    { role: "system" as const, content: opts.system },
-    { role: "user" as const, content: opts.user },
+  const messages: Array<{ role: "system" | "user"; content: string }> = [
+    { role: "system", content: opts.system },
+    { role: "user", content: opts.user },
   ];
+
+  // DeepSeek (and any provider strictly following the OpenAI json_object spec)
+  // rejects requests whose prompt messages do not contain the literal word
+  // "json" somewhere when response_format.type === "json_object". The
+  // upstream spec rule is provider-neutral, so we enforce it here at the
+  // chokepoint — harmless for permissive providers (llama.cpp, gemma),
+  // required for strict ones (DeepSeek). The repair-retry message below
+  // already contains "JSON" so this only matters on the first attempt;
+  // idempotent across iterations because the appended instruction sticks.
+  const JSON_OBJECT_INSTRUCTION = "Respond with a single valid JSON object and nothing else.";
+  if (!messages.some((m) => /json/i.test(m.content))) {
+    const sys = messages[0];
+    if (sys.role === "system") {
+      messages[0] = { ...sys, content: `${sys.content}\n\n${JSON_OBJECT_INSTRUCTION}` };
+    }
+  }
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const controller = new AbortController();

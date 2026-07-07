@@ -154,16 +154,69 @@ describe("llmJson", () => {
     });
 
     const body = await fetches[0].json();
+    // System prompt contains no "json" token, so the json_object-safety
+    // instruction is appended to the outgoing system message. The user
+    // message is unchanged.
     expect(body).toEqual({
       model: "gemma",
       messages: [
-        { role: "system", content: "sys" },
+        {
+          role: "system",
+          content: "sys\n\nRespond with a single valid JSON object and nothing else.",
+        },
         { role: "user", content: "usr" },
       ],
       temperature: 0,
       max_tokens: 128,
       response_format: { type: "json_object" },
     });
+  });
+
+  it("appends a JSON instruction to the system message when no 'json' token is present (DeepSeek compatibility)", async () => {
+    const env = baseEnv({ ACT_LLM_BASE_URL: "http://localhost:11434/v1", ACT_LLM_MODEL: "gemma" });
+    mockFetch(
+      new Response(JSON.stringify({ choices: [{ message: { content: '{"x":1}' } }] }), {
+        status: 200,
+      }),
+    );
+
+    await llmJson(env, {
+      system: "You drive a browser via an accessibility tree.",
+      user: "Click the search button.",
+      schema: z.object({ x: z.number() }),
+    });
+
+    const body = await fetches[0].json();
+    const combined = body.messages.map((m: { content: string }) => m.content).join("\n");
+    expect(combined).toMatch(/json/i);
+    expect(combined).toContain("Respond with a single valid JSON object");
+    // Original prompts preserved verbatim.
+    expect(combined).toContain("You drive a browser via an accessibility tree.");
+    expect(combined).toContain("Click the search button.");
+    // No new message appended — instruction rides on the existing system slot.
+    expect(body.messages.length).toBe(2);
+  });
+
+  it("does not double-add the JSON instruction when the prompt already contains 'json' (idempotent)", async () => {
+    const env = baseEnv({ ACT_LLM_BASE_URL: "http://localhost:11434/v1", ACT_LLM_MODEL: "gemma" });
+    mockFetch(
+      new Response(JSON.stringify({ choices: [{ message: { content: '{"x":1}' } }] }), {
+        status: 200,
+      }),
+    );
+
+    await llmJson(env, {
+      system: "Extract structured data and return JSON matching the schema.",
+      user: "Here is the content.",
+      schema: z.object({ x: z.number() }),
+    });
+
+    const body = await fetches[0].json();
+    const systemContent: string = body.messages[0].content;
+    expect(systemContent).toBe("Extract structured data and return JSON matching the schema.");
+    expect(systemContent).not.toContain("Respond with a single valid JSON object");
+    // Message count unchanged; original system content untouched.
+    expect(body.messages.length).toBe(2);
   });
 
   it("repairs once on malformed JSON and succeeds the second time", async () => {
