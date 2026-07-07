@@ -212,6 +212,39 @@ describe("execFillField", () => {
     const loc = (page.locator as any).mock.results[0].value;
     expect(loc.fill).toHaveBeenCalledWith("hello", { timeout: 10000 });
   });
+
+  it("selects by label with explicit selectLabel kind", async () => {
+    const page = makeFakePage();
+    await execFillField(page, baseEnv as any, {
+      selector: "#country",
+      value: "United States",
+      kind: "selectLabel",
+    });
+    const loc = (page.locator as any).mock.results[0].value;
+    expect(loc.selectOption).toHaveBeenCalledWith({ label: "United States" }, { timeout: 10000 });
+  });
+
+  it("selects by index with explicit selectIndex kind", async () => {
+    const page = makeFakePage();
+    await execFillField(page, baseEnv as any, {
+      selector: "#country",
+      value: "2",
+      kind: "selectIndex",
+    });
+    const loc = (page.locator as any).mock.results[0].value;
+    expect(loc.selectOption).toHaveBeenCalledWith({ index: 2 }, { timeout: 10000 });
+  });
+
+  it("throws on non-numeric selectIndex value", async () => {
+    const page = makeFakePage();
+    await expect(
+      execFillField(page, baseEnv as any, {
+        selector: "#country",
+        value: "two",
+        kind: "selectIndex",
+      }),
+    ).rejects.toThrow(/selectIndex expects numeric value/);
+  });
 });
 
 describe("execPressKey", () => {

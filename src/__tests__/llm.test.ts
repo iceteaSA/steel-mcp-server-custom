@@ -90,6 +90,22 @@ describe("llmJson", () => {
     expect(req.headers.get("content-type")).toBe("application/json");
   });
 
+  it("strips a trailing slash from the base URL", async () => {
+    const env = baseEnv({
+      ACT_LLM_BASE_URL: "http://localhost:11434/v1/",
+      ACT_LLM_MODEL: "gemma",
+    });
+    mockFetch(
+      new Response(JSON.stringify({ choices: [{ message: { content: '{"x":1}' } }] }), {
+        status: 200,
+      }),
+    );
+
+    await llmJson(env, { system: "s", user: "u", schema: z.object({ x: z.number() }) });
+
+    expect(fetches[0].url).toBe("http://localhost:11434/v1/chat/completions");
+  });
+
   it("omits Authorization header when API key is not set", async () => {
     const env = baseEnv({ ACT_LLM_BASE_URL: "http://localhost:11434", ACT_LLM_MODEL: "gemma" });
     mockFetch(

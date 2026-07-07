@@ -25,6 +25,8 @@ import { register as registerSession } from "../tools/session.js";
 import { register as registerNetwork } from "../tools/network.js";
 import { register as registerCredentials } from "../tools/credentials.js";
 import { register as registerProfiles } from "../tools/profiles.js";
+import { register as registerAct } from "../tools/act.js";
+import { llmConfigured } from "../llm.js";
 
 // Tools with outputSchema (structured output).
 const JSON_TOOLS = new Set([
@@ -288,5 +290,60 @@ describe("tools/list wire-level completeness", () => {
         expect(tool.outputSchema, `${name}: outputSchema missing`).toBeTruthy();
       }
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// AI tool registration gating — mirrors src/index.ts conditional registration
+// ---------------------------------------------------------------------------
+
+describe("ai toolset gating", () => {
+  async function listToolNames(env: any): Promise<string[]> {
+    const server = new McpServer(
+      { name: "test", version: "0.0.0" },
+      { capabilities: { tools: {} } },
+    );
+
+    const allToolsets = new Set(ALL_TOOLSETS);
+    const { register } = makeRegistrar(server, allToolsets);
+
+    registerSession(register, stubMgr, env);
+    registerTabs(register, stubMgr, env);
+    registerNavigation(register, stubMgr, env);
+    registerInteraction(register, stubMgr, env);
+    registerExtraction(register, stubMgr, env);
+    registerScreenshots(register, stubMgr, env);
+    registerNetwork(register, stubMgr, env);
+    registerCredentials(register, stubMgr, env);
+    registerProfiles(register, stubMgr, env);
+    if (llmConfigured(env)) {
+      registerAct(register, stubMgr, env);
+    }
+
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+
+    const client = new Client({ name: "test-client", version: "0.0.0" }, { capabilities: {} });
+    await client.connect(clientTransport);
+
+    const result = await client.listTools();
+    return result.tools.map((t) => t.name);
+  }
+
+  it("hides act and extract_ai when LLM env is not configured", async () => {
+    const names = await listToolNames(stubEnv);
+    expect(names).not.toContain("act");
+    expect(names).not.toContain("extract_ai");
+  });
+
+  it("shows act and extract_ai when LLM env is configured", async () => {
+    const env = {
+      ...stubEnv,
+      ACT_LLM_BASE_URL: "http://localhost:11434/v1",
+      ACT_LLM_MODEL: "gemma",
+    };
+    const names = await listToolNames(env);
+    expect(names).toContain("act");
+    expect(names).toContain("extract_ai");
   });
 });

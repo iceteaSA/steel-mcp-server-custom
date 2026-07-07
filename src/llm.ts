@@ -51,7 +51,8 @@ export async function llmJson<T>(env: Env, opts: LlmJsonOptions<T>): Promise<T> 
         headers["Authorization"] = `Bearer ${env.ACT_LLM_API_KEY}`;
       }
 
-      const res = await fetch(`${baseUrl}/chat/completions`, {
+      const normalizedBaseUrl = baseUrl.replace(/\/$/, "");
+      const res = await fetch(`${normalizedBaseUrl}/chat/completions`, {
         method: "POST",
         headers,
         body: JSON.stringify({

@@ -191,4 +191,19 @@ describe("runAct", () => {
       /LLM timeout/,
     );
   });
+
+  it("includes the transcript so far when an action fails", async () => {
+    const page = makeFakePage();
+    const mgr = makeFakeMgr(page);
+    mockCaptureSnapshot.mockResolvedValue({ text: "- button [ref=e1]", generation: 1 });
+    mockLlmJson.mockResolvedValue({ action: "click", ref: "e1", reason: "open form" });
+
+    const fakeLocator = makeFakeLocator();
+    fakeLocator.click = mock(() => Promise.reject(new Error("stale ref")));
+    (page.locator as any).mockImplementation(() => fakeLocator);
+
+    await expect(
+      runAct({ instruction: "one click", maxSteps: 3 }, mgr, baseEnv as any),
+    ).rejects.toThrow(/step 1: click e1.*stale ref/s);
+  });
 });

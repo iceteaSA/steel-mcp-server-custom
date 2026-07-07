@@ -331,6 +331,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
               kind,
               frame,
               timeout,
+              settle: false,
             });
             filled.push({
               selector: f.selector,

@@ -249,12 +249,6 @@ export function decorateRefError(err: unknown, usedSelector: string): string {
 // for agent consumption.
 // ---------------------------------------------------------------------------
 
-export interface ExecContext {
-  page: Page;
-  frame?: string;
-  timeout?: number;
-}
-
 export async function execClick(
   page: Page,
   env: Env,
@@ -276,6 +270,7 @@ export async function execFillField(
     frame?: string;
     timeout?: number;
     kind?: "text" | "check" | "radio" | "select" | "selectLabel" | "selectIndex";
+    settle?: boolean;
   },
 ): Promise<void> {
   const sel = toSelector({ selector: opts.selector, ref: opts.ref });
@@ -315,6 +310,17 @@ export async function execFillField(
     case "select":
       await ctx.locator(sel).selectOption(opts.value, { timeout });
       break;
+    case "selectLabel":
+      await ctx.locator(sel).selectOption({ label: opts.value }, { timeout });
+      break;
+    case "selectIndex": {
+      const idx = parseInt(opts.value, 10);
+      if (Number.isNaN(idx)) {
+        throw new Error(`selectIndex expects numeric value, got "${opts.value}"`);
+      }
+      await ctx.locator(sel).selectOption({ index: idx }, { timeout });
+      break;
+    }
     case "check": {
       const intent = interpretCheckboxValue(opts.value);
       if (intent === "check") {
@@ -336,7 +342,9 @@ export async function execFillField(
       await ctx.locator(sel).fill(opts.value, { timeout });
   }
 
-  await afterAction(page, env);
+  if (opts.settle !== false) {
+    await afterAction(page, env);
+  }
 }
 
 export async function execPressKey(

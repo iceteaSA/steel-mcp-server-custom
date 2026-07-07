@@ -81,7 +81,10 @@ CONTEXT BUDGET — returns JSON inline unless it exceeds MAX_INLINE_BYTES, then 
       try {
         const { text, structuredContent, filePath } = await runExtractAi(args, mgr, env);
         if (filePath) {
-          return { content: [{ type: "text", text: `Saved to ${filePath}` }] };
+          return {
+            content: [{ type: "text", text: `Saved to ${filePath}` }],
+            structuredContent,
+          };
         }
         return {
           content: [{ type: "text", text }],
@@ -109,52 +112,73 @@ export async function runAct(
   const { instruction, maxSteps, tabId, owner, force } = args;
   const page = await mgr.getPage({ tabId, owner, force });
   const resolvedTabId = mgr.resolveTab({ tabId, owner, force });
-  const deadline = Date.now() + 60_000;
+  const startedAt = Date.now();
+  const WALL_CAP_MS = 60_000;
 
   const systemPrompt =
     "You drive a browser via an accessibility tree. Each element may have [ref=eN]. Given the user's instruction and the current tree, choose the SINGLE next action. Use the ref of the target element. action=done when the instruction is satisfied; action=stuck (with reason) if impossible. Only click/fill/press_key/scroll are available.";
 
   const steps: string[] = [];
 
-  for (let step = 1; step <= maxSteps; step++) {
-    if (Date.now() > deadline) {
-      steps.push(`step ${step}: timeout — 60s wall-clock cap reached`);
-      break;
-    }
+  function remainingMs(): number {
+    return Math.max(1, WALL_CAP_MS - (Date.now() - startedAt));
+  }
 
-    const snapshot = await captureSnapshot(page, resolvedTabId, { maxChars: 8000 });
-    const userPrompt = `${instruction}\n\nCurrent page:\n${snapshot.text}`;
-
-    const decision = await llmJson(env, {
-      system: systemPrompt,
-      user: userPrompt,
-      schema: ACT_ACTION_SCHEMA,
-    });
-
-    if (decision.action === "done" || decision.action === "stuck") {
-      steps.push(
-        `step ${step}: ${decision.action}${decision.reason ? ` — ${decision.reason}` : ""}`,
-      );
-      break;
-    }
-
-    const start = Date.now();
-    await executeAction(page, env, decision);
-    const elapsed = Date.now() - start;
-    const valuePart = decision.value !== undefined ? ` "${decision.value}"` : "";
-    steps.push(
-      `step ${step}: ${decision.action} ${decision.ref ?? ""}${valuePart} — ${decision.reason} (${elapsed}ms)`,
-    );
-
-    if (step === maxSteps) {
-      steps.push(`reached maxSteps (${maxSteps}) without completing`);
+  function checkCap(label: string): void {
+    if (remainingMs() <= 0) {
+      steps.push(`${label}: 60s wall-clock cap reached`);
+      throw new Error([...steps, "Failure: 60s wall-clock cap reached"].join("\n"));
     }
   }
 
-  const feedback = await actionFeedback(page, resolvedTabId);
-  if (feedback) steps.push(feedback);
+  try {
+    for (let step = 1; step <= maxSteps; step++) {
+      checkCap(`step ${step}`);
 
-  return steps.join("\n");
+      const snapshot = await captureSnapshot(page, resolvedTabId, { maxChars: 8000 });
+      const userPrompt = `${instruction}\n\nCurrent page:\n${snapshot.text}`;
+
+      const decision = await llmJson(env, {
+        system: systemPrompt,
+        user: userPrompt,
+        schema: ACT_ACTION_SCHEMA,
+        timeoutMs: remainingMs(),
+      });
+
+      if (decision.action === "done" || decision.action === "stuck") {
+        steps.push(
+          `step ${step}: ${decision.action}${decision.reason ? ` — ${decision.reason}` : ""}`,
+        );
+        break;
+      }
+
+      checkCap(`step ${step}`);
+      const valuePart = decision.value !== undefined ? ` "${decision.value}"` : "";
+      const stepLine = `step ${step}: ${decision.action} ${decision.ref ?? ""}${valuePart} — ${decision.reason}`;
+      steps.push(stepLine);
+      const actionStart = Date.now();
+      await executeAction(page, env, decision);
+      const actionElapsed = Date.now() - actionStart;
+      steps[steps.length - 1] = `${stepLine} (${actionElapsed}ms)`;
+
+      if (step === maxSteps) {
+        steps.push(`reached maxSteps (${maxSteps}) without completing`);
+      }
+    }
+
+    const feedback = await actionFeedback(page, resolvedTabId);
+    if (feedback) steps.push(feedback);
+
+    return steps.join("\n");
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err ?? "");
+    // Avoid duplicating the transcript when the error already includes it.
+    if (message.includes(steps.join("\n"))) {
+      throw err;
+    }
+    steps.push(`Failure: ${message}`);
+    throw new Error(steps.join("\n"));
+  }
 }
 
 async function executeAction(
