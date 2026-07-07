@@ -686,6 +686,31 @@ describe("dialog policy handling", () => {
     expect(mgr.getDialogPolicy(tabId)).toBeUndefined();
     expect(mgr.getLastDialog(tabId)).toBeNull();
   });
+
+  it("stop() clears dialog policy and lastDialog so reused tab ids start fresh", async () => {
+    const mgr = setupMgr();
+    const [tabId, _page] = allocateTestTab(mgr);
+    mgr.setDialogPolicy(tabId, { action: "accept" });
+    mgr.lastDialogs.set(tabId, {
+      type: "confirm",
+      message: "Delete?",
+      defaultValue: "",
+      action: "accepted",
+      promptText: undefined,
+      autoHandled: true,
+      reported: false,
+      at: Date.now(),
+    });
+
+    await mgr.stop();
+
+    // After stop, tab IDs reset to 1; a freshly allocated tab must not inherit
+    // the stale accept policy or last-dialog record from the previous session.
+    const [newTabId] = allocateTestTab(mgr);
+    expect(newTabId).toBe(1);
+    expect(mgr.getDialogPolicy(newTabId)).toBeUndefined();
+    expect(mgr.getLastDialog(newTabId)).toBeNull();
+  });
 });
 
 // ---------------------------------------------------------------------------

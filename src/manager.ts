@@ -1454,6 +1454,8 @@ export class BrowserManager {
     this.tabOwners.clear();
     this.tabLastActivity.clear();
     this.ownerActiveTab.clear();
+    this.dialogPolicy.clear();
+    this.lastDialogs.clear();
     this.primaryTabId = undefined;
     this.nextTabId = 1;
     this.currentTabId = 1;
