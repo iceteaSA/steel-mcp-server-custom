@@ -647,11 +647,12 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
         let results: Array<Record<string, string | null>>;
 
         if (isRef) {
-          const handles = await page.locator(sel).all();
-          results = [];
-          for (const handle of handles) {
-            const record = await handle.evaluate(
-              (el, { attrNames, maxChars }) => {
+          // waitFor before evaluateAll — .all() does not wait on its own,
+          // so a stale ref would silently return [].
+          await page.locator(sel).waitFor({ state: "attached", timeout: 5000 });
+          results = await page.locator(sel).evaluateAll(
+            (elements, { attrNames, maxChars }) => {
+              return elements.map((el) => {
                 const trunc = (s: string | null): string | null => {
                   if (s === null) return null;
                   if (maxChars <= 0 || s.length <= maxChars) return s;
@@ -674,11 +675,10 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
                   }
                 }
                 return out;
-              },
-              { attrNames: attrs, maxChars: maxCharsPerAttr },
-            );
-            results.push(record);
-          }
+              });
+            },
+            { attrNames: attrs, maxChars: maxCharsPerAttr },
+          );
         } else {
           results = await page.evaluate(
             ({
@@ -930,11 +930,12 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
         let results: Array<Record<string, string | null>>;
 
         if (isRef) {
-          const handles = await page.locator(sel).all();
-          results = [];
-          for (const handle of handles.slice(0, limit)) {
-            const record = await handle.evaluate(
-              (root, { fieldMap }) => {
+          // waitFor before evaluateAll — .all() does not wait on its own,
+          // so a stale ref would silently return [].
+          await page.locator(sel).waitFor({ state: "attached", timeout: 5000 });
+          results = await page.locator(sel).evaluateAll(
+            (elements, { fieldMap, maxItems }) => {
+              return elements.slice(0, maxItems).map((root) => {
                 const rec: Record<string, string | null> = {};
                 for (const [name, spec] of Object.entries(fieldMap)) {
                   const atIdx = spec.lastIndexOf("@");
@@ -959,11 +960,10 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
                   }
                 }
                 return rec;
-              },
-              { fieldMap: fields as Record<string, string> },
-            );
-            results.push(record);
-          }
+              });
+            },
+            { fieldMap: fields as Record<string, string>, maxItems: limit },
+          );
         } else {
           results = await page.evaluate(
             (args) => {

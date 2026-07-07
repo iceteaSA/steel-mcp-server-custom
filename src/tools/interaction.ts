@@ -220,10 +220,12 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         // Individual existence check for ref selectors via locator.
         const refInfoMap: Record<string, { tag: string; type: string } | null> = {};
         for (const sel of refSelectors) {
+          let handle: any = null;
           try {
-            const handle = await page.locator(sel).elementHandle({ timeout });
+            await page.locator(sel).waitFor({ state: "attached", timeout });
+            handle = await page.locator(sel).elementHandle({ timeout });
             if (handle) {
-              refInfoMap[sel] = await handle.evaluate((el) => ({
+              refInfoMap[sel] = await handle.evaluate((el: Element) => ({
                 tag: el.tagName.toLowerCase(),
                 type: (el as HTMLInputElement).type || "",
               }));
@@ -232,6 +234,8 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
             }
           } catch {
             refInfoMap[sel] = null;
+          } finally {
+            if (handle) await handle.dispose().catch(() => {});
           }
         }
 
