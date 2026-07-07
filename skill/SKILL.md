@@ -89,6 +89,25 @@ click(ref: "@e4", tabId: 7)
 **Refs are stale** after navigation, DOM mutation, or re-render. Take a fresh
 snapshot. Errors on stale refs hint "Ref may be stale — take a fresh snapshot."
 
+### Snapshot variants — diff and intent
+
+- **`diff: true`** — returns only elements that changed since the last snapshot
+  on this tab (a delta, not the full tree). Cheap way to see "what moved" after
+  a click without re-reading the whole page. Filter and intent are not applied
+  in diff mode — it shows the raw delta.
+- **`intent`** — goal-scoped filter applied on top of the visibility/interactive
+  filter. Pass `"login"`, `"search"`, `"read_content"`, `"fill_form"`,
+  `"navigate"`, `"buy"`, or `"extract_data"` to narrow the tree to only
+  elements relevant to that task (e.g. `"login"` keeps form fields + login text,
+  drops navigation chrome).
+
+### `page_state` — ultra-light check
+
+`page_state()` returns `{url, title, scrollPercent, elementCount,
+interactiveCount}` in ~48 tokens. Use it to check "did the page change?" after
+a click before deciding whether to take a fresh snapshot. Much cheaper than a
+full snapshot (5–20× fewer tokens).
+
 ## Tool Selection — Which Tool for What
 
 | I want to...                          | Use                                                        | Not                          |
@@ -109,6 +128,13 @@ snapshot. Errors on stale refs hint "Ref may be stale — take a fresh snapshot.
 | Compute/filter/custom extract         | `evaluate(expression: "...")`                              | —                            |
 | Drive a micro-task via LLM (optional) | `act(instruction: "...", maxSteps: 3)`                     | manual click/fill loop       |
 | LLM structured extraction (optional)  | `extract_ai(instruction: "...", schema: "...")`            | hand-written JS              |
+| Check "did the page change?" cheaply  | `page_state()`                                              | `snapshot` (5-20× more tokens) |
+| Mock / block / simulate network       | `intercept(pattern: "**/api/*", action: "fulfill", body: "...")` | `evaluate` mockery        |
+| Export network trace for analysis     | `export_har(owner: "agent:mine")`                           | `get_network` + hand-build    |
+| Click at coordinates (canvas/WebGL)   | `click_at(x: 100, y: 200)`                                  | `click(selector)` on non-DOM  |
+| Drag / hover (sequence)               | `mouse_move(x,y); mouse_down(); mouse_move(x2,y2); mouse_up()` | —                         |
+| Numbered visual labels on screenshot  | `get_screenshot(annotate: true)` → marks array with number→ref/coord map | `snapshot` + visual matching |
+| Vision-grounded LLM drive             | `act(instruction: "...", useVision: true)`                  | text-only act                |
 | Batch-fetch URLs                      | `fetch_urls(urls: [...], mode: "auto")`                    | chaining new_tab + get_page_text |
 | Debug page errors                     | `get_console(level: "error")`                              | `evaluate` console scan      |
 | Check what page I'm on                | `list_tabs(tabId: N)`                                      | ~~get_current_url~~          |
@@ -304,6 +330,7 @@ extract_ai(instruction: "Extract product titles and prices", schema: "{\"type\":
 ```
 
 - `act` runs the LLM step-by-step and stops at `done`, `stuck`, or `maxSteps`. Use it for short, well-bounded UI tasks where you can articulate the goal but the path isn't obvious.
+- `useVision: true` sends a screenshot alongside the a11y snapshot each step, enabling the LLM to ground decisions on visual layout. Falls back to text-only if the configured model lacks vision support.
 - `extract_ai` is one-shot — it reads the page once and returns structured data. Cheaper than `act` for pure extraction.
 - The LLM has no memory across calls; pass enough context in `instruction`.
 - `extract_ai` validates against the schema via Zod and performs one repair retry on parse / schema failure.
@@ -333,6 +360,93 @@ get_network(status: "5xx", tabId: 7)
 `body: true` requires exactly one match (or pass `requestId` to fetch a
 specific event). Body is capped at 10K chars and downgrades to file mode if
 it exceeds `MAX_INLINE_BYTES`.
+
+## Network Interception (`intercept`)
+
+Mock API responses, block noisy third-party resources, or simulate errors
+on a per-tab basis. All routes are tab-scoped + owner-isolated — no agent
+can touch another owner's routes.
+
+```
+# Mock an API endpoint
+intercept(pattern: "**/api/users", action: "fulfill", body: '{"name":"test"}', contentType: "application/json", tabId: 7)
+
+# Block tracking pixels / analytics
+intercept(pattern: "**/analytics/*", action: "abort", tabId: 7)
+
+# Override request headers (e.g. auth token injection)
+intercept(pattern: "**/api/**", action: "continue", headers: {"Authorization": "Bearer xyz"}, tabId: 7)
+
+# List active routes
+intercept(action: "list", tabId: 7)
+
+# Remove routes
+intercept(pattern: "**/api/users", action: "unroute", tabId: 7)  # remove one
+intercept(action: "unroute", tabId: 7)                             # remove ALL on tab
+```
+
+Routes persist until the tab closes or `unroute` is called. Use `list` to
+inspect what's armed.
+
+## HAR Export (`export_har`)
+
+Export captured browser network traffic as HAR 1.2 for performance analysis
+or debugging. Always writes to disk (no inline option). Owner-scoped.
+
+```
+# Export all traffic from your tabs (by owner)
+export_har(owner: "agent:my-job-42")
+→ HAR exported: /tmp/steel-mcp/network.har (247 entries)
+
+# Export a specific tab's events
+export_har(tabId: 7, owner: "agent:my-job-42")
+→ HAR exported: /tmp/steel-mcp/network.har (89 entries)
+```
+
+Requires `owner` or `tabId` — refuses an unscoped dump of all traffic.
+
+## Coordinate-Based Interaction (`click_at`, `mouse_move`/`mouse_down`/`mouse_up`)
+
+Vision/coordinate fallback for targets the accessibility tree cannot address:
+canvas elements, WebGL renderers, custom-drawn widgets, coordinate-based games.
+
+```
+# Click a canvas button at known coordinates
+click_at(x: 420, y: 310, tabId: 7)
+
+# Drag-and-drop (e.g. slider, sortable list)
+mouse_move(x: 100, y: 200, tabId: 7)
+mouse_down(tabId: 7)                      # press left button
+mouse_move(x: 300, y: 200, tabId: 7)      # drag to new position
+mouse_up(tabId: 7)                        # release → drop
+```
+
+`click_at` supports `button: "right"|"middle"` and `clickCount: 2` for
+double-click. Coordinates are viewport-absolute. Prefer `click(ref:)` when
+the a11y tree covers the target — coordinate-based clicks are fragile across
+viewport changes.
+
+## Screenshot Annotation (`annotate`)
+
+`get_screenshot(annotate: true)` overlays numbered labels on every interactive
+element and returns a `marks` array mapping number → `{ref, x, y}`. Use it to
+correlate visual position with actionable refs — especially useful on complex
+UIs or when the accessibility tree structure is unclear.
+
+```
+get_screenshot(annotate: true, tabId: 7)
+→ Screenshot saved to /tmp/steel-mcp/screenshot_....webp
+  Marks: [
+    {"number":1,"ref":"@e12","x":420,"y":310},
+    {"number":2,"ref":"@e15","x":500,"y":310},
+    ...
+  ]
+
+# Use the ref directly
+click(ref: "@e12", tabId: 7)
+# Or the coordinates
+click_at(x: 420, y: 310, tabId: 7)
+```
 
 ## Credentials — Stored Login Automation
 
@@ -517,10 +631,12 @@ contexts have full JS-level stealth but HTTP headers show the real Chrome UA
 (see profile limitation above).
 
 Any UA-vs-navigator.platform mismatch (e.g. UA claiming macOS on a Linux host) is
-a Steel-side config issue — the MCP layer cannot control how the Steel container
-launches the browser. Patchright's recommended launch args (`channel:"chrome"`,
-`headless:false`, no custom UA) apply to LOCAL mode only, which now prefers
-system Chrome when available.
+a Steel-side config issue — our custom Steel fork adds stealth code mods to the
+stock image and loads the CapSolver plugin, so anti-bot evasion + CAPTCHA solving
+are handled inside the container. The MCP's `captcha_status`/`go_to_url`
+integration adds the balance check + wait-and-retry loop. In LOCAL mode the MCP
+launches Chromium via Patchright and prefers `channel:"chrome"` (system Chrome)
+when available for stealth.
 
 ## Calling Routes
 
