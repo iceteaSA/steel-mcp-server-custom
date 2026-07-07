@@ -44,7 +44,7 @@ const activeToolsets = resolveToolsets(toolsetsCli, env.TOOLSETS);
 // Create core instances
 // -----------------------------------------------------------------------------
 const server = new McpServer(
-  { name: "Steel Browser MCP Server", version: "1.0.0" },
+  { name: "Steel Browser MCP Server", version: "0.8.0" },
   { capabilities: { tools: {} } },
 );
 

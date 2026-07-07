@@ -39,24 +39,44 @@ bun run format:check   # or `bun run format` to write
 bun run test
 ```
 
-**Tests:** `bun test` runs over `src/__tests__/*.test.ts` only (5 files: helpers, env, relay,
-encryption, tools; 146 passed + 10 skipped). The root `test/` directory has been deleted
-(stale leftover from an earlier version). Full browser flows are still validated manually
-via mcporter or the MCP inspector.
+**Tests:** `bun test` runs over `src/__tests__/*.test.ts` only (18 files; 437 passed
++ 12 skipped). The root `test/` directory has been deleted (stale leftover from an
+earlier version). Full browser flows are still validated manually via mcporter or
+the MCP inspector.
 
-**Deploy (homelab):** `bun run build`, then copy `dist/index.cjs` to
-`~/mcp-servers/steel-mcp-server-custom/dist/` and `skill/SKILL.md` to
-`~/.agents/skills/steel-browser/` on the OpenClaw LXC. The artifact runs under `node` on
-the LXC — bun is not needed there. The `skill/` directory holds the agent-facing usage
-skill — keep it in sync with tool changes.
+**Deploy (homelab):**
+
+```bash
+# 1. On the build host (where bun is installed)
+bun install
+bun run build
+#  → dist/index.cjs
+
+# 2. Sync to the LXC deploy dir (with node_modules for the native deps)
+rsync -av --delete \
+  --exclude=node_modules \
+  ./ ~/mcp-servers/steel-mcp-server-custom/   # or scp, deploy tool, etc.
+
+# 3. On the LXC — install only the runtime deps (skips devDeps + saves native .node files)
+cd ~/mcp-servers/steel-mcp-server-custom
+bun install --production      # or: npm ci --omit=dev
+#  → dist/index.cjs + node_modules/{patchright,@napi-rs/image,impit,@modelcontextprotocol,...}
+
+# 4. Copy the agent-facing skill
+cp skill/SKILL.md ~/.agents/skills/steel-browser/SKILL.md
+```
+
+The artifact runs under `node` on the LXC — bun is not needed at runtime, only for the
+one-time `bun install --production` step (the equivalent `npm ci --omit=dev` also works).
+The `skill/` directory holds the agent-facing usage skill — keep it in sync with tool changes.
 
 **Native deps (build → runtime).** `--external` in the build script means
-`@napi-rs/image`, `patchright`, and `impit` are NOT bundled — the target needs
-its own `node_modules/` with the prebuilt binaries. Copy the per-dep trees
-alongside the artifact (e.g. `node_modules/impit/` + its native `.node` file
-shipped by `bun install --production` on a matching arch). On the LXC this
-means running `bun install --production` (or `npm ci --omit=dev`) inside the
-deploy dir so the prebuilt binaries land next to `dist/index.cjs`.
+`@napi-rs/image`, `patchright`, and `impit` are NOT bundled into `dist/index.cjs` —
+they need to be present on the target's `node_modules/` with their prebuilt `.node`
+binaries. Skipping step 3 above is the most common deploy failure (the server
+exits with `Cannot find module 'patchright'` or similar). All three packages ship
+platform-specific native binaries; make sure the install runs on an arch that
+matches the runtime host.
 
 ---
 
@@ -88,6 +108,31 @@ Invalid values cause the process to exit with a descriptive error.
 | `RELAY_SECRET` | — | Shared secret for relay auth (Bearer token). Required when `RELAY_PORT > 0`. |
 | `RELAY_PUBLIC_URL` | — | Public URL for the relay (e.g. `http://your-host:3001`). Shown in `start_browser` output. Defaults to `http://localhost:<RELAY_PORT>`. |
 | `RELAY_BIND_ADDR` | `127.0.0.1` | Address the relay HTTP server binds to. Use `0.0.0.0` to accept external connections (only when behind a reverse proxy or firewall). |
+| `SETTLE_TIMEOUT_MS` | `5000` | Max time to wait for network idle + DOM quiet after action tools. `0` disables settle detection entirely. |
+| `NETWORK_BUFFER_SIZE` | `500` | Max request/response events kept for `get_network`. `0` disables capture (no listeners, empty results). |
+| `TOOLSETS` | all | Comma-separated toolset groups to activate: `core,tabs,extract,media,network,auth,debug,ai`. `core` is always active. Overridden by the `--toolsets` CLI flag. |
+| `ACT_LLM_BASE_URL` | — | OpenAI-compatible endpoint for `act` / `extract_ai`. Base URL is used as-is; append `/v1` yourself if the provider expects it. Required to enable those tools. |
+| `ACT_LLM_MODEL` | — | Model name sent to the LLM endpoint (e.g. `gemma3`, `qwen2.5`). Required to enable `act` / `extract_ai`. |
+| `ACT_LLM_API_KEY` | — | Optional API key for the LLM endpoint. When unset, no `Authorization` header is sent (ollama-style). |
+
+### `--toolsets` — Toolset Filtering
+
+Tools are grouped into 8 sets; pass any subset to trim the tool surface for
+context-budget-constrained agents:
+
+| Group    | Includes                                                          |
+|----------|-------------------------------------------------------------------|
+| `core`   | Always active. `go_to_url`, `click`, `fill`, `scroll`, `wait_for`, `press_key`, `handle_dialog`, `upload_file`, `snapshot`, `start_browser`, `stop_browser`. |
+| `tabs`   | `list_tabs`, `new_tab`, `close_tabs`.                              |
+| `extract`| `get_page_text`, `get_links`, `get_attrs`, `evaluate`, `extract`, `fetch_urls`. |
+| `media`  | `get_screenshot`, `download_file`.                                 |
+| `network`| `cookies`, `get_network`.                                         |
+| `auth`   | `create_profile`, `list_profiles`, `save_profile`, `delete_profile`, `credentials`, `use_credential`. |
+| `debug`  | `smoke_test`, `get_console`, `captcha_status`.                     |
+| `ai`     | `act`, `extract_ai` — only registered when `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` are set. |
+
+Precedence: `--toolsets a,b` CLI flag > `TOOLSETS` env var > all toolsets.
+Unknown names fail startup with a list of valid values.
 
 ### Concurrency — multi-agent sessions
 
@@ -147,30 +192,40 @@ src/
   env.ts                 # Zod env schema
   helpers.ts             # Pure functions — bot-wall, ErrorTracker, dedup, etc.
   relay.ts               # Cookie push relay server
+  snapshot.ts            # captureSnapshot + per-tab snapshot baselines (snapshot-diff feedback)
+  settle.ts              # SETTLE_INIT_SCRIPT — network-idle + DOM-quiet detection
+  llm.ts                 # OpenAI-compatible JSON client (used by act / extract_ai)
   tools/
     index.ts             # Barrel re-exports
-    extraction.ts        # get_page_text, fetch_urls, get_links, get_attrs, evaluate, extract
-    interaction.ts       # click, fill, scroll, wait_for
+    shared.ts            # Toolset gating, tab/frame targets, ref resolver, executors
+    extraction.ts        # get_page_text, fetch_urls, get_links, get_attrs, evaluate, extract, snapshot
+    interaction.ts       # click, fill, scroll, wait_for, handle_dialog, upload_file, press_key
     screenshots.ts       # get_screenshot (+ @napi-rs/image)
     session.ts           # start_browser, stop_browser, smoke_test, captcha_status, get_console
-    network.ts           # cookies, download_file
+    network.ts           # cookies, download_file, get_network
     navigation.ts        # go_to_url, history (+ ErrorTracker, CAPTCHA wait)
     credentials.ts       # credentials, use_credential
     tabs.ts              # list_tabs, new_tab, close_tabs
     profiles.ts          # create_profile, list_profiles, save_profile, delete_profile
-  __tests__/             # 5 test files, 146 passed
+    act.ts               # act, extract_ai (gated on ACT_LLM_BASE_URL + ACT_LLM_MODEL)
+  __tests__/             # 17 test files, 146+ passed
 ```
 
 **Key class — `BrowserManager`** (in `src/manager.ts`):
-- `initialize()` — creates a Steel session (or local Chromium launch), connects Playwright
-  via `chromium.connectOverCDP()`, opens the first page, wires console log capture.
+- `initialize()` — creates a Steel session (or local Chromium launch), connects Patchright
+  via `chromium.connectOverCDP()`, opens the first page, wires console + network listeners.
 - `getPage()` — returns the current Playwright `Page`, reopening if closed. Re-attaches
   the console listener via a `WeakSet` guard so each page is only listened to once.
+  Auto-recovers from "browser has been closed" with a soft-reset + one retry.
 - `stop()` — releases the Steel session, closes the browser, resets state.
-- `consoleLogs` — ring buffer (max 500) of `{ level, text, timestamp }`.
+- `consoleLogs` — ring buffer (max 500) of `{ level, text, timestamp, tabId, location? }`.
 - `debugUrl` — Steel session debug URL (returned by `start_browser`).
+- `dialogPolicy` / `lastDialog` — per-tab pre-arming for `handle_dialog`.
+- `networkEvents` — ring buffer (size `NETWORK_BUFFER_SIZE`) consumed by `get_network`.
 
-**Browser layer:** Direct **Playwright** — `chromium` from the `playwright` package.
+**Browser layer:** Direct **Patchright** — `chromium` from the `patchright` package (a
+patched Playwright build that bypasses the `Runtime.enable` stealth fingerprint). All
+page APIs match standard Playwright.
 - `page.viewportSize()` / `page.setViewportSize({ width, height })`
 - `page.screenshot(options)` — `PageScreenshotOptions`; `scale` is `'css'|'device'` not numeric
 - `page.goto(url, { waitUntil: "domcontentloaded" })` — use domcontentloaded not load
@@ -179,8 +234,13 @@ src/
 - `page.click(sel, { timeout })` / `page.fill(sel, text)` / `page.type(sel, text)`
 - `page.selectOption(sel, { value|label|index })` / `page.press(sel, key)`
 - `page.evaluate(fn, arg)` — runs in browser context
+- `page.on("dialog", ...)` — caught + auto-resolved by `handle_dialog` policy
 
-**Tool registration:** `server.tool(name, description, zodSchema, handler)` from `McpServer`.
+**Tool registration:** `server.registerTool(name, {title, description, inputSchema, outputSchema?, annotations}, handler)` from `McpServer`.
+Each call goes through the gated registrar in `src/tools/shared.ts`:
+- `core` is always registered; other toolsets are gated by `--toolsets` / `TOOLSETS`.
+- Annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) per MCP best practice.
+- JSON-returning tools include `outputSchema` → `structuredContent` for typed clients.
 Every handler calls `await mgr.getPage()` (which auto-initialises) then works with the page.
 
 **Available tools:**
@@ -190,25 +250,30 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 
 | Tool | Description |
 |---|---|
-| `list_tabs` | List tabs (filter by owner/profile/tabId). Replaces get_current_url |
+| `list_tabs` | List tabs (filter by owner/profile/tabId). Replaces get_current_url. `idleSeconds` per tab |
 | `new_tab` | Open a new tab (optional URL, owner, profile) |
 | `close_tabs` | Close by tabId, owner, or both. Replaces close_tab + close_tabs_by_owner |
 | `go_to_url` | Navigate + optional waitFor. `readPage` extracts content in same call. `disableMedia` blocks images/fonts/CSS. CAPTCHA wait-and-retry (15s CapSolver poll). Auto-detects bot walls + error loops |
-| `click` | Click element + optional waitFor/waitForText. Reports navigation |
-| `fill` | Fill 1+ form fields. Auto-detects type. Replaces type + select |
-| `scroll` | Scroll up/down. `readAfterScroll` returns visible text in same call |
+| `click` | Click by `selector` or `ref` (snapshot eN). Optional `waitFor`/`waitForText`. `frame` targets an iframe. Reports navigation + snapshot-diff feedback |
+| `fill` | Fill 1+ form fields by `selector` or `ref`. Auto-detects type (text/select/checkbox/radio). `frame` targets an iframe |
+| `scroll` | Scroll up/down by `selector` or `ref`. `readAfterScroll` returns visible text in same call |
 | `history` | Back, forward, or reload. Reports URL + title |
-| `wait_for` | Wait for selector/text/textGone. Timeout shows page context |
+| `wait_for` | Wait for selector/text/textGone. Timeout shows page context. Accepts `ref` |
+| `press_key` | Press a key or combo (Enter, Escape, Control+A). Optional `selector`/`ref` to focus first |
+| `handle_dialog` | Pre-arm the dialog policy (`accept`/`dismiss`, optional `promptText`) before an action that triggers alert/confirm/prompt. Omit `action` to inspect current policy + last dialog |
+| `upload_file` | Upload files via `<input type=file>` or a custom upload button (`viaChooser: true`). Absolute host paths only |
+| `snapshot` | Page accessibility tree with `[ref=eN]` tokens. The preferred first look — refs feed `click`/`fill`/`get_attrs`/`extract` directly. `frame` targets an iframe; output appends a frames section. Default maxChars: 8K |
 | `get_page_text` | Extract text (auto-selects main content area). `extractContent` for Readability article extraction. `format: "markdown"` via turndown. `matchAll` for lists. Default maxChars: 5K |
-| `get_links` | Extract [{text, href}] with optional urlPattern filter |
-| `get_attrs` | Extract specific attributes from matched elements |
+| `get_links` | Extract [{text, href}] with optional urlPattern filter. Accepts `ref` |
+| `get_attrs` | Extract specific attributes from matched elements (by `selector` or `ref`) |
 | `get_screenshot` | Screenshot (webp/jpeg/png, selector/clip/fullPage). Default outputMode: "file". Post-capture resize via @napi-rs/image (maxWidth, maxHeight, maxFileBytes) |
-| `evaluate` | Run JS in page context, return JSON. maxChars cap (default 10K). outputMode: "file" for large output |
+| `evaluate` | Run JS in page context, return JSON. maxChars cap (default 10K). outputMode: "file" for large output. `frame` targets an iframe |
 | `get_console` | Browser console messages (filter by level) |
-| `fetch_urls` | Batch-fetch 1–10 URLs in parallel with Readability extraction |
-| `extract` | Declarative structured extraction: CSS selector + field map → JSON |
+| `fetch_urls` | Batch-fetch 1–10 URLs in parallel. `mode: "auto"|"browser"|"http"` (impit TLS-impersonated fast-path with auto-escalation). Readability article extraction per URL |
+| `extract` | Declarative structured extraction: CSS selector + field map → JSON. Accepts `ref` |
 | `download_file` | Download URL to disk (handles attachments + inline binaries) |
 | `cookies` | Get or set browser cookies. Filter by domain |
+| `get_network` | Inspect request/response traffic (filter by urlPattern/resourceType/status). `body: true` or `requestId` fetches a single response body. Default limit: 30 |
 | `credentials` | List/store/update/delete credentials (no args = list) |
 | `use_credential` | Retrieve or auto-fill login form with stored credential |
 | `captcha_status` | CapSolver balance + availability |
@@ -216,9 +281,21 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 | `list_profiles` | Active + saved profiles |
 | `save_profile` | Persist cookies + localStorage to disk |
 | `delete_profile` | Close profile context + tabs |
-| `smoke_test` | Self-test: navigate, fingerprint, stealth, CapSolver checks |
+| `smoke_test` | Self-test: navigate, fingerprint, stealth, CapSolver checks. Headless-detection probe (sannysoft) |
 | `start_browser` | Start browser, get Session Viewer + Interactive + Relay URLs |
-| `stop_browser` | Stop browser (kills all tabs/profiles — use close_tabs for cleanup) |
+| `stop_browser` | Stop browser (kills all tabs/profiles). `owner`+`force` override the multi-agent safety check |
+| `act` | LLM-driven bounded micro-loop over a snapshot (1–5 steps). Gated on `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` |
+| `extract_ai` | LLM structured extraction from the current page (text or html, optional JSON Schema). Gated on `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` |
+
+**Ref targeting.** `click`, `fill`, `scroll`, `wait_for`, `press_key`, `handle_dialog`'s
+contexts, `get_attrs`, `extract`, and `upload_file` all accept `ref: "eN"` in place
+of `selector`. Refs come from `snapshot` and expire on navigation or page mutation —
+take a fresh snapshot after either. Pass exactly one of `selector` or `ref`.
+
+**Frame targeting.** `click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot`
+accept `frame: "<name>" | "<url-substring>" | "<0-based index>"` to target an iframe.
+Child frames exclude the main frame; the index is 0-based within the child list. Use
+`snapshot` (no selector) to enumerate available frames.
 
 ### Design principles for new tools
 
@@ -232,10 +309,24 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 
 ---
 
+### Snapshot-first interaction paradigm
+
+The preferred read is `snapshot`, not `get_page_text`. Snapshot returns the
+accessibility tree with stable `[ref=eN]` tokens; that structure is both
+cheaper (no layout/walk costs) and more actionable — refs feed
+`click`/`fill`/`scroll`/`wait_for`/`get_attrs`/`extract`/`press_key` directly.
+Use `get_page_text` only when the agent needs the actual prose content of
+an article (then `extractContent: true` + `format: "markdown"`).
+
+Action tools emit a snapshot-diff line on success ("3 elements changed")
+so the agent sees whether the click landed.
+
+---
+
 ## Code Style
 
 ### TypeScript
-- `strict: true`, target `ES2022`, `moduleResolution: "bundler"` (tsup bundles to `.cjs`)
+- `strict: true`, target `ES2022`, `moduleResolution: "bundler"` (bun bundles to `.cjs`)
 - Local imports use `.js` extension (required for the ESM module system): `import { foo } from "./helpers.js"`
 - Cast caught errors: `const error = err as Error`
 
@@ -247,7 +338,7 @@ import fs from "fs/promises";
 import path from "path";
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { chromium } from "playwright";
+import { chromium } from "patchright";
 import { z } from "zod";
 
 import { EnvSchema } from "./env.js";
@@ -256,13 +347,25 @@ import { EnvSchema } from "./env.js";
 ### Tool handler pattern
 
 ```typescript
-server.tool(
-  "tool_name",
-  `Description.
+// All tools go through the gated registrar in src/tools/shared.ts. It wraps
+// server.registerTool() with toolset filtering, annotations, optional
+// outputSchema + structuredContent.
+register({
+  name: "tool_name",
+  title: "Tool Name",
+  toolset: "core",
+  description: `Description.
 
 CONTEXT BUDGET — one sentence about output size risk.`,
-  { param: z.string().optional().describe("Description.") },
-  async ({ param }) => {
+  inputSchema: { param: z.string().optional().describe("Description.") },
+  outputSchema: { result: z.string().optional() },         // optional; enables structuredContent
+  annotations: {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+  handler: async ({ param }) => {
     try {
       const page = await mgr.getPage();
       // ... do work ...
@@ -272,8 +375,8 @@ CONTEXT BUDGET — one sentence about output size risk.`,
       const error = err as Error;
       return { isError: true, content: [{ type: "text", text: error.message }] };
     }
-  }
-);
+  },
+});
 ```
 
 ### Error handling

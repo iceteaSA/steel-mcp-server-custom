@@ -43,29 +43,73 @@ Need the tool list/schemas? `mcp-gateway_gateway_list_tools({ server: "steel" })
   tab with an `owner` tag, operate with `tabId`, clean up with
   `close_tabs` at the end.
 
+## Snapshot-First — The Default Read
+
+The preferred first look at any page is `snapshot`, not `get_page_text`.
+`snapshot` returns the accessibility tree with stable `[ref=eN]` tokens.
+That structure is both cheaper (no layout/walk costs) and more actionable —
+refs feed `click` / `fill` / `scroll` / `wait_for` / `get_attrs` / `extract`
+/ `press_key` directly. No selector guessing.
+
+```
+# 1. Snapshot the page
+snapshot(tabId: 7)
+→ [Tab 7] https://example.com/login
+  generic [ref=e1] "Sign in to your account"
+  textbox  "Email"    [ref=e2]
+  textbox  "Password" [ref=e3]
+  button   "Sign in"  [ref=e4]
+
+# 2. Click / fill by ref
+fill(fields: [{ref: "e2", value: "me@example.com"}, {ref: "e3", value: "..."}], tabId: 7)
+click(ref: "e4", tabId: 7)
+
+# 3. Read the action feedback (snapshot-diff line in the result)
+#    "2 fields changed" / "3 elements changed" — tells you the click landed.
+#    If it didn't, take a fresh snapshot — refs are stale after mutation.
+```
+
+**Why refs win over selectors.**
+
+- Selectors break across page updates; refs are scoped to the snapshot you took.
+- One snapshot drives N actions without re-querying the DOM.
+- `get_attrs(ref, attrs)` and `extract(ref, fields)` work the same way — no
+  separate `querySelector` for each attribute.
+
+**When to use `get_page_text` instead.**
+
+- The agent needs the actual prose content of an article (then `extractContent: true` + `format: "markdown"`).
+- You're building a one-shot full-page dump for downstream LLM summarisation.
+- The page has no useful accessibility tree (rare — JS-shell pages with no semantic markup).
+
+**Refs are stale** after navigation, DOM mutation, or re-render. Take a fresh
+snapshot. Errors on stale refs hint "Ref may be stale — take a fresh snapshot."
+
 ## Tool Selection — Which Tool for What
 
 | I want to...                          | Use                                                        | Not                          |
 |---------------------------------------|------------------------------------------------------------|------------------------------|
-| Read page content                     | `get_page_text(selector: "main")`                          | `evaluate` (overkill)        |
-| Navigate + read page (1 call)         | `go_to_url(url, readPage: true)`                           | `go_to_url` then `get_page_text` |
-| Read article content cleanly          | `get_page_text(extractContent: true)`                      | `get_page_text` with raw text |
-| Read as markdown                      | `get_page_text(extractContent: true, format: "markdown")`  | evaluate + regex             |
-| Batch-fetch multiple URLs             | `fetch_urls(urls: [...])`                                  | chaining new_tab + get_page_text |
-| Structured data extraction            | `extract(selector, fields)`                                | evaluate with fragile JS     |
-| Get article URLs from a list          | `get_links(selector: "main")`                              | `get_page_text(matchAll)`    |
+| See page structure + element refs     | `snapshot()`                                               | `get_page_text` (no refs)    |
+| Click a button / link                 | `click(ref: "eN")`                                         | `click(selector)`            |
+| Fill a form field                     | `fill({ref, value})` or `fill([...])` for batches          | `type` + `select` (separate) |
+| Press Enter / Escape / shortcut       | `press_key("Enter")` or `press_key("Control+A", ref)`      | `evaluate` key dispatch      |
+| Read page content (prose)             | `get_page_text(extractContent: true, format: "markdown")`  | `evaluate` + regex           |
+| Read article URLs from a list         | `get_links(ref: "e5")` or `get_links(selector: "main")`    | `get_page_text(matchAll)`    |
 | Scrape structured list data           | `get_page_text(matchAll: true)`                            | `evaluate` + loop            |
-| Get data-*, aria-*, src attrs         | `get_attrs(selector, attrs)`                               | `evaluate`                   |
-| Type in a search box                  | `fill(fields: [{selector, value, submit}])`                | `evaluate`                   |
-| Fill a login form                     | `fill(fields: [...], submitSelector)`                      | Multiple `fill` calls        |
-| Click + wait for result               | `click(selector, waitFor: "...")`                          | `click` then `wait_for`      |
-| Navigate + wait for content           | `go_to_url(url, waitFor: "...")`                           | `go_to_url` then `wait_for`  |
-| Scroll + read in one call             | `scroll(direction, readAfterScroll: true)`                 | scroll then get_page_text    |
-| Screenshot to file (default)          | `get_screenshot()` — now defaults to file                  | was inline base64            |
+| Get data-*, aria-*, src attrs         | `get_attrs(ref, attrs)`                                    | `evaluate`                   |
+| Declarative structured extraction     | `extract(ref, fields)`                                     | `evaluate` with fragile JS   |
+| Target an iframe element              | `snapshot(); click(ref, frame: "...")`                     | `evaluate` into iframe       |
+| Handle alert/confirm/prompt           | `handle_dialog(action: "accept")` BEFORE the triggering action | page hangs                   |
+| Upload a file                         | `upload_file(ref: "e7", files: ["/abs/path"])`             | `evaluate` + hidden input    |
+| Inspect network traffic               | `get_network(urlPattern: "/api/")`                         | `evaluate` performance API   |
+| Compute/filter/custom extract         | `evaluate(expression: "...")`                              | —                            |
+| Drive a micro-task via LLM (optional) | `act(instruction: "...", maxSteps: 3)`                     | manual click/fill loop       |
+| LLM structured extraction (optional)  | `extract_ai(instruction: "...", schema: "...")`            | hand-written JS              |
+| Batch-fetch URLs                      | `fetch_urls(urls: [...], mode: "auto")`                    | chaining new_tab + get_page_text |
+| Debug page errors                     | `get_console(level: "error")`                              | `evaluate` console scan      |
 | Check what page I'm on                | `list_tabs(tabId: N)`                                      | ~~get_current_url~~          |
 | Clean up my tabs                      | `close_tabs(owner: "agent:mine")`                          | `stop_browser`               |
-| Debug page errors                     | `get_console(level: "error")`                              | `evaluate` console scan      |
-| Compute/filter/custom extract         | `evaluate(expression: "...")`                              | —                            |
+| Screenshot to file (default)          | `get_screenshot()` — defaults to file                      | was inline base64            |
 
 ## Common Workflows
 
@@ -92,6 +136,8 @@ fetch_urls(urls: ["https://a.com", "https://b.com"], extractContent: true, maxCh
 ```
 
 Returns one result per URL with extracted article text. Fetches in parallel.
+Use `mode: "auto"` (default) for the TLS-impersonated fast path with browser
+fallback, or `mode: "http"` to force the no-browser path. See "Path 1b" below.
 
 ### Scrape a list page (2 calls)
 ```
@@ -110,15 +156,20 @@ wait_for(text: "Dashboard")
 ```
 # Agent A
 new_tab(url: "https://site-a.com", owner: "agent:A")   → Tab 3
-get_page_text(selector: "main", tabId: 3)
+snapshot(tabId: 3)                                     # refs for site-a
+get_attrs(ref: "e5", attrs: ["data-price"], tabId: 3)
 close_tabs(owner: "agent:A")
 
 # Agent B (simultaneously)
 create_profile(name: "b-session", url: "https://site-b.com")  → Tab 4
-get_page_text(selector: "main", tabId: 4)
+snapshot(tabId: 4)                                           # refs for site-b
+click(ref: "e12", tabId: 4)
 save_profile(name: "b-session")
 delete_profile(name: "b-session")
 ```
+
+Both agents pass their `tabId` AND `owner` on every call. The `tabId` pins the
+operation to the right page; the `owner` is used by the ownership guard.
 
 ## Concurrent Agents — Tab Ownership
 
@@ -131,22 +182,33 @@ Multiple agents share one browser session. To avoid stepping on each other:
    → Opened Tab 7 (owner=agent:my-scraper-12345)
    ```
 
-2. **Pin operations to your tab via `tabId`.** All page-interacting tools
-   (`go_to_url`, `get_page_text`, `get_links`, `get_attrs`, `click`, `type`,
-   `evaluate`, `wait_for`, `scroll`, `history`, `get_screenshot`, etc.) accept
-   an optional `tabId`. Without it, the tool uses the global current-active-tab,
-   which another agent may have moved. Always pass your `tabId`:
+2. **Pass `owner` + `tabId` on every page call.** All page-interacting tools
+   (`go_to_url`, `snapshot`, `click`, `fill`, `get_page_text`, `get_links`,
+   `get_attrs`, `evaluate`, `wait_for`, `scroll`, `press_key`, `history`,
+   `get_screenshot`, `get_network`, …) accept both `tabId` and `owner`. Without
+   them, the tool uses the global current-active-tab, which another agent may
+   have moved. Always pass them:
    ```
-   get_page_text(selector: "article", matchAll: true, tabId: 7)
-   go_to_url(url: "https://other-site.com", tabId: 7)
+   snapshot(tabId: 7, owner: "agent:my-scraper-12345")
+   click(ref: "e4", tabId: 7, owner: "agent:my-scraper-12345")
+   go_to_url(url: "https://other-site.com", tabId: 7, owner: "agent:my-scraper-12345")
    ```
 
-3. **Clean up only your own tabs** at end of task:
+3. **Ownership guard.** Action tools (`click`, `fill`, `scroll`, `press_key`,
+   `upload_file`, `history`, `handle_dialog`) will reject calls to a tab owned
+   by a different agent unless you pass `force: true`. This catches the
+   "I clicked but another agent's tab moved" race. Prefer fixing the call
+   (target your own tab) over `force: true`.
+
+4. **Clean up only your own tabs** at end of task:
    ```
-   close_tabs(owner:owner: "agent:my-scraper-12345")
+   close_tabs(owner: "agent:my-scraper-12345")
    → Closed 3 tab(s) owned by agent:my-scraper-12345: 7, 9, 11
    ```
-   Do NOT call `stop_browser` — that kills everyone's tabs.
+   Do NOT call `stop_browser` — that kills everyone's tabs. (If you do need
+   to stop the browser, pass `owner` + `force: true` to override the
+   multi-agent safety check, but only when you're sure no other agents
+   have live work.)
 
 ### Idle-tab sweeper (automatic)
 
@@ -161,6 +223,112 @@ If you see `browserContext.newPage: Target page, context or browser has been
 closed` on a very recent `start_browser` / `new_tab`, the server now soft-resets
 + retries internally. You don't need retry loops around `new_tab`. If the
 retried call still fails, treat it as a real browser outage.
+
+## Handle Dialog — Pre-Arm the Policy
+
+Playwright dialogs (`alert` / `confirm` / `prompt`) **block the triggering
+action until resolved**. The policy must be armed in advance — the dialog is
+handled the instant it fires. Default policy is `dismiss`.
+
+```
+# Pre-arm BEFORE the action that triggers the dialog
+handle_dialog(action: "accept", tabId: 7)
+click(ref: "e12", tabId: 7)   # "Confirm deletion?" → auto-accept
+
+# For prompt(), pass the response text
+handle_dialog(action: "accept", promptText: "yes", tabId: 7)
+click(ref: "e3", tabId: 7)    # prompt("Type 'yes' to confirm")
+
+# One-shot — apply to the next dialog only, then revert to dismiss
+handle_dialog(action: "accept", once: true, tabId: 7)
+
+# Inspect what happened
+handle_dialog(tabId: 7)
+→ Dialog policy for tab 7: default (dismiss).
+  Last dialog (3s ago): confirm "Are you sure?" — accept (auto-handled).
+```
+
+`handle_dialog` is per-tab — arm it on the `tabId` of the page that will fire
+the dialog, not the calling agent.
+
+## Frame Targeting — Reaching Into Iframes
+
+`click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot` accept
+`frame: "<name>" | "<url-substring>" | "<0-based index>"` to target an iframe.
+Child frames exclude the main frame; the index is 0-based within the child list.
+
+```
+# 1. Enumerate frames (snapshot with no selector appends a frames section)
+snapshot(tabId: 7)
+→ ...
+  --- frames ---
+  [0] name="payment-iframe" url=https://embed.example.com/checkout
+  [1] name=""             url=https://embed.example.com/3ds
+
+# 2. Snapshot into the iframe to get refs for its elements
+snapshot(frame: "payment-iframe", tabId: 7)
+→ [ref=e1] ... (refs scoped to the iframe DOM)
+
+# 3. Act on iframe elements
+fill(ref: "e3", value: "4111...", frame: "payment-iframe", tabId: 7)
+click(ref: "e7", frame: "0", tabId: 7)   # by 0-based child index
+```
+
+Refs scoped to a frame stay valid for subsequent calls on that same frame, but
+they do NOT survive a re-render — take a fresh `snapshot(frame: ...)` if the
+iframe DOM mutates.
+
+## Driving a Micro-Task via LLM (`act`, `extract_ai`)
+
+Two optional tools require `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` to be set on
+the server (any OpenAI-compatible endpoint, e.g. ollama). Skip this section
+if those tools aren't registered.
+
+```
+# Bounded micro-loop: 1-5 LLM-chosen actions over the current snapshot
+act(instruction: "Sign in with email me@example.com and password from credentials 'myapp'", maxSteps: 5, tabId: 7)
+→ step 1: click [ref=e4]  "Email"
+  step 2: fill [ref=e4]   "me@example.com"
+  step 3: click [ref=e7]  "Password"
+  step 4: fill [ref=e7]   "***ret"
+  step 5: click [ref=e12] "Sign in"
+  done: Dashboard heading appears.
+
+# Structured extraction with an optional JSON Schema
+extract_ai(instruction: "Extract product titles and prices", schema: "{\"type\":\"object\",\"properties\":{\"products\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"properties\":{\"title\":{\"type\":\"string\"},\"price\":{\"type\":\"number\"}}}}}}", tabId: 7)
+→ {"products": [{"title": "...", "price": 12.50}, ...]}
+```
+
+- `act` runs the LLM step-by-step and stops at `done`, `stuck`, or `maxSteps`. Use it for short, well-bounded UI tasks where you can articulate the goal but the path isn't obvious.
+- `extract_ai` is one-shot — it reads the page once and returns structured data. Cheaper than `act` for pure extraction.
+- The LLM has no memory across calls; pass enough context in `instruction`.
+- `extract_ai` validates against the schema via Zod and performs one repair retry on parse / schema failure.
+
+## Inspecting Network Traffic (`get_network`)
+
+The browser captures a per-tab request/response ring buffer (default 500
+events; configurable via `NETWORK_BUFFER_SIZE`). Use `get_network` to find
+hidden API endpoints, debug SPA loads, or verify form submissions.
+
+```
+# Compact list of recent traffic
+get_network(urlPattern: "/api/", resourceType: "xhr", tabId: 7)
+→ 12 events (showing first 12)
+  [3] GET    https://api.example.com/users      200    12ms  4.2KB
+  [7] POST   https://api.example.com/login      200   240ms  0.6KB
+  ...
+
+# Fetch a single response body
+get_network(body: true, requestId: 7, tabId: 7)
+→ {"userId": 42, "token": "..."}
+
+# Filter by status range
+get_network(status: "5xx", tabId: 7)
+```
+
+`body: true` requires exactly one match (or pass `requestId` to fetch a
+specific event). Body is capped at 10K chars and downgrades to file mode if
+it exceeds `MAX_INLINE_BYTES`.
 
 ## Credentials — Stored Login Automation
 
@@ -322,6 +490,10 @@ captcha_status()
   manual retry loops — the tool waits for the solver to complete.
 
 ## Stealth & Fingerprint
+
+The MCP drives the browser through **Patchright** — a stealth-hardened Playwright
+fork that drops the `Runtime.enable` CDP fingerprint that vanilla Playwright
+leaks. All standard Playwright page APIs work unchanged.
 
 The Steel container presents as a macOS Chrome user from South Africa:
 
@@ -512,11 +684,21 @@ When you have a list of URLs to read, `fetch_urls` fetches them all in parallel
 fetch_urls(
   urls: ["https://a.com/article", "https://b.com/post"],
   extractContent: true,
-  maxCharsPerPage: 3000
+  maxCharsPerPage: 3000,
+  mode: "auto"
 )
 ```
 
 Returns one result per URL. Faster than chaining `new_tab` + `get_page_text` per URL.
+
+**Modes:**
+
+- `"auto"` (default) — try `impit` (TLS-impersonated HTTP, no browser) first; escalate to a real browser tab when the HTTP result looks like an SPA shell or anti-bot challenge. Each result carries a `[http]` or `[browser]` label; `auto` results also include an `escalated: true|false` flag in `structuredContent`.
+- `"http"` — force the fast path. Skips the browser entirely. Misses JS-rendered content; use for static pages, RSS, or well-known APIs.
+- `"browser"` — force a real browser tab per URL. Always works, slowest. Use when you specifically need JS-rendered content or anti-bot bypasses.
+
+A tiny `maxCharsPerPage` doesn't trigger auto-escalation — the cap is applied
+before the SPA-shell heuristic.
 
 ### Path 1c — `extract` (declarative field extraction)
 
@@ -648,17 +830,17 @@ moved. Same for forward on the last page.
 
 Two ways — pick by field count:
 
-**Small (1-2 fields):** `type` + `click` is fine.
+**Small (1-2 fields):** `fill` + `click` is fine. Prefer refs from a fresh `snapshot`.
 ```
-type(selector: "input[name=email]", text: "user@example.com")
-type(selector: "input[name=password]", text: "secret")
-click(selector: "button[type=submit]")
-wait_for(text: "Dashboard")
-list_tabs()   # confirm landing, not error
+fill({ref: "e4", value: "user@example.com", tabId: 7})
+fill({ref: "e7", value: "secret", tabId: 7})
+click(ref: "e12", tabId: 7)
+wait_for(text: "Dashboard", tabId: 7)
+list_tabs(tabId: 7)   # confirm landing, not error
 ```
 
-**Many fields (sign-up / checkout / multi-input):** `fill` in one call.
-Auto-detects each field's type and dispatches correctly (0.6.0+):
+**Many fields (sign-up / checkout / multi-input):** `fill` with a `fields[]` array in one call.
+Auto-detects each field's type and dispatches correctly:
 - text/email/tel/password/url/number/textarea/date/time → `page.fill`
 - `<select>` → `page.selectOption` (value by default; use `kind: "selectLabel"` for label or `kind: "selectIndex"` for index)
 - checkboxes — three value shapes:
@@ -670,22 +852,23 @@ Auto-detects each field's type and dispatches correctly (0.6.0+):
 ```
 fill(
   fields: [
-    {selector: "input[name=email]", value: "user@example.com"},
-    {selector: "input[name=password]", value: "secret"},
-    {selector: "input[name=newsletter]", value: "yes"},          # checkbox truthy → check
-    {selector: "input[name=topping]", value: "cheese"},          # checkbox group → check the cheese option
-    {selector: "input[name=topping]", value: "bacon"},           # same group → also check bacon
-    {selector: "input[name=plan]", value: "pro"},                # radio group
-    {selector: "select[name=country]", value: "za"},             # select by value
-    {selector: "select[name=size]", value: "Medium", kind: "selectLabel"},
-    {selector: "input[name=dob]", value: "1990-04-18"},          # date input
+    {ref: "e4",  value: "user@example.com"},
+    {ref: "e7",  value: "secret"},
+    {ref: "e10", value: "yes"},          # checkbox truthy → check
+    {ref: "e12", value: "cheese"},       # checkbox group → check the cheese option
+    {ref: "e13", value: "bacon"},        # same group → also check bacon
+    {ref: "e16", value: "pro"},          # radio group
+    {ref: "e19", value: "za"},           # select by value
+    {ref: "e22", value: "Medium", kind: "selectLabel"},
+    {ref: "e25", value: "1990-04-18"},   # date input
   ],
-  submitSelector: "button[type=submit]"
+  submitSelector: "button[type=submit]",
+  tabId: 7
 )
-wait_for(text: "Welcome")
+wait_for(text: "Welcome", tabId: 7)
 ```
 
-`fill` replaces N separate tool calls with one. Pass `skipMissing: true` if some fields are conditionally rendered. Force a specific dispatch per field with `kind: "text"|"check"|"radio"|"select"|"selectLabel"|"selectIndex"`.
+`fill` replaces N separate tool calls with one. Pass `skipMissing: true` if some fields are conditionally rendered. Mix `ref` and `selector` per field; force a specific dispatch per field with `kind: "text"|"check"|"radio"|"select"|"selectLabel"|"selectIndex"`.
 
 ## Human-in-the-Loop (HITL)
 
@@ -737,20 +920,30 @@ surfaces in the result the same way a clean match would.
 ## Multi-Tab Workflows
 
 Tabs are per-session, each with own URL/cookies/DOM. For concurrent-safe use,
-always address tabs by their `tabId` — never rely on a shared "active tab".
+always address tabs by their `tabId` AND pass your `owner` — never rely on a
+shared "active tab".
 
 ```
 a = new_tab(url: "https://site-a.com", owner: "agent:my-job-42")  # → Tab 7
 b = new_tab(url: "https://site-b.com", owner: "agent:my-job-42")  # → Tab 8
-get_page_text(selector: "main", maxChars: 2000, tabId: 7)
-go_to_url(url: "https://site-c.com", tabId: 8)
-get_page_text(selector: "article", matchAll: true, tabId: 8)
-close_tabs(owner:owner: "agent:my-job-42")                      # clean up both
+
+# Snapshot each tab; refs are scoped to that tab's snapshot
+snapshot(tabId: 7, owner: "agent:my-job-42")
+→ ... refs e1..eN ...
+
+snapshot(tabId: 8, owner: "agent:my-job-42")
+→ ... refs e1..eN ...
+
+# Drive both tabs in parallel without races
+click(ref: "e4", tabId: 7, owner: "agent:my-job-42")
+click(ref: "e3", tabId: 8, owner: "agent:my-job-42")
+
+close_tabs(owner: "agent:my-job-42")                      # clean up both
 ```
 
 Rules:
-- Always pass `tabId` so concurrent agents don't race on a global active-tab
-  pointer.
+- Always pass both `tabId` and `owner` so concurrent agents don't race on a
+  global active-tab pointer and the ownership guard accepts the call.
 - `new_tab` uses real CDP context; visible in session viewer.
 - Never `browser.newPage()` / `browser.newContext()` directly — phantom
   contexts. Always use MCP tools.
@@ -868,9 +1061,11 @@ click(selector: "a.download-link", tabId: 7)
 Rough budget for a single scrape task:
 - 1 `list_tabs` (check session)
 - 1 `new_tab` (own tab)
-- 1 `go_to_url` (with `readPage: true` to combine nav + extract)
-- 1 `get_page_text` with `matchAll` (list extraction, if not using readPage)
+- 1 `go_to_url` (with `readPage: true` to combine nav + extract, OR `snapshot` for ref-driven)
+- 1 `snapshot` if you're going to act on the page (refs drive `click`/`fill`/`scroll` without re-querying)
+- 1 `get_page_text` with `matchAll` (list extraction, if not using readPage or refs)
 - 1 `list_tabs` (verify, optional)
 
-≈ 3–5 calls total per page with `readPage`. If you exceed 8 without new info, stop + probe
-with the selector diagnostic — don't iterate blind.
+≈ 3–5 calls total per page with `readPage` (or one `snapshot` + N action calls
+fed by refs). If you exceed 8 without new info, stop + probe with the selector
+diagnostic — don't iterate blind.

@@ -1,5 +1,66 @@
 # Changelog
 
+## [0.8.0] — 2026-07-07
+
+SOTA upgrade over the v0.6.x line: bun toolchain, snapshot-first interaction paradigm, Patchright anti-bot, MCP `registerTool`/`structuredContent` modernization, `--toolsets` filtering, and seven new tools.
+
+### Toolchain
+
+- **pnpm → bun** for install / build / test / format / lint. Build target remains node-compatible (`bun build --format=cjs` → `dist/index.cjs`), so the artifact still runs under plain `node` on the LXC. `packageManager` pinned to `bun@1.3.14`.
+- DevDeps switched from eslint/prettier to `oxlint` + `oxfmt`. `vitest` → `bun test`. Lint/format gates exposed as `bun run lint` and `bun run format:check`.
+
+### MCP protocol
+
+- Tool registration moved from `server.tool(...)` to **`server.registerTool(name, {title, description, inputSchema, outputSchema?, annotations}, handler)`** — the modern MCP SDK path.
+- Every tool now declares `annotations: { readOnlyHint, destructiveHint, idempotentHint, openWorldHint }` for typed MCP clients.
+- JSON-returning tools (cookies, list_tabs, fetch_urls, extract, list_profiles, get_network) expose an `outputSchema` and return `structuredContent` in addition to the text content block.
+- Server identity bumped in lockstep with `package.json`.
+
+### Interaction paradigm
+
+- **Snapshot-first.** `snapshot` returns the page accessibility tree with stable `[ref=eN]` tokens. Refs feed `click` / `fill` / `scroll` / `wait_for` / `get_attrs` / `extract` / `press_key` directly — no need to re-discover selectors via `evaluate` after each mutation.
+- **`ref` targeting** added to `click`, `fill`, `scroll`, `wait_for`, `press_key`, `get_attrs`, `extract`, `upload_file`. Pass exactly one of `selector` or `ref`. Refs expire on navigation or page mutation; errors on stale refs hint to take a fresh snapshot.
+- **Action feedback.** `click`, `fill`, `scroll`, `press_key` emit a snapshot-diff line on success ("N elements changed") so the agent can tell whether the click landed without re-snapping.
+- **Settle detection.** `SETTLE_INIT_SCRIPT` waits for network-idle + DOM-quiet after every action; configurable via `SETTLE_TIMEOUT_MS` (default 5000 ms; `0` disables).
+- **Frame targeting.** `click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot` accept `frame: "<name>" | "<url-substring>" | "<0-based child index>"`. `snapshot` (no selector) enumerates available child frames in a `--- frames ---` section.
+
+### New tools
+
+- **`snapshot`** — accessibility tree with `[ref=eN]` tokens; the new preferred first read.
+- **`handle_dialog`** — pre-arm the dialog policy (`accept` / `dismiss`, optional `promptText`, optional `once`) for a tab before an action that triggers `alert` / `confirm` / `prompt`. Omit `action` to inspect the current policy + last dialog. Default policy is `dismiss`.
+- **`upload_file`** — upload via `<input type=file>` (`files: ["/abs/path", ...]`) or via a custom upload button (`viaChooser: true`). Absolute host paths only.
+- **`press_key`** — press a Playwright key or combo (`Enter`, `Escape`, `Control+A`, `Shift+Tab`, `ArrowDown`, `PageDown`, …). Optional `selector` / `ref` to focus first.
+- **`get_network`** — inspect the per-tab request/response ring buffer (filter by `urlPattern` / `resourceType` / `status`). `body: true` (or `requestId: N`) fetches a single response body.
+- **`act`** — bounded LLM micro-loop over the current snapshot (1–5 actions; the model picks `click` / `fill` / `press_key` / `scroll` / `done` / `stuck` per step). Gated on `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL`.
+- **`extract_ai`** — LLM structured extraction from the current page (text or cleaned outerHTML; optional JSON Schema). Same LLM gating as `act`.
+- **`fetch_urls`** gained `mode: "auto" | "browser" | "http"`. `http` uses `impit` (TLS-impersonated) for a fast path; `auto` tries `http` first and escalates to a real browser tab when the response looks like an SPA shell or anti-bot challenge. Each result is labeled `[http]` or `[browser]` and the `auto` path exposes an `escalated` flag.
+
+### Multi-agent
+
+- All page-interacting tools now accept `owner` (agent identity); action tools additionally accept `force: true` to override the ownership guard.
+- **`stop_browser` ownership guard** — when `owner` is supplied and other agents still have live tabs, returns `isError` with a list of those owners and their tab IDs. Pass `force: true` to override.
+- **`list_tabs`** now reports `idleSeconds` per tab so concurrent agents can spot abandoned tabs.
+- **Crash auto-recovery** in `BrowserManager.getPage` — soft-reset + one retry on "Target/context/browser has been closed" errors. Closes the race between `start_browser` returning and the CDP context being ready for `newPage()`.
+
+### Anti-bot
+
+- **`playwright` → `patchright`** — the page API surface is identical, but Patchright drops the `Runtime.enable` CDP fingerprint that vanilla Playwright leaks, narrowing the gap between stealth and stock Chromium.
+- **`smoke_test` fingerprint-consistency probe** + a headless-detection probe against sannysoft. WebGL probe restored; explicit `navigator.webdriver` semantics.
+
+### Security
+
+- Relay server now binds to **`127.0.0.1` by default** (`RELAY_BIND_ADDR`). Set `0.0.0.0` only behind a reverse proxy or firewall. Bearer-token comparison uses `timingSafeEqual`.
+- **Crypto v2** — credentials at rest use a random per-record salt (v1 records auto-migrate on first read).
+- Path-traversal guards on `profile` / `credentials` file paths (`assertSafeProfilePath`, `isValidProfileName`).
+
+### Fixes
+
+- `fill` select modes (`select` / `selectLabel` / `selectIndex`) restored after the snapshot refactor; single settle call after multi-field fills.
+- `act` wall-cap now uses raw elapsed time, not the snapshot+LLM-step time.
+- `extract_ai` honors an optional JSON Schema via Zod validation; one repair retry on parse / schema failure.
+- `fetch_urls` `mode: "http"` maxCharsPerPage cap applied before escalation detection so a tiny `maxCharsPerPage` doesn't trigger a needless browser round-trip.
+- `lasturl` tracking on `click` / `press_key` so concurrent agents see accurate "where did the action go" feedback.
+
 ## [0.6.0] — 2026-04-18
 
 Audit pass based on live-workflow dogfooding — five real bugs fixed, four UX gaps closed, screenshot default switched to WebP for a default-case context-budget win, plus a second-pass round of refinements from mcporter-boundary testing. Non-breaking for existing code except the screenshot format default.
