@@ -277,6 +277,14 @@ export async function runFetchUrls(
   };
 }
 
+/** Snapshot filter schema (no zod default — the handler owns the effective default). */
+export const snapshotFilterSchema = z
+  .enum(["interactive", "all", "visible"])
+  .optional()
+  .describe(
+    "Element filter. interactive (default): only actionable elements + structural ancestors (3-5x fewer nodes). all: full tree. visible: drop hidden.",
+  );
+
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // get_page_text -------------------------------------------------------------
   register({
@@ -1229,13 +1237,7 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         .describe(
           "Cap output (default 8000). Over-budget output is truncated at a line boundary — scope with selector instead of raising this.",
         ),
-      filter: z
-        .enum(["interactive", "all", "visible"])
-        .default("interactive")
-        .optional()
-        .describe(
-          "Element filter. interactive (default): only actionable elements + structural ancestors (3-5x fewer nodes). all: full tree. visible: drop hidden.",
-        ),
+      filter: snapshotFilterSchema,
       diff: z
         .boolean()
         .optional()

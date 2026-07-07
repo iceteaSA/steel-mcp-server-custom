@@ -13,7 +13,7 @@ import {
 } from "../snapshot.js";
 import type { BrowserManager, Env } from "../manager.js";
 import type { ToolRegistrar } from "../tools/shared.js";
-import { register as registerExtraction } from "../tools/extraction.js";
+import { register as registerExtraction, snapshotFilterSchema } from "../tools/extraction.js";
 
 // ---------------------------------------------------------------------------
 // truncateAtLine — line-boundary truncation helper
@@ -850,5 +850,17 @@ describe("page_state handler", () => {
     const result = await handlers.page_state({});
     const parsed = JSON.parse(result.content[0].text as string);
     expect(parsed.hasDialog).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Guard: snapshot filter schema has no zod default (intent owns its base)
+// ---------------------------------------------------------------------------
+describe("snapshotFilterSchema guard", () => {
+  it("parses undefined as undefined — no coerced default", () => {
+    // A zod .default() would coerce undefined to "interactive".
+    // The handler relies on filter being truly undefined when the caller
+    // omits it, so intent-based content intents pick base "all".
+    expect(snapshotFilterSchema.parse(undefined)).toBeUndefined();
   });
 });
