@@ -195,7 +195,7 @@ Multiple agents share one browser session. To avoid stepping on each other:
    ```
 
 3. **Ownership guard.** Action tools (`click`, `fill`, `scroll`, `press_key`,
-   `upload_file`, `history`, `handle_dialog`) will reject calls to a tab owned
+   `upload_file`, `history`) will reject calls to a tab owned
    by a different agent unless you pass `force: true`. This catches the
    "I clicked but another agent's tab moved" race. Prefer fixing the call
    (target your own tab) over `force: true`.

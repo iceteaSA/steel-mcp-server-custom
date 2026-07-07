@@ -122,9 +122,9 @@ context-budget-constrained agents:
 
 | Group    | Includes                                                          |
 |----------|-------------------------------------------------------------------|
-| `core`   | Always active. `go_to_url`, `click`, `fill`, `scroll`, `wait_for`, `press_key`, `handle_dialog`, `upload_file`, `snapshot`, `start_browser`, `stop_browser`. |
+| `core`   | Always active. `go_to_url`, `history`, `click`, `fill`, `scroll`, `wait_for`, `press_key`, `handle_dialog`, `upload_file`, `snapshot`, `get_page_text`, `start_browser`, `stop_browser`. |
 | `tabs`   | `list_tabs`, `new_tab`, `close_tabs`.                              |
-| `extract`| `get_page_text`, `get_links`, `get_attrs`, `evaluate`, `extract`, `fetch_urls`. |
+| `extract`| `get_links`, `get_attrs`, `evaluate`, `extract`, `fetch_urls`.     |
 | `media`  | `get_screenshot`, `download_file`.                                 |
 | `network`| `cookies`, `get_network`.                                         |
 | `auth`   | `create_profile`, `list_profiles`, `save_profile`, `delete_profile`, `credentials`, `use_credential`. |
@@ -133,6 +133,10 @@ context-budget-constrained agents:
 
 Precedence: `--toolsets a,b` CLI flag > `TOOLSETS` env var > all toolsets.
 Unknown names fail startup with a list of valid values.
+
+By default all 8 toolsets are active (34 tools); the `ai` toolset is gated on
+`ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` — without those env vars, `act` and
+`extract_ai` are not registered, even if `--toolsets=ai` is passed.
 
 ### Concurrency — multi-agent sessions
 
@@ -287,10 +291,11 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 | `act` | LLM-driven bounded micro-loop over a snapshot (1–5 steps). Gated on `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` |
 | `extract_ai` | LLM structured extraction from the current page (text or html, optional JSON Schema). Gated on `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` |
 
-**Ref targeting.** `click`, `fill`, `scroll`, `wait_for`, `press_key`, `handle_dialog`'s
-contexts, `get_attrs`, `extract`, and `upload_file` all accept `ref: "eN"` in place
-of `selector`. Refs come from `snapshot` and expire on navigation or page mutation —
+**Ref targeting.** `click`, `fill`, `scroll`, `wait_for`, `press_key`,
+`get_attrs`, `extract`, and `upload_file` accept `ref: "eN"` in place of
+`selector`. Refs come from `snapshot` and expire on navigation or page mutation —
 take a fresh snapshot after either. Pass exactly one of `selector` or `ref`.
+(`handle_dialog` accepts `tabId` + `owner` only — it has no `ref` or `force`.)
 
 **Frame targeting.** `click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot`
 accept `frame: "<name>" | "<url-substring>" | "<0-based index>"` to target an iframe.

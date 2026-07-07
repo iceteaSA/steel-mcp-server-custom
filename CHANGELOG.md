@@ -2,7 +2,7 @@
 
 ## [0.8.0] — 2026-07-07
 
-SOTA upgrade over the v0.6.x line: bun toolchain, snapshot-first interaction paradigm, Patchright anti-bot, MCP `registerTool`/`structuredContent` modernization, `--toolsets` filtering, and seven new tools.
+Toolchain switch to bun, accessibility-snapshot interaction model with `[ref=eN]` element targeting, Patchright instead of Playwright, MCP `registerTool` + `structuredContent` modernization, `--toolsets` filtering, and new tools (`snapshot`, `handle_dialog`, `upload_file`, `press_key`, `get_network`, `act`, `extract_ai`).
 
 ### Toolchain
 

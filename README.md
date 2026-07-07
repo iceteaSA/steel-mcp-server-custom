@@ -8,7 +8,7 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 
 ## Features
 
-- **35 browser tools** — snapshot-first interaction (a11y tree + ref targeting), navigate, click, fill forms, screenshot, extract text/links/attrs, evaluate JS, scroll, history, wait, dialog handling, file uploads, key presses, network inspection, batch URL fetching, declarative structured extraction
+- **34 browser tools** (36 with the optional AI tools enabled) — snapshot-first interaction (a11y tree + ref targeting), navigate, click, fill forms, screenshot, extract text/links/attrs, evaluate JS, scroll, history, wait, dialog handling, file uploads, key presses, network inspection, batch URL fetching, declarative structured extraction. `act` and `extract_ai` register only when `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` are set.
 - **Patchright browser engine** — drops the `Runtime.enable` CDP fingerprint that vanilla Playwright leaks; native binary stays compatible with all standard Playwright page APIs
 - **Snapshot-first paradigm** — `snapshot` returns an accessibility tree with stable `[ref=eN]` tokens; refs feed `click`/`fill`/`scroll`/`get_attrs`/`extract`/`press_key` directly without re-discovering selectors
 - **MCP 2025 best practices** — `server.registerTool` with `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` annotations and `outputSchema` → `structuredContent` on JSON tools
@@ -108,9 +108,9 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 
 ---
 
-## Tools (35)
+## Tools (34 default, 36 with AI tools)
 
-All page-interacting tools accept an optional `tabId`. Omit for current-active-tab; pass it for concurrent-agent safety. `click`, `fill`, `scroll`, `wait_for`, `get_attrs`, `extract`, `press_key`, `handle_dialog`, and `upload_file` also accept `ref: "eN"` from `snapshot` in place of a CSS `selector`. `click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot` accept `frame` to target an iframe by name, URL substring, or 0-based child index.
+All page-interacting tools accept an optional `tabId`. Omit for current-active-tab; pass it for concurrent-agent safety. `click`, `fill`, `scroll`, `wait_for`, `get_attrs`, `extract`, `press_key`, and `upload_file` also accept `ref: "eN"` from `snapshot` in place of a CSS `selector`. `click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot` accept `frame` to target an iframe by name, URL substring, or 0-based child index.
 
 | Tool | Description |
 |---|---|
