@@ -1,6 +1,7 @@
 import { describe, it, expect } from "bun:test";
 import { parseHTML } from "linkedom";
 import {
+  checkFingerprintConsistency,
   collapseWhitespace,
   isBotWall,
   detectErrorPage,
@@ -29,6 +30,88 @@ import {
   validateUrlPattern,
   type Link,
 } from "../helpers.js";
+
+// ---------------------------------------------------------------------------
+// checkFingerprintConsistency
+// ---------------------------------------------------------------------------
+describe("checkFingerprintConsistency", () => {
+  const base = {
+    webdriver: false,
+    languages: ["en-US"],
+    pluginsCount: 3,
+    timeZone: "America/New_York",
+    screen: { width: 1920, height: 1080 },
+  };
+
+  it("passes a mac-consistent fingerprint", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+    });
+    expect(result.every((r) => r.pass)).toBe(true);
+    expect(result.find((r) => r.check === "UA/platform consistency")?.pass).toBe(true);
+  });
+
+  it("passes a windows-consistent fingerprint", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "Win32",
+    });
+    expect(result.find((r) => r.check === "UA/platform consistency")?.pass).toBe(true);
+  });
+
+  it("flags UA Windows + platform MacIntel as mismatch", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+    });
+    const uaCheck = result.find((r) => r.check === "UA/platform consistency")!;
+    expect(uaCheck.pass).toBe(false);
+    expect(uaCheck.observed).toContain("platform=MacIntel");
+    expect(uaCheck.observed).toContain("Windows NT");
+  });
+
+  it("fails when webdriver is true", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      webdriver: true,
+    });
+    expect(result.find((r) => r.check === "webdriver hidden")?.pass).toBe(false);
+  });
+
+  it("fails when languages is empty", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      languages: [],
+    });
+    expect(result.find((r) => r.check === "languages non-empty")?.pass).toBe(false);
+  });
+
+  it("reports plugins count without failing", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      pluginsCount: 0,
+    });
+    const plugins = result.find((r) => r.check === "plugins count")!;
+    expect(plugins.pass).toBe(true);
+    expect(plugins.observed).toBe("plugins=0");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // collapseWhitespace

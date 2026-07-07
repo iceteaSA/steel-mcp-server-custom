@@ -1,6 +1,7 @@
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
-import { cleanErrorMessage } from "../helpers.js";
+import { checkFingerprintConsistency, cleanErrorMessage } from "../helpers.js";
+import { sleep } from "../utils.js";
 import type { ToolRegistrar } from "./shared.js";
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
@@ -100,21 +101,34 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "smoke_test",
     title: "Smoke Test",
-    description: `Self-test: navigates to example.com, checks fingerprint consistency, verifies stealth properties (canvas noise, WebGL spoofing, webdriver hidden), and reports CapSolver balance. Use after browser restarts or config changes to verify the browser is working correctly. Creates and cleans up its own test tab — does not affect your active tabs.`,
+    description: `Self-test: navigates to example.com and bot.sannysoft.com, checks fingerprint consistency against the real browser identity, reports headless-detection failures, and verifies CapSolver balance. Use after browser restarts or config changes to verify stealth posture. Creates and cleans up its own test tab — does not affect your active tabs.`,
     toolset: "debug",
     inputSchema: {},
     annotations: {
-      readOnlyHint: false,
+      readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: false,
       openWorldHint: true,
     },
     handler: async () => {
       try {
-        const { tabId, page } = await mgr.newTab("https://example.com");
+        // Background tab so the test never moves the caller's active pointer.
+        const { tabId, page } = await mgr.newTab(
+          "https://example.com",
+          "smoke:test",
+          undefined,
+          false,
+        );
         const results: Array<{ check: string; pass: boolean; detail: string }> = [];
+        const identity: {
+          userAgent?: string;
+          platform?: string;
+          tz?: string;
+          locale?: string;
+          screen?: { width: number; height: number };
+        } = {};
 
-        // 1. Navigation
+        // 1. Connectivity
         try {
           const title = await page.title();
           results.push({
@@ -126,60 +140,93 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           results.push({ check: "Navigation", pass: false, detail: (e as Error).message });
         }
 
-        // 2. Fingerprint
+        // 2. Fingerprint consistency — collect real browser identity.
         try {
-          const fp = await page.evaluate(() => ({
-            ua: navigator.userAgent,
-            platform: navigator.platform,
-            webdriver: navigator.webdriver,
-            plugins: navigator.plugins.length,
-            langs: navigator.languages,
-            webgl: (() => {
-              const c = document.createElement("canvas");
-              const gl = c.getContext("webgl");
-              if (!gl) return "none";
-              const d = gl.getExtension("WEBGL_debug_renderer_info");
-              return d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : "no ext";
-            })(),
-          }));
+          const raw = await page.evaluate(() => {
+            const uaData = (
+              navigator as Navigator & {
+                userAgentData?: {
+                  brands?: Array<{ brand: string; version: string }>;
+                  platform?: string;
+                  mobile?: boolean;
+                };
+              }
+            ).userAgentData;
+            return {
+              userAgent: navigator.userAgent,
+              platform: navigator.platform,
+              userAgentData: uaData
+                ? {
+                    brands: uaData.brands,
+                    platform: uaData.platform,
+                    mobile: uaData.mobile,
+                  }
+                : undefined,
+              webdriver: navigator.webdriver,
+              languages: Array.from(navigator.languages),
+              pluginsCount: navigator.plugins.length,
+              timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              screen: { width: screen.width, height: screen.height },
+            };
+          });
 
-          const uaMac = fp.ua.includes("Macintosh");
-          const platMac = fp.platform === "MacIntel";
-          results.push({
-            check: "UA → macOS",
-            pass: uaMac,
-            detail: fp.ua.substring(0, 80),
-          });
-          results.push({
-            check: "Platform match",
-            pass: uaMac === platMac,
-            detail: `platform=${fp.platform}`,
-          });
-          results.push({
-            check: "Webdriver hidden",
-            pass: fp.webdriver === false,
-            detail: `webdriver=${fp.webdriver}`,
-          });
-          results.push({
-            check: "Plugins spoofed",
-            pass: fp.plugins >= 3,
-            detail: `${fp.plugins} plugins`,
-          });
-          results.push({
-            check: "WebGL spoofed",
-            pass: fp.webgl !== "none" && !fp.webgl.includes("SwiftShader"),
-            detail: (fp.webgl as string).substring(0, 60),
-          });
-          results.push({
-            check: "Languages",
-            pass: fp.langs.length > 0,
-            detail: fp.langs.join(", "),
-          });
+          identity.userAgent = raw.userAgent;
+          identity.platform = raw.platform;
+          identity.tz = raw.timeZone;
+          identity.locale = raw.languages[0] ?? "unknown";
+          identity.screen = raw.screen;
+
+          const consistency = checkFingerprintConsistency(raw);
+          for (const c of consistency) {
+            results.push({ check: c.check, pass: c.pass, detail: c.observed });
+          }
         } catch (e) {
-          results.push({ check: "Fingerprint", pass: false, detail: (e as Error).message });
+          results.push({
+            check: "Fingerprint consistency",
+            pass: false,
+            detail: (e as Error).message,
+          });
         }
 
-        // 3. Canvas noise
+        // 3. Headless-detection probe on bot.sannysoft.com
+        let sannysoftFailures: string[] = [];
+        try {
+          await page.goto("https://bot.sannysoft.com", {
+            waitUntil: "domcontentloaded",
+            timeout: 20000,
+          });
+          // Wait for the test table to populate (passed/warn/failed cells).
+          await page
+            .waitForFunction(
+              () => document.querySelectorAll("td.failed, td.passed, td.warn").length >= 3,
+              { timeout: 15000 },
+            )
+            .catch(() => {});
+          // Give dynamic tests a moment to settle.
+          await sleep(2000);
+
+          sannysoftFailures = await page.evaluate(() => {
+            const failures: string[] = [];
+            for (const row of document.querySelectorAll("tr")) {
+              const cells = Array.from(row.querySelectorAll("td, th"));
+              if (cells.length < 2) continue;
+              const failedCell = cells.find((c) => c.classList.contains("failed"));
+              if (!failedCell) continue;
+              const label = (cells[0].textContent ?? "").trim().replace(/\s+/g, " ");
+              const status = (failedCell.textContent ?? "").trim().replace(/\s+/g, " ");
+              failures.push(`${label}: ${status || "failed"}`);
+            }
+            return failures;
+          });
+        } catch (e) {
+          results.push({
+            check: "Headless detection probe",
+            pass: false,
+            detail: (e as Error).message,
+          });
+        }
+
+        // 4. Canvas noise
         try {
           const noised = await page.evaluate(() => {
             const c = document.createElement("canvas");
@@ -200,7 +247,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           results.push({ check: "Canvas noise", pass: false, detail: (e as Error).message });
         }
 
-        // 4. CapSolver
+        // 5. CapSolver
         const apiKey = process.env.CAPSOLVER_API_KEY;
         if (apiKey) {
           try {
@@ -226,14 +273,61 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         // Clean up temp tab
         await mgr.closeTab(tabId).catch(() => {});
 
-        const passed = results.filter((r) => r.pass).length;
-        const total = results.length;
-        const lines = results.map((r) => `${r.pass ? "✓" : "✗"} ${r.check}: ${r.detail}`);
-        lines.push(`\n${passed}/${total} checks passed`);
+        // Build human-readable sections.
+        const lines: string[] = [];
+        lines.push("Connectivity:");
+        const nav = results.find((r) => r.check === "Navigation");
+        lines.push(
+          nav ? `${nav.pass ? "✓" : "✗"} ${nav.check}: ${nav.detail}` : "? Navigation: unknown",
+        );
+
+        lines.push("\nFingerprint consistency:");
+        const fpChecks = results.filter((r) =>
+          [
+            "webdriver hidden",
+            "UA/platform consistency",
+            "languages non-empty",
+            "plugins count",
+            "timeZone valid",
+            "screen dimensions",
+          ].includes(r.check),
+        );
+        for (const r of fpChecks) {
+          lines.push(`${r.pass ? "✓" : "✗"} ${r.check}: ${r.detail}`);
+        }
+
+        lines.push("\nHeadless detection:");
+        if (sannysoftFailures.length === 0) {
+          lines.push("No failures reported by bot.sannysoft.com");
+        } else {
+          for (const f of sannysoftFailures.slice(0, 20)) {
+            lines.push(`- ${f}`);
+          }
+        }
+
+        lines.push("\nIdentity:");
+        lines.push(`timeZone: ${identity.tz ?? "unknown"}`);
+        lines.push(`locale: ${identity.locale ?? "unknown"}`);
+        lines.push(
+          `screen: ${identity.screen ? `${identity.screen.width}x${identity.screen.height}` : "unknown"}`,
+        );
+        lines.push(`ua: ${identity.userAgent ?? "unknown"}`);
+        lines.push(`platform: ${identity.platform ?? "unknown"}`);
+        lines.push(
+          `\nNote: browser tz/locale reflect the Steel container config, not the proxy geo. Mismatches vs proxy geo require Steel-side configuration.`,
+        );
+
+        const fpPassed = fpChecks.filter((r) => r.pass).length;
+        const fpTotal = fpChecks.length;
+        lines.push(`\n${fpPassed}/${fpTotal} fingerprint consistency checks passed`);
 
         return {
           content: [{ type: "text", text: lines.join("\n") }],
-          ...(passed < total ? { isError: true } : {}),
+          structuredContent: {
+            checks: results,
+            headlessFailures: sannysoftFailures.slice(0, 20),
+            identity,
+          },
         };
       } catch (err) {
         const error = err as Error;

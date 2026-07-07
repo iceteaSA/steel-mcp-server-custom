@@ -218,6 +218,134 @@ export function capText(s: string, maxChars: number): string {
   return s.slice(0, maxChars) + "…";
 }
 
+// ---------------------------------------------------------------------------
+// Fingerprint consistency — used by smoke_test, unit-testable without a browser
+// ---------------------------------------------------------------------------
+
+/** Raw browser identity collected by smoke_test via page.evaluate(). */
+export interface FingerprintInput {
+  userAgent: string;
+  platform: string;
+  userAgentData?: {
+    brands?: Array<{ brand: string; version: string }>;
+    platform?: string;
+    mobile?: boolean;
+  };
+  webdriver: boolean | undefined;
+  languages: readonly string[] | string[];
+  pluginsCount: number;
+  timeZone: string;
+  screen?: { width: number; height: number };
+}
+
+/** One consistency check result. */
+export interface FingerprintCheck {
+  check: string;
+  observed: string;
+  pass: boolean;
+}
+
+/**
+ * Consistency checks for a browser fingerprint. Never hardcodes an expected
+ * OS — it compares the platform token in the UA to navigator.platform (and
+ * navigator.userAgentData.platform when present). Detection signals such as
+ * plugins.length and screen size are reported, not hard-failed.
+ */
+export function checkFingerprintConsistency(fp: FingerprintInput): FingerprintCheck[] {
+  const results: FingerprintCheck[] = [];
+
+  // 1. webdriver — the strongest bot tell.
+  const webdriverOk = fp.webdriver === false || fp.webdriver === undefined || fp.webdriver === null;
+  results.push({
+    check: "webdriver hidden",
+    observed: `webdriver=${String(fp.webdriver)}`,
+    pass: webdriverOk,
+  });
+
+  // 2. UA/platform consistency — rough family match.
+  const uaFamily = inferUaPlatformFamily(fp.userAgent);
+  const navFamily = normalizePlatformFamily(fp.platform);
+  const uaDataFamily = fp.userAgentData?.platform
+    ? normalizePlatformFamily(fp.userAgentData.platform)
+    : undefined;
+
+  const familyMatch = uaFamily === undefined || uaFamily === navFamily;
+  const uaDataMatch = uaDataFamily === undefined || uaDataFamily === navFamily;
+  const observedParts = [
+    `ua=${fp.userAgent.slice(0, 80)}`,
+    `platform=${fp.platform}`,
+    fp.userAgentData?.platform ? `userAgentData.platform=${fp.userAgentData.platform}` : null,
+  ].filter((s): s is string => !!s);
+
+  results.push({
+    check: "UA/platform consistency",
+    observed: observedParts.join(", "),
+    pass: familyMatch && uaDataMatch,
+  });
+
+  // 3. languages
+  const langs = Array.isArray(fp.languages) ? fp.languages : [];
+  results.push({
+    check: "languages non-empty",
+    observed: `languages=${langs.slice(0, 5).join(",") || "(empty)"}`,
+    pass: langs.length > 0,
+  });
+
+  // 4. plugins — reported as a signal, not a hard fail.
+  results.push({
+    check: "plugins count",
+    observed: `plugins=${fp.pluginsCount}`,
+    pass: true,
+  });
+
+  // 5. timeZone — validate that the browser reports a real IANA zone.
+  let tzValid = false;
+  if (fp.timeZone) {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: fp.timeZone });
+      tzValid = true;
+    } catch {
+      tzValid = false;
+    }
+  }
+  results.push({
+    check: "timeZone valid",
+    observed: `timeZone=${fp.timeZone || "(empty)"}`,
+    pass: tzValid,
+  });
+
+  // 6. screen dimensions — signal only.
+  if (fp.screen) {
+    results.push({
+      check: "screen dimensions",
+      observed: `screen=${fp.screen.width}x${fp.screen.height}`,
+      pass: true,
+    });
+  }
+
+  return results;
+}
+
+function inferUaPlatformFamily(userAgent: string): string | undefined {
+  const ua = userAgent.toLowerCase();
+  if (ua.includes("windows nt") || ua.includes("win64") || ua.includes("win32")) return "windows";
+  if (ua.includes("macintosh") || ua.includes("mac os x")) return "mac";
+  if (ua.includes("linux") || ua.includes("x11")) return "linux";
+  if (ua.includes("android")) return "android";
+  if (ua.includes("iphone") || ua.includes("ipad") || ua.includes("ipod")) return "ios";
+  return undefined;
+}
+
+function normalizePlatformFamily(platform: string): string {
+  const p = platform.toLowerCase();
+  if (p.startsWith("win")) return "windows";
+  if (p === "macintel" || p.startsWith("mac")) return "mac";
+  if (p.startsWith("linux")) return "linux";
+  if (p === "android") return "android";
+  if (p === "iphone" || p === "ipad" || p === "ipod") return "ios";
+  return p;
+}
+
 /**
  * Detect Playwright "browser/context has been closed" errors. These arise when
  * the browser process died, the Steel session expired, or a context got
