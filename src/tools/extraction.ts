@@ -1290,8 +1290,11 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
           storeSnapshot(resolvedTabId, result.text);
         }
 
-        // Filter + intent-scope + truncate for display.
-        const filtered = filterTree(result.text, filter ?? "interactive");
+        // When an intent is given, its own role set narrows the FULL tree (base
+        // "all"), so content intents (read_content / extract_data) aren't pre-stripped
+        // by the interactive default. An explicit filter arg is still honored.
+        const baseFilter = intent ? (filter ?? "all") : (filter ?? "interactive");
+        const filtered = filterTree(result.text, baseFilter);
         const scoped = intent ? applyIntent(filtered, intent) : filtered;
         const displayText = truncateForDisplay(scoped, maxChars ?? 8000);
 

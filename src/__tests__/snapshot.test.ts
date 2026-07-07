@@ -716,6 +716,64 @@ describe("snapshot handler (diff + intent)", () => {
     // paragraph "Welcome" should be dropped by intent filter
     expect(text).not.toContain("Welcome");
   });
+
+  it("intent=read_content (no filter arg) sees the full tree — heading survives", async () => {
+    // Regression: content intents need the FULL tree, not the interactive default.
+    // Without this fix, the interactive filter strips headings BEFORE applyIntent runs.
+    const contentTree =
+      '- generic @e1\n  - heading "Welcome" @e2\n  - paragraph "Article body" @e3\n  - textbox "Password" @e4';
+    const { register, handlers } = makeRegistrar();
+    const mockPage = {
+      locator: (_sel: string) => ({
+        ariaSnapshot: async (_opts?: unknown) => contentTree,
+      }),
+      frames: () => [],
+    } as any;
+    const mgr = {
+      getPage: async () => mockPage,
+      resolveTab: () => 1,
+    } as unknown as BrowserManager;
+
+    clearAllSnapshots();
+    registerExtraction(register, mgr, env);
+    const result = await handlers.snapshot({ intent: "read_content" });
+    const text = result.content[0].text as string;
+    expect(result.isError).toBeUndefined();
+    // heading + paragraph survive (read_content role set)
+    expect(text).toContain("heading");
+    expect(text).toContain("Welcome");
+    expect(text).toContain("paragraph");
+    // textbox "Password" NOT in read_content role set — dropped
+    expect(text).not.toContain("Password");
+  });
+
+  it("intent=login (no filter arg) still filters by login roles correctly", async () => {
+    const loginTree =
+      '- generic @e1\n  - heading "Title" @e2\n  - textbox "Email" @e3\n  - button "Login" @e4\n  - paragraph "Intro" @e5';
+    const { register, handlers } = makeRegistrar();
+    const mockPage = {
+      locator: (_sel: string) => ({
+        ariaSnapshot: async (_opts?: unknown) => loginTree,
+      }),
+      frames: () => [],
+    } as any;
+    const mgr = {
+      getPage: async () => mockPage,
+      resolveTab: () => 1,
+    } as unknown as BrowserManager;
+
+    clearAllSnapshots();
+    registerExtraction(register, mgr, env);
+    const result = await handlers.snapshot({ intent: "login" });
+    const text = result.content[0].text as string;
+    expect(result.isError).toBeUndefined();
+    expect(text).toContain("textbox");
+    expect(text).toContain("button");
+    expect(text).toContain("Login");
+    // heading "Title" + paragraph "Intro" not in login role set
+    expect(text).not.toContain("Title");
+    expect(text).not.toContain("Intro");
+  });
 });
 
 // ---------------------------------------------------------------------------
