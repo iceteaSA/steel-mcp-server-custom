@@ -772,7 +772,14 @@ export class BrowserManager {
       }
     } else {
       // Local mode — launch Playwright Chromium directly.
-      this.browser = await chromium.launch({ headless: false });
+      // Prefer the real system Chrome (patchright best practice for stealth:
+      // channel:"chrome" + headless:false + no custom UA). Fall back to
+      // bundled Chromium if the channel isn't installed on this host.
+      try {
+        this.browser = await chromium.launch({ headless: false, channel: "chrome" });
+      } catch {
+        this.browser = await chromium.launch({ headless: false });
+      }
       this.browserContext = await this.browser.newContext({
         viewport: {
           width: this.env.DEFAULT_VIEWPORT_WIDTH,

@@ -516,6 +516,12 @@ context (non-profile tabs), HTTP and JS fingerprints are unified. Profile
 contexts have full JS-level stealth but HTTP headers show the real Chrome UA
 (see profile limitation above).
 
+Any UA-vs-navigator.platform mismatch (e.g. UA claiming macOS on a Linux host) is
+a Steel-side config issue — the MCP layer cannot control how the Steel container
+launches the browser. Patchright's recommended launch args (`channel:"chrome"`,
+`headless:false`, no custom UA) apply to LOCAL mode only, which now prefers
+system Chrome when available.
+
 ## Calling Routes
 
 Two ways this MCP is reached. Escaping rules differ.

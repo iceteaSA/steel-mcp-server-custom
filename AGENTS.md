@@ -237,6 +237,13 @@ src/
 **Browser layer:** Direct **Patchright** — `chromium` from the `patchright` package (a
 patched Playwright build that bypasses the `Runtime.enable` stealth fingerprint). All
 page APIs match standard Playwright.
+
+**Stealth config — STEEL vs LOCAL mode.** In STEEL mode the browser runs inside the Steel
+container; UA/platform mismatches (e.g. UA claiming macOS on a Linux host) are Steel-side
+config, not the MCP layer. Patchright guidance (channel:"chrome", headless:false, no custom
+UA) can only be applied to Steel's own browser launch. In LOCAL mode the MCP launches
+Chromium directly and now prefers `channel:"chrome"` (system Chrome) when available, falling
+back to the bundled Chromium.
 - `page.viewportSize()` / `page.setViewportSize({ width, height })`
 - `page.screenshot(options)` — `PageScreenshotOptions`; `scale` is `'css'|'device'` not numeric
 - `page.goto(url, { waitUntil: "domcontentloaded" })` — use domcontentloaded not load
