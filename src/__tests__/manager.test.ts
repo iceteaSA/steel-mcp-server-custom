@@ -889,13 +889,17 @@ describe("getPage crash recovery", () => {
     expect((freshPage as any)._url).toBe("https://recovered.test/");
   });
 
-  it("recovers an explicit tabId when the page is closed", async () => {
+  it("recovers an explicit tabId when url() throws on a detached/crashed page", async () => {
     const mgr = setupMgr();
     mgr.initialized = true;
     mgr.primaryTabId = 999;
     mgr.tabs.set(999, fakePage());
 
-    const deadPage = fakePage({ isClosed: () => true });
+    const deadPage = fakePage({
+      url: () => {
+        throw new Error("Target page, context or browser has been closed");
+      },
+    });
     const freshPage = fakePage({ url: () => "https://explicit.test/" });
     const context = fakeContext([freshPage]);
     mgr.browserContext = context as any;

@@ -440,9 +440,19 @@ export class BrowserManager {
     }
   }
 
-  /** Return true if a page reference is unusable (closed). Zero CDP round-trips. */
+  /**
+   * Return true if a page reference is unusable (closed or detached/crashed).
+   * `page.isClosed()` is free. `page.url()` is synchronous and throws on a
+   * detached/crashed target, so it adds no healthy-path CDP round-trip.
+   */
   private isPageDead(page?: Page): boolean {
-    return !page || page.isClosed();
+    if (!page || page.isClosed()) return true;
+    try {
+      page.url();
+      return false;
+    } catch {
+      return true;
+    }
   }
 
   /** Start the idle sweeper. Idempotent; no-op if TAB_IDLE_TIMEOUT_MS=0. */
@@ -913,9 +923,9 @@ export class BrowserManager {
     if (tabId !== undefined || owner) {
       const resolved = this.resolveTab({ tabId, owner, force });
       const page = this.tabs.get(resolved);
-      if (!page || (await this.isPageDead(page))) {
+      if (!page || this.isPageDead(page)) {
         const recovered = await this._recoverTab(resolved);
-        if (await this.isPageDead(recovered)) {
+        if (this.isPageDead(recovered)) {
           throw new Error(`Tab ${resolved} crashed and could not be restored.`);
         }
         this.touchTab(resolved, owner);
@@ -929,7 +939,7 @@ export class BrowserManager {
 
     // Legacy path: getPage() with no args at all
     const page = this.currentPage;
-    if (!(await this.isPageDead(page))) {
+    if (!this.isPageDead(page)) {
       this.touchTab(this.currentTabId);
       this.tabLastUrl.set(this.currentTabId, page!.url());
       return page!;
@@ -937,7 +947,7 @@ export class BrowserManager {
 
     // Current tab missing or closed/crashed — recreate in-place and retry once.
     const recovered = await this._recoverTab(this.currentTabId);
-    if (await this.isPageDead(recovered)) {
+    if (this.isPageDead(recovered)) {
       throw new Error(`Tab ${this.currentTabId} crashed and could not be restored.`);
     }
     this.touchTab(this.currentTabId);
