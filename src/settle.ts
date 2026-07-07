@@ -43,9 +43,9 @@ export const SETTLE_INIT_SCRIPT = `(() => {
       var p;
       // Native fetch can throw synchronously (e.g. invalid URL scheme);
       // catch + decrement so a poisoned inflight doesn't stall settle.
-      try { p = _fetch.apply(this, arguments); } catch (e) { state.inflight--; throw e; }
-      if (p && typeof p.finally === 'function') return p.finally(function fc() { state.inflight--; });
-      state.inflight--;
+      try { p = _fetch.apply(this, arguments); } catch (e) { state.inflight = Math.max(0, state.inflight - 1); throw e; }
+      if (p && typeof p.finally === 'function') return p.finally(function fc() { state.inflight = Math.max(0, state.inflight - 1); });
+      state.inflight = Math.max(0, state.inflight - 1);
       return p;
     };
   }
@@ -54,10 +54,19 @@ export const SETTLE_INIT_SCRIPT = `(() => {
   var _send = XMLHttpRequest.prototype.send;
   XMLHttpRequest.prototype.send = function ss() {
     state.inflight++;
-    this.addEventListener('loadend', function se() { state.inflight--; }, { once: true });
+    // Named handler so the sync-throw catch path can removeEventListener
+    // to prevent a later loadend from double-decrementing.
+    var onEnd = function se() { state.inflight = Math.max(0, state.inflight - 1); };
+    this.addEventListener('loadend', onEnd, { once: true });
     // Native send throws synchronously for invalid state (e.g. send before
-    // open, or double-send).  Decrement on throw so inflight isn't leaked.
-    try { return _send.apply(this, arguments); } catch (e) { state.inflight--; throw e; }
+    // open, or double-send).  Remove the listener before decrementing so a
+    // later loadend event doesn't push the counter below zero.
+    try { return _send.apply(this, arguments); }
+    catch (e) {
+      this.removeEventListener('loadend', onEnd);
+      state.inflight = Math.max(0, state.inflight - 1);
+      throw e;
+    }
   };
 
   // -- MutationObserver --
