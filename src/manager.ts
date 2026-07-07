@@ -685,7 +685,10 @@ export class BrowserManager {
         `Tab ${id} is the primary tab and cannot be closed. Closing it would poison Steel's session (page_refresh failure). Use stop_browser to end the session instead.`,
       );
     }
-    await page.close().catch(() => {});
+
+    // Run bookkeeping BEFORE page.close() so the close-event listener
+    // (registered by allocateTab) doesn't race ahead and delete entries
+    // before the fallback logic can repair ownerActiveTab pointers.
     this.tabs.delete(id);
     this.tabOwners.delete(id);
     this.tabLastActivity.delete(id);
@@ -722,6 +725,10 @@ export class BrowserManager {
       const profile = this.profiles.get(profileName);
       if (profile) profile.tabIds.delete(id);
     }
+
+    // Fire the actual page close — the allocateTab listener will run its
+    // own cleanup as a safety net (no-op since entries already deleted).
+    await page.close().catch(() => {});
 
     // If we closed the active tab, switch to the highest remaining tab.
     if (id === this.currentTabId) {

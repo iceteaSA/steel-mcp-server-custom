@@ -312,8 +312,10 @@ NOTE: when clear=true with a filter, ALL entries captured up to read time are re
         let logs = mgr.consoleLogs;
         if (level !== "all") logs = logs.filter((m) => m.level === level);
         if (tabId !== undefined) logs = logs.filter((m) => m.tabId === tabId);
+        // Owner filter excludes unattributed entries (tabId === undefined)
+        // so logs from unregistered pages don't leak across owners.
         if (ownerTabIds)
-          logs = logs.filter((m) => m.tabId === undefined || ownerTabIds.has(m.tabId));
+          logs = logs.filter((m) => m.tabId !== undefined && ownerTabIds.has(m.tabId));
         const slice = logs.slice(-maxEntries);
 
         if (clear) {

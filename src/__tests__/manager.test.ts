@@ -39,15 +39,33 @@ const mockEnv: Env = {
   TOOLSETS: undefined,
 };
 
+/** Minimal EventEmitter so fake pages can drive close events. */
+type EventMap = Record<string, Array<(...args: unknown[]) => void>>;
+
 function fakePage(overrides: Partial<Record<string, unknown>> = {}): Page {
-  return {
+  const events: EventMap = {};
+  const emit = (event: string, ...args: unknown[]) => {
+    const handlers = events[event];
+    if (handlers) for (const fn of handlers) fn(...args);
+  };
+  const page: any = {
     isClosed: () => false,
-    close: async () => {},
-    on: () => {},
+    // When close() is called, fire the stored "close" handlers — matching
+    // the real Playwright behaviour that triggers page.on("close") listeners.
+    close: async () => {
+      (page.isClosed as () => boolean) = () => true;
+      emit("close");
+    },
+    on: (event: string, fn: (...args: unknown[]) => void) => {
+      (events[event] ??= []).push(fn);
+    },
     url: () => "about:blank",
     title: async () => "Test",
+    // Expose for tests: fire a stored event handler without calling close().
+    _emit: (event: string, ...args: unknown[]) => emit(event, ...args),
     ...overrides,
   } as unknown as Page;
+  return page;
 }
 
 /** Set up a BrowserManager with direct map access for test scaffolding. */
@@ -65,13 +83,32 @@ function setupMgr(): any {
   return mgr;
 }
 
-/** Register a live tab with an owner. Returns the assigned tabId. */
+/** Register a live tab with an owner. Returns the assigned tabId.
+ *  Mimics allocateTab: stores maps + registers a close-event listener
+ *  that cleans up bookkeeping when the tab is closed externally. */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function addTab(mgr: any, owner?: string, overrides?: Partial<Record<string, unknown>>): number {
   const id = mgr.nextTabId++;
-  mgr.tabs.set(id, fakePage(overrides));
+  const page = fakePage(overrides);
+  mgr.tabs.set(id, page);
   if (owner) mgr.tabOwners.set(id, owner);
   mgr.tabLastActivity.set(id, Date.now());
+  // Allocate-tab-style close listener — identical to the real path in
+  // manager.allocateTab. The fake page stores handlers so _emit("close")
+  // drives the same cleanup sequence that Playwright would trigger.
+  page.on("close", () => {
+    mgr.tabs.delete(id);
+    mgr.tabOwners.delete(id);
+    mgr.tabLastActivity.delete(id);
+    for (const [o, activeId] of mgr.ownerActiveTab) {
+      if (activeId === id) mgr.ownerActiveTab.delete(o);
+    }
+    const profileName = mgr.tabToProfile?.get(id);
+    if (profileName) {
+      mgr.tabToProfile.delete(id);
+      mgr.profiles?.get(profileName)?.tabIds?.delete(id);
+    }
+  });
   return id;
 }
 
@@ -276,6 +313,46 @@ describe("closeTab — ownerActiveTab cleanup", () => {
 
     await mgr.closeTab(tab1);
     expect(mgr.ownerActiveTab.has("agent-a")).toBe(false);
+  });
+
+  // The close-event listener registered by allocateTab (mirrored in addTab)
+  // handles cleanup when a page closes externally. These tests fire the
+  // event directly — no inline closeTab path — to verify the listener
+  // alone produces correct map state.
+
+  it("close event removes ownerActiveTab entry when tab closed externally", () => {
+    const mgr = setupMgr();
+    mgr.primaryTabId = 999;
+    mgr.tabs.set(999, fakePage());
+
+    const tab1 = addTab(mgr, "agent-a");
+    mgr.ownerActiveTab.set("agent-a", tab1);
+
+    // External close: fire the event without going through closeTab.
+    (mgr.tabs.get(tab1) as any)._emit("close");
+
+    expect(mgr.tabs.has(tab1)).toBe(false);
+    expect(mgr.tabOwners.has(tab1)).toBe(false);
+    expect(mgr.tabLastActivity.has(tab1)).toBe(false);
+    expect(mgr.ownerActiveTab.has("agent-a")).toBe(false);
+  });
+
+  it("close event does not disturb other owners' entries", () => {
+    const mgr = setupMgr();
+    mgr.primaryTabId = 999;
+    mgr.tabs.set(999, fakePage());
+
+    const tabA = addTab(mgr, "agent-a");
+    const tabB = addTab(mgr, "agent-b");
+    mgr.ownerActiveTab.set("agent-a", tabA);
+    mgr.ownerActiveTab.set("agent-b", tabB);
+
+    (mgr.tabs.get(tabA) as any)._emit("close");
+
+    // agent-a's entry removed, agent-b's still there
+    expect(mgr.ownerActiveTab.has("agent-a")).toBe(false);
+    expect(mgr.ownerActiveTab.get("agent-b")).toBe(tabB);
+    expect(mgr.tabOwners.get(tabB)).toBe("agent-b");
   });
 });
 

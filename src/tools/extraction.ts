@@ -16,7 +16,7 @@ import {
   type Link,
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
-import { tabTarget } from "./shared.js";
+import { tabTarget, tabTargetForce } from "./shared.js";
 
 // Singleton — configured once, reused across calls.
 const turndown = new TurndownService({
@@ -741,7 +741,7 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
         .describe(
           "Call the global wait after evaluation (useful if the expression triggers async side effects). Default: false.",
         ),
-      ...tabTarget,
+      ...tabTargetForce,
     },
     annotations: {
       readOnlyHint: false,
@@ -758,6 +758,7 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
       waitAfter = false,
       tabId,
       owner,
+      force,
     }) => {
       try {
         // Syntax-check the expression before sending to the browser.
@@ -769,7 +770,7 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
           };
         }
 
-        const page = await mgr.getPage({ tabId, owner });
+        const page = await mgr.getPage({ tabId, owner, force });
         let result: unknown;
         if (selector) {
           const wrapped = `(function(){ const el = document.querySelector(${JSON.stringify(
