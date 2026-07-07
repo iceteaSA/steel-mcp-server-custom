@@ -635,47 +635,90 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
       openWorldHint: true,
     },
     handler: async ({ selector, ref, attrs, limit = 50, maxCharsPerAttr = 2000, tabId, owner }) => {
-      const sel = toSelector({ selector, ref });
+      let sel = "";
       try {
+        sel = toSelector({ selector, ref });
         const page = await mgr.getPage({ tabId, owner });
-        const results = await page.evaluate(
-          ({
-            sel,
-            attrNames,
-            maxChars,
-          }: {
-            sel: string;
-            attrNames: string[];
-            maxChars: number;
-          }) => {
-            const nodes = Array.from(document.querySelectorAll(sel));
-            const trunc = (s: string | null): string | null => {
-              if (s === null) return null;
-              if (maxChars <= 0 || s.length <= maxChars) return s;
-              return s.slice(0, maxChars) + "…[truncated]";
-            };
-            return nodes.map((el) => {
-              const out: Record<string, string | null> = {};
-              for (const name of attrNames) {
-                if (name === "text") {
-                  const raw = (el as HTMLElement).innerText ?? el.textContent ?? "";
-                  out[name] = trunc(
-                    raw
-                      .replace(/[^\S\n]+/g, " ")
-                      .replace(/\n{3,}/g, "\n\n")
-                      .trim(),
-                  );
-                } else if (name === "html") {
-                  out[name] = trunc((el as HTMLElement).outerHTML ?? null);
-                } else {
-                  out[name] = trunc((el as Element).getAttribute(name));
+
+        // aria-ref is a Playwright-internal selector engine — it is not
+        // visible to page.evaluate / querySelectorAll.  When a ref-based
+        // selector is given, resolve element handles via locator first.
+        const isRef = sel.startsWith("aria-ref=");
+        let results: Array<Record<string, string | null>>;
+
+        if (isRef) {
+          const handles = await page.locator(sel).all();
+          results = [];
+          for (const handle of handles) {
+            const record = await handle.evaluate(
+              (el, { attrNames, maxChars }) => {
+                const trunc = (s: string | null): string | null => {
+                  if (s === null) return null;
+                  if (maxChars <= 0 || s.length <= maxChars) return s;
+                  return s.slice(0, maxChars) + "…[truncated]";
+                };
+                const out: Record<string, string | null> = {};
+                for (const name of attrNames) {
+                  if (name === "text") {
+                    const raw = (el as HTMLElement).innerText ?? el.textContent ?? "";
+                    out[name] = trunc(
+                      raw
+                        .replace(/[^\S\n]+/g, " ")
+                        .replace(/\n{3,}/g, "\n\n")
+                        .trim(),
+                    );
+                  } else if (name === "html") {
+                    out[name] = trunc((el as HTMLElement).outerHTML ?? null);
+                  } else {
+                    out[name] = trunc((el as Element).getAttribute(name));
+                  }
                 }
-              }
-              return out;
-            });
-          },
-          { sel, attrNames: attrs, maxChars: maxCharsPerAttr },
-        );
+                return out;
+              },
+              { attrNames: attrs, maxChars: maxCharsPerAttr },
+            );
+            results.push(record);
+          }
+        } else {
+          results = await page.evaluate(
+            ({
+              sel: cssSel,
+              attrNames,
+              maxChars,
+            }: {
+              sel: string;
+              attrNames: string[];
+              maxChars: number;
+            }) => {
+              const nodes = Array.from(document.querySelectorAll(cssSel));
+              const trunc = (s: string | null): string | null => {
+                if (s === null) return null;
+                if (maxChars <= 0 || s.length <= maxChars) return s;
+                return s.slice(0, maxChars) + "…[truncated]";
+              };
+              return nodes.map((el) => {
+                const out: Record<string, string | null> = {};
+                for (const name of attrNames) {
+                  if (name === "text") {
+                    const raw = (el as HTMLElement).innerText ?? el.textContent ?? "";
+                    out[name] = trunc(
+                      raw
+                        .replace(/[^\S\n]+/g, " ")
+                        .replace(/\n{3,}/g, "\n\n")
+                        .trim(),
+                    );
+                  } else if (name === "html") {
+                    out[name] = trunc((el as HTMLElement).outerHTML ?? null);
+                  } else {
+                    out[name] = trunc((el as Element).getAttribute(name));
+                  }
+                }
+                return out;
+              });
+            },
+            { sel: sel, attrNames: attrs, maxChars: maxCharsPerAttr },
+          );
+        }
 
         const capped = limit > 0 ? results.slice(0, limit) : results;
         const truncated = capped.length < results.length;
@@ -875,44 +918,86 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
       openWorldHint: true,
     },
     handler: async ({ selector, ref, fields, limit = 20, tabId, owner }) => {
-      const sel = toSelector({ selector, ref });
+      let sel = "";
       try {
+        sel = toSelector({ selector, ref });
         const page = await mgr.getPage({ tabId, owner });
 
-        const evalArg = {
-          sel,
-          fieldMap: fields as Record<string, string>,
-          maxItems: limit,
-        };
-        const results: Array<Record<string, string | null>> = await page.evaluate((args) => {
-          const roots = Array.from(document.querySelectorAll(args.sel)).slice(0, args.maxItems);
-          return roots.map((root) => {
-            const record: Record<string, string | null> = {};
-            for (const [name, spec] of Object.entries(args.fieldMap)) {
-              const atIdx = spec.lastIndexOf("@");
-              let subSel: string;
-              let attr: string | null = null;
-              if (atIdx > 0) {
-                subSel = spec.slice(0, atIdx);
-                attr = spec.slice(atIdx + 1);
-              } else if (spec === ".") {
-                record[name] = root.textContent?.trim() ?? null;
-                continue;
-              } else {
-                subSel = spec;
-              }
-              const el = root.querySelector(subSel);
-              if (!el) {
-                record[name] = null;
-              } else if (attr) {
-                record[name] = el.getAttribute(attr);
-              } else {
-                record[name] = el.textContent?.trim() ?? null;
-              }
-            }
-            return record;
-          });
-        }, evalArg);
+        // aria-ref is a Playwright-internal selector engine — invisible to
+        // page.evaluate / querySelectorAll.  Resolve element handles via
+        // locator when a ref-based selector is given.
+        const isRef = sel.startsWith("aria-ref=");
+        let results: Array<Record<string, string | null>>;
+
+        if (isRef) {
+          const handles = await page.locator(sel).all();
+          results = [];
+          for (const handle of handles.slice(0, limit)) {
+            const record = await handle.evaluate(
+              (root, { fieldMap }) => {
+                const rec: Record<string, string | null> = {};
+                for (const [name, spec] of Object.entries(fieldMap)) {
+                  const atIdx = spec.lastIndexOf("@");
+                  let subSel: string;
+                  let attr: string | null = null;
+                  if (atIdx > 0) {
+                    subSel = spec.slice(0, atIdx);
+                    attr = spec.slice(atIdx + 1);
+                  } else if (spec === ".") {
+                    rec[name] = root.textContent?.trim() ?? null;
+                    continue;
+                  } else {
+                    subSel = spec;
+                  }
+                  const el = root.querySelector(subSel);
+                  if (!el) {
+                    rec[name] = null;
+                  } else if (attr) {
+                    rec[name] = el.getAttribute(attr);
+                  } else {
+                    rec[name] = el.textContent?.trim() ?? null;
+                  }
+                }
+                return rec;
+              },
+              { fieldMap: fields as Record<string, string> },
+            );
+            results.push(record);
+          }
+        } else {
+          results = await page.evaluate(
+            (args) => {
+              const roots = Array.from(document.querySelectorAll(args.sel)).slice(0, args.maxItems);
+              return roots.map((root) => {
+                const record: Record<string, string | null> = {};
+                for (const [name, spec] of Object.entries(args.fieldMap)) {
+                  const atIdx = spec.lastIndexOf("@");
+                  let subSel: string;
+                  let attr: string | null = null;
+                  if (atIdx > 0) {
+                    subSel = spec.slice(0, atIdx);
+                    attr = spec.slice(atIdx + 1);
+                  } else if (spec === ".") {
+                    record[name] = root.textContent?.trim() ?? null;
+                    continue;
+                  } else {
+                    subSel = spec;
+                  }
+                  const el = root.querySelector(subSel);
+                  if (!el) {
+                    record[name] = null;
+                  } else if (attr) {
+                    record[name] = el.getAttribute(attr);
+                  } else {
+                    record[name] = el.textContent?.trim() ?? null;
+                  }
+                }
+                return record;
+              });
+            },
+            { sel, fieldMap: fields as Record<string, string>, maxItems: limit },
+          );
+        }
 
         if (results.length === 0) {
           return {

@@ -237,6 +237,12 @@ describe("non-browser tools", () => {
     // Cleanup
     await fs.rm(path.join(profileDir, "fake-profile.json"), { force: true });
   });
+
+  it("click with both selector and ref returns isError (not protocol error)", async () => {
+    const r = await client.tool(110, "click", { selector: "#main", ref: "e5" });
+    expect(client.isError(r)).toBe(true);
+    expect(client.getText(r)).toContain("Pass selector OR ref, not both");
+  });
 });
 
 // ---------------------------------------------------------------------------

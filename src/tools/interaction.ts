@@ -75,8 +75,9 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
       owner,
       force,
     }) => {
-      const sel = toSelector({ selector, ref });
+      let sel = "";
       try {
+        sel = toSelector({ selector, ref });
         const page = await mgr.getPage({ tabId, owner, force });
         const beforeUrl = page.url();
         await page.click(sel, { timeout });
@@ -192,9 +193,11 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
       owner,
       force,
     }) => {
-      // Resolve refs to selectors before the main logic.
-      // Mutates f.selector in-place so the rest of the handler sees
-      // resolved selectors without further changes.
+      // Batched kind-detection: one evaluate call checks existence for ALL
+      // CSS-selector fields and auto-detects kinds for fields lacking an
+      // explicit `kind`.  Ref-based selectors are resolved individually via
+      // locator — aria-ref is a Playwright-internal engine, invisible to
+      // page.evaluate/querySelectorAll.
       type FieldKind = "text" | "check" | "radio" | "select";
 
       try {
@@ -205,10 +208,37 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
 
         const page = await mgr.getPage({ tabId, owner, force });
 
-        // One batch existence check for every selector (explicit + implicit).
+        // Split selectors: CSS pass through evaluate; refs through locator.
         const allSelectors = fields.map((f: { selector: string }) => f.selector);
-        const infoMap: Record<string, { tag: string; type: string } | null> =
-          allSelectors.length > 0 ? await page.evaluate(detectFieldsInPage, allSelectors) : {};
+        const cssSelectors = allSelectors.filter((s: string) => !s.startsWith("aria-ref="));
+        const refSelectors = allSelectors.filter((s: string) => s.startsWith("aria-ref="));
+
+        // Batch existence check for CSS selectors.
+        const cssInfoMap: Record<string, { tag: string; type: string } | null> =
+          cssSelectors.length > 0 ? await page.evaluate(detectFieldsInPage, cssSelectors) : {};
+
+        // Individual existence check for ref selectors via locator.
+        const refInfoMap: Record<string, { tag: string; type: string } | null> = {};
+        for (const sel of refSelectors) {
+          try {
+            const handle = await page.locator(sel).elementHandle({ timeout });
+            if (handle) {
+              refInfoMap[sel] = await handle.evaluate((el) => ({
+                tag: el.tagName.toLowerCase(),
+                type: (el as HTMLInputElement).type || "",
+              }));
+            } else {
+              refInfoMap[sel] = null;
+            }
+          } catch {
+            refInfoMap[sel] = null;
+          }
+        }
+
+        const infoMap: Record<string, { tag: string; type: string } | null> = {
+          ...cssInfoMap,
+          ...refInfoMap,
+        };
 
         // Derive kinds for implicit-kind fields; explicit fields skip this.
         const detectedKinds: Record<string, FieldKind | null> = {};
@@ -381,22 +411,27 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
       owner,
       force,
     }) => {
-      const sel = selector || ref ? toSelector({ selector, ref }) : null;
+      let sel: string | null = null;
       try {
+        sel = selector || ref ? toSelector({ selector, ref }) : null;
         const page = await mgr.getPage({ tabId, owner, force });
         const dy = direction === "up" ? -pixels : pixels;
-        const result = await page.evaluate(
-          ({ yDelta, scrollSelector }: { yDelta: number; scrollSelector: string | null }) => {
-            if (scrollSelector) {
-              const el = document.querySelector(scrollSelector);
-              if (!el)
-                return {
-                  before: 0,
-                  after: 0,
-                  pageHeight: 0,
-                  viewportHeight: 0,
-                  elementMissing: true,
-                };
+
+        // aria-ref is a Playwright-internal selector engine — invisible to
+        // page.evaluate / querySelectorAll.  When a ref-based selector is
+        // given, scroll via locator.evaluate instead of the in-page path.
+        const useRef = sel && sel.startsWith("aria-ref=");
+        let result: {
+          before: number;
+          after: number;
+          pageHeight: number;
+          viewportHeight: number;
+          elementMissing?: boolean;
+        };
+        if (useRef) {
+          const loc = page.locator(sel!);
+          result = await loc.evaluate(
+            (el, { yDelta }) => {
               const before = el.scrollTop;
               el.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
               const after = el.scrollTop;
@@ -406,19 +441,45 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
                 pageHeight: el.scrollHeight,
                 viewportHeight: el.clientHeight,
               };
-            }
-            const before = window.scrollY;
-            window.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
-            const after = window.scrollY;
-            const pageHeight = Math.max(
-              document.documentElement.scrollHeight,
-              document.body.scrollHeight,
-            );
-            const viewportHeight = window.innerHeight;
-            return { before, after, pageHeight, viewportHeight };
-          },
-          { yDelta: dy, scrollSelector: sel },
-        );
+            },
+            { yDelta: dy },
+          );
+        } else {
+          result = await page.evaluate(
+            ({ yDelta, scrollSelector }: { yDelta: number; scrollSelector: string | null }) => {
+              if (scrollSelector) {
+                const el = document.querySelector(scrollSelector);
+                if (!el)
+                  return {
+                    before: 0,
+                    after: 0,
+                    pageHeight: 0,
+                    viewportHeight: 0,
+                    elementMissing: true,
+                  };
+                const before = el.scrollTop;
+                el.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
+                const after = el.scrollTop;
+                return {
+                  before,
+                  after,
+                  pageHeight: el.scrollHeight,
+                  viewportHeight: el.clientHeight,
+                };
+              }
+              const before = window.scrollY;
+              window.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
+              const after = window.scrollY;
+              const pageHeight = Math.max(
+                document.documentElement.scrollHeight,
+                document.body.scrollHeight,
+              );
+              const viewportHeight = window.innerHeight;
+              return { before, after, pageHeight, viewportHeight };
+            },
+            { yDelta: dy, scrollSelector: sel },
+          );
+        }
 
         // If the targeted element wasn't found, report it.
         if ((result as any).elementMissing) {
@@ -524,8 +585,9 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
       openWorldHint: true,
     },
     handler: async ({ selector, ref, text, textGone, timeout = 10000, tabId, owner, force }) => {
-      const sel = selector || ref ? toSelector({ selector, ref }) : undefined;
+      let sel: string | undefined;
       try {
+        sel = selector || ref ? toSelector({ selector, ref }) : undefined;
         const page = await mgr.getPage({ tabId, owner, force });
 
         if (!sel && !text && !textGone) {

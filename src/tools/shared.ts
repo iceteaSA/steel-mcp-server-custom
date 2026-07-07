@@ -177,12 +177,13 @@ const ARIA_REF_PREFIX = "aria-ref=";
 
 export function decorateRefError(err: unknown, usedSelector: string): string {
   const raw = err instanceof Error ? err.message : String(err ?? "");
-  const isRefQuery = raw.includes(ARIA_REF_PREFIX) || usedSelector.startsWith(ARIA_REF_PREFIX);
+  if (!usedSelector.startsWith(ARIA_REF_PREFIX)) return raw;
+
   const isTimeoutOrNotFound = /timeout|not found|not exist|not visible|not attached|waiting/i.test(
     raw,
   );
 
-  if (isRefQuery && isTimeoutOrNotFound) {
+  if (isTimeoutOrNotFound) {
     return raw + " Ref may be stale — take a fresh snapshot.";
   }
   return raw;
