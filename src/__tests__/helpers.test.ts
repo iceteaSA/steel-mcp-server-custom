@@ -1,9 +1,17 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeAll } from "bun:test";
+import fs from "fs/promises";
+import os from "os";
+import path from "path";
+import { parseHTML } from "linkedom";
 import {
+  assertInsideRoot,
+  checkFingerprintConsistency,
   collapseWhitespace,
+  containmentDisabled,
   isBotWall,
   detectErrorPage,
   ErrorTracker,
+  ERROR_TRACKER_TTL_MS,
   CAPTCHA_WAIT_TOTAL_MS,
   CAPTCHA_POLL_INTERVAL_MS,
   dedupeLinks,
@@ -13,6 +21,7 @@ import {
   isBrowserClosedError,
   isSteelSessionStuck,
   detectFieldKind,
+  detectFieldsInPage,
   interpretCheckboxValue,
   isCheckboxTruthy,
   buildRadioSelector,
@@ -20,8 +29,151 @@ import {
   mimeToExt,
   deriveDownloadFilename,
   cleanErrorMessage,
+  extractPageContent,
+  validateCookies,
+  validateExpression,
+  validateUrlPattern,
   type Link,
 } from "../helpers.js";
+
+// ---------------------------------------------------------------------------
+// checkFingerprintConsistency
+// ---------------------------------------------------------------------------
+describe("checkFingerprintConsistency", () => {
+  const base = {
+    webdriver: false,
+    languages: ["en-US"],
+    pluginsCount: 3,
+    timeZone: "America/New_York",
+    screen: { width: 1920, height: 1080 },
+  };
+
+  it("passes a mac-consistent fingerprint", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+    });
+    expect(result.every((r) => r.pass)).toBe(true);
+    expect(result.find((r) => r.check === "UA/platform consistency")?.pass).toBe(true);
+  });
+
+  it("passes a windows-consistent fingerprint", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "Win32",
+    });
+    expect(result.find((r) => r.check === "UA/platform consistency")?.pass).toBe(true);
+  });
+
+  it("passes a linux-consistent fingerprint", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "Linux x86_64",
+    });
+    expect(result.find((r) => r.check === "UA/platform consistency")?.pass).toBe(true);
+  });
+
+  it("flags UA Windows + platform MacIntel as mismatch", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+    });
+    const uaCheck = result.find((r) => r.check === "UA/platform consistency")!;
+    expect(uaCheck.pass).toBe(false);
+    expect(uaCheck.observed).toContain("platform=MacIntel");
+    expect(uaCheck.observed).toContain("Windows NT");
+  });
+
+  it("passes webdriver=false", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      webdriver: false,
+    });
+    expect(result.find((r) => r.check === "webdriver hidden")?.pass).toBe(true);
+  });
+
+  it("passes webdriver=undefined", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      webdriver: undefined,
+    });
+    expect(result.find((r) => r.check === "webdriver hidden")?.pass).toBe(true);
+  });
+
+  it("fails when webdriver is true", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      webdriver: true,
+    });
+    expect(result.find((r) => r.check === "webdriver hidden")?.pass).toBe(false);
+  });
+
+  it("passes when userAgentData.platform matches navigator.platform", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      userAgentData: { platform: "macOS" },
+    });
+    expect(result.find((r) => r.check === "UA/platform consistency")?.pass).toBe(true);
+    expect(result.find((r) => r.check === "UA/platform consistency")?.observed).toContain(
+      "userAgentData.platform=macOS",
+    );
+  });
+
+  it("fails when userAgentData.platform mismatches navigator.platform", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      userAgentData: { platform: "Windows" },
+    });
+    expect(result.find((r) => r.check === "UA/platform consistency")?.pass).toBe(false);
+  });
+
+  it("fails when languages is empty", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      languages: [],
+    });
+    expect(result.find((r) => r.check === "languages non-empty")?.pass).toBe(false);
+  });
+
+  it("reports plugins count without failing", () => {
+    const result = checkFingerprintConsistency({
+      ...base,
+      userAgent:
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36",
+      platform: "MacIntel",
+      pluginsCount: 0,
+    });
+    const plugins = result.find((r) => r.check === "plugins count")!;
+    expect(plugins.pass).toBe(true);
+    expect(plugins.observed).toBe("plugins=0");
+  });
+});
 
 // ---------------------------------------------------------------------------
 // collapseWhitespace
@@ -224,6 +376,37 @@ describe("ErrorTracker", () => {
     t.record("not-a-url");
     t.record("not-a-url");
     expect(t.check("not-a-url")).toContain("failed 2 time(s)");
+  });
+
+  it("evicts entries older than TTL (fake clock)", () => {
+    let now = 1000000;
+    const t = new ErrorTracker({ now: () => now });
+    t.record("https://example.com/old");
+    now += ERROR_TRACKER_TTL_MS + 1;
+    // After advancing past TTL, the old entry should be evicted
+    expect(t.check("https://example.com/old")).toBeNull();
+  });
+
+  it("keeps entries within TTL", () => {
+    let now = 1000000;
+    const t = new ErrorTracker({ now: () => now, urlThreshold: 1, domainThreshold: 1 });
+    t.record("https://example.com/fresh");
+    now += 1000; // 1 second later — well within TTL
+    expect(t.check("https://example.com/fresh")).toContain("failed 1 time(s)");
+  });
+
+  it("enforces 200-entry cap (evicts oldest)", () => {
+    let now = 1000000;
+    // Default-constructed tracker — real default cap of 200
+    const t = new ErrorTracker({ now: () => now });
+    // Record the same URL 201 times. The cap evicts the oldest entry,
+    // leaving 200. With default urlThreshold=2, check() reports the count.
+    for (let i = 0; i < 201; i++) {
+      t.record("https://example.com/page");
+    }
+    // After eviction, 200 entries remain for this URL
+    const warn = t.check("https://example.com/page");
+    expect(warn).toContain("failed 200 time(s)");
   });
 });
 
@@ -539,6 +722,70 @@ describe("deriveDownloadFilename", () => {
 });
 
 // ---------------------------------------------------------------------------
+// contentAreaExtract — golden test for shared content-area helper
+// ---------------------------------------------------------------------------
+describe("contentAreaExtract", () => {
+  // Build a fixture HTML that exercises the full extraction logic:
+  // content-area detection (main > article > [role=main] > body fallback),
+  // block-tag wrapping, anchor [href] appending, whitespace collapse.
+  const fixtureHTML = `<!DOCTYPE html>
+<html><body>
+<nav>Nav links here</nav>
+<main>
+  <h1>Main Title</h1>
+  <p>First paragraph with <a href="https://example.com/link1">a link</a> inside.</p>
+  <article>
+    <h2>Article Heading</h2>
+    <p>Article body text with <a href="https://example.com/link2">another link</a> and more content.</p>
+    <footer>Article footer</footer>
+  </article>
+  <script>var x = 1;</script>
+  <div>Extra div content</div>
+</main>
+<footer>Site footer</footer>
+</body></html>`;
+
+  // Golden values derived from the pre-refactor extraction code
+  // (git show 536a0e1:src/tools/extraction.ts lines 299-369) run against
+  // the fixture above via linkedom. Locks exact output so the refactored
+  // helper must produce identical results.
+  const goldenWalkOutput =
+    "Main Title\n\n \nFirst paragraph with a link [https://example.com/link1] inside.\n\n \n\n \nArticle Heading\n\n \nArticle body text with another link [https://example.com/link2] and more content.\n\n \nArticle footer\n\n \n\n var x = 1;\n \nExtra div content";
+  const goldenInnerTextOutput =
+    "Main Title \nFirst paragraph with a link inside. \n \nArticle Heading \nArticle body text with another link and more content. \nArticle footer var x = 1; \nExtra div content";
+
+  it("walk mode matches pre-refactor includeLinks output", async () => {
+    const { parseHTML } = await import("linkedom");
+    const { document } = parseHTML(fixtureHTML);
+    const result = extractPageContent(
+      { selector: null, includeLinks: true, mode: "walk" },
+      document,
+    );
+    expect(result.text).toBe(goldenWalkOutput);
+  });
+
+  it("innerText mode matches pre-refactor no-link output", async () => {
+    const { parseHTML } = await import("linkedom");
+    const { document } = parseHTML(fixtureHTML);
+    const result = extractPageContent(
+      { selector: null, includeLinks: false, mode: "innerText" },
+      document,
+    );
+    expect(result.text).toBe(goldenInnerTextOutput);
+  });
+
+  it("__noMatch when selector has no match", async () => {
+    const { parseHTML } = await import("linkedom");
+    const { document } = parseHTML(fixtureHTML);
+    const result = extractPageContent(
+      { selector: "#nonexistent", includeLinks: false, mode: "innerText" },
+      document,
+    );
+    expect(result.__noMatch).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // cleanErrorMessage
 // ---------------------------------------------------------------------------
 describe("cleanErrorMessage", () => {
@@ -561,5 +808,427 @@ describe("cleanErrorMessage", () => {
   it("handles null/undefined", () => {
     expect(cleanErrorMessage(null)).toBe("");
     expect(cleanErrorMessage(undefined)).toBe("");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// detectFieldsInPage (batched kind-detection)
+// ---------------------------------------------------------------------------
+describe("detectFieldsInPage", () => {
+  it("detects mixed form fields and returns null for missing selectors", () => {
+    const html = `<!DOCTYPE html><html><body><form>
+      <input type="text" id="name" />
+      <select id="country"><option>US</option></select>
+      <input type="checkbox" id="agree" />
+      <input type="radio" name="size" value="m" id="size-m" />
+    </form></body></html>`;
+    const { document: doc } = parseHTML(html);
+    const origDoc = (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).document = doc;
+    try {
+      const result = detectFieldsInPage(["#name", "#country", "#agree", "#size-m", "#missing"]);
+
+      // Element info maps
+      expect(result["#name"]).toEqual({ tag: "INPUT", type: "text" });
+      expect(result["#country"]).toEqual({ tag: "SELECT", type: "" });
+      expect(result["#agree"]).toEqual({ tag: "INPUT", type: "checkbox" });
+      expect(result["#size-m"]).toEqual({ tag: "INPUT", type: "radio" });
+      expect(result["#missing"]).toBeNull();
+
+      // detectFieldKind integration
+      expect(detectFieldKind(result["#name"]!.tag, result["#name"]!.type)).toBe("text");
+      expect(detectFieldKind(result["#country"]!.tag, result["#country"]!.type)).toBe("select");
+      expect(detectFieldKind(result["#agree"]!.tag, result["#agree"]!.type)).toBe("check");
+      expect(detectFieldKind(result["#size-m"]!.tag, result["#size-m"]!.type)).toBe("radio");
+      expect(detectFieldKind(null, null)).toBe("text");
+    } finally {
+      (globalThis as Record<string, unknown>).document = origDoc;
+    }
+  });
+
+  it("returns all-null for entirely missing selectors", () => {
+    const { document: doc } = parseHTML("<div></div>");
+    const origDoc = (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).document = doc;
+    try {
+      const result = detectFieldsInPage(["#x", ".y"]);
+      expect(result["#x"]).toBeNull();
+      expect(result[".y"]).toBeNull();
+    } finally {
+      (globalThis as Record<string, unknown>).document = origDoc;
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// withBackgroundTab (A4b / A4c — the real helper used by both handlers)
+// ---------------------------------------------------------------------------
+import { withBackgroundTab } from "../utils.js";
+
+describe("withBackgroundTab", () => {
+  it("closes tab and preserves activeTabId when the inner fn throws", async () => {
+    let closedTabId: number | undefined;
+    let activeAfter = -1;
+    const mockMgr = {
+      activeTabId: 1,
+      newTab: async (_url?: string, _owner?: string, _profileName?: string, activate?: boolean) => {
+        // Background tab — should NOT be activated.
+        expect(activate).toBe(false);
+        return { tabId: 99, page: {} as any };
+      },
+      closeTab: async (id: number) => {
+        closedTabId = id;
+      },
+    };
+
+    await withBackgroundTab(mockMgr as any, async () => {
+      throw new Error("simulated failure");
+    }).catch(() => {
+      activeAfter = mockMgr.activeTabId;
+    });
+
+    expect(closedTabId).toBe(99);
+    expect(activeAfter).toBe(1); // unchanged
+  });
+
+  it("closes tab on success and preserves activeTabId", async () => {
+    let closedTabId: number | undefined;
+    const mockMgr = {
+      activeTabId: 5,
+      newTab: async (_url?: string, _owner?: string, _profileName?: string, activate?: boolean) => {
+        expect(activate).toBe(false);
+        return { tabId: 42, page: {} as any };
+      },
+      closeTab: async (id: number) => {
+        closedTabId = id;
+      },
+    };
+
+    const result = await withBackgroundTab(mockMgr as any, async () => "done");
+
+    expect(result).toBe("done");
+    expect(closedTabId).toBe(42);
+    expect(mockMgr.activeTabId).toBe(5); // unchanged
+  });
+
+  it("does not call closeTab if newTab throws", async () => {
+    let closeCalled = false;
+    const mockMgr = {
+      activeTabId: 1,
+      newTab: async () => {
+        throw new Error("browser closed");
+      },
+      closeTab: async () => {
+        closeCalled = true;
+      },
+    };
+
+    await withBackgroundTab(mockMgr as any, async () => "unreachable").catch(() => {});
+
+    expect(closeCalled).toBe(false);
+    expect(mockMgr.activeTabId).toBe(1); // unchanged
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateCookies (A6 — cookie set validation)
+// ---------------------------------------------------------------------------
+describe("validateCookies", () => {
+  it("accepts cookies with url", () => {
+    expect(validateCookies([{ name: "a", value: "1", url: "https://example.com" }])).toEqual([]);
+  });
+
+  it("accepts cookies with domain+path", () => {
+    expect(validateCookies([{ name: "a", value: "1", domain: "example.com", path: "/" }])).toEqual(
+      [],
+    );
+  });
+
+  it("rejects cookies missing both url and domain+path", () => {
+    const violations = validateCookies([{ name: "bad", value: "1" }]);
+    expect(violations).toHaveLength(1);
+    expect(violations[0]).toContain('Cookie "bad"');
+    expect(violations[0]).toContain("needs url, or domain+path");
+  });
+
+  it("rejects cookies with domain but no path", () => {
+    const violations = validateCookies([{ name: "partial", value: "1", domain: "example.com" }]);
+    expect(violations).toHaveLength(1);
+  });
+
+  it("rejects cookies with path but no domain", () => {
+    const violations = validateCookies([{ name: "partial", value: "1", path: "/" }]);
+    expect(violations).toHaveLength(1);
+  });
+
+  it("reports all violations, not just the first", () => {
+    const violations = validateCookies([
+      { name: "good", value: "1", url: "https://example.com" },
+      { name: "bad1", value: "2" },
+      { name: "bad2", value: "3" },
+    ]);
+    expect(violations).toHaveLength(2);
+    expect(violations[0]).toContain('Cookie "bad1"');
+    expect(violations[1]).toContain('Cookie "bad2"');
+  });
+
+  it("returns empty for empty array", () => {
+    expect(validateCookies([])).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// validateExpression (A6 — evaluate syntax precheck)
+// ---------------------------------------------------------------------------
+describe("validateExpression", () => {
+  it("accepts valid expressions", () => {
+    expect(validateExpression("1 + 1")).toBeNull();
+    expect(validateExpression("document.title")).toBeNull();
+    expect(validateExpression("(() => { return 42; })()")).toBeNull();
+    expect(validateExpression("[1, 2, 3].map(x => x * 2)")).toBeNull();
+  });
+
+  it("rejects invalid syntax", () => {
+    const err = validateExpression("1 +++ 2");
+    expect(err).toContain("not valid JavaScript");
+  });
+
+  it("rejects statements (not expressions)", () => {
+    const err = validateExpression("let x = 1; x");
+    expect(err).toContain("not valid JavaScript");
+    expect(err).toContain("single expression");
+  });
+
+  it("rejects empty expression", () => {
+    const err = validateExpression("");
+    expect(err).toContain("not valid JavaScript");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// filterNetworkEvents — pure filter for get_network
+// ---------------------------------------------------------------------------
+import { filterNetworkEvents, type NetworkEventLike } from "../helpers.js";
+
+function makeEvent(overrides: Partial<NetworkEventLike> = {}): NetworkEventLike {
+  return {
+    id: 1,
+    tabId: 1,
+    method: "GET",
+    url: "https://example.com/",
+    resourceType: "document",
+    status: 200,
+    at: Date.now(),
+    ...overrides,
+  };
+}
+
+describe("filterNetworkEvents", () => {
+  it("returns all events when no filter is given", () => {
+    const events = [makeEvent({ id: 1 }), makeEvent({ id: 2 })];
+    expect(filterNetworkEvents(events, {})).toHaveLength(2);
+  });
+
+  it("filters by tabId", () => {
+    const events = [makeEvent({ id: 1, tabId: 1 }), makeEvent({ id: 2, tabId: 2 })];
+    const result = filterNetworkEvents(events, { tabId: 2 });
+    expect(result).toHaveLength(1);
+    expect(result[0].id).toBe(2);
+  });
+
+  it("filters by resourceType", () => {
+    const events = [
+      makeEvent({ id: 1, resourceType: "xhr" }),
+      makeEvent({ id: 2, resourceType: "fetch" }),
+      makeEvent({ id: 3, resourceType: "script" }),
+    ];
+    const result = filterNetworkEvents(events, { resourceType: "fetch" });
+    expect(result.map((e) => e.id)).toEqual([2]);
+  });
+
+  it("filters by url substring", () => {
+    const events = [
+      makeEvent({ id: 1, url: "https://a.com/api/users" }),
+      makeEvent({ id: 2, url: "https://a.com/static/main.js" }),
+      makeEvent({ id: 3, url: "https://b.com/api" }),
+    ];
+    const result = filterNetworkEvents(events, { urlPattern: "/api/" });
+    expect(result.map((e) => e.id)).toEqual([1, 3]);
+  });
+
+  it("filters by /regex/ url pattern", () => {
+    const events = [
+      makeEvent({ id: 1, url: "https://a.com/api/users" }),
+      makeEvent({ id: 2, url: "https://a.com/static/main.js" }),
+      makeEvent({ id: 3, url: "https://b.com/API/orders" }),
+    ];
+    const result = filterNetworkEvents(events, { urlPattern: "/api/i" });
+    expect(result.map((e) => e.id)).toEqual([1, 3]);
+  });
+
+  it("filters by exact status", () => {
+    const events = [
+      makeEvent({ id: 1, status: 200 }),
+      makeEvent({ id: 2, status: 404 }),
+      makeEvent({ id: 3, status: 500 }),
+    ];
+    expect(filterNetworkEvents(events, { status: "404" }).map((e) => e.id)).toEqual([2]);
+  });
+
+  it("filters by 4xx status range", () => {
+    const events = [
+      makeEvent({ id: 1, status: 200 }),
+      makeEvent({ id: 2, status: 400 }),
+      makeEvent({ id: 3, status: 404 }),
+      makeEvent({ id: 4, status: 500 }),
+    ];
+    expect(filterNetworkEvents(events, { status: "4xx" }).map((e) => e.id)).toEqual([2, 3]);
+  });
+
+  it("filters by 5xx status range", () => {
+    const events = [
+      makeEvent({ id: 1, status: 200 }),
+      makeEvent({ id: 2, status: 404 }),
+      makeEvent({ id: 3, status: 500 }),
+      makeEvent({ id: 4, status: 502 }),
+    ];
+    expect(filterNetworkEvents(events, { status: "5xx" }).map((e) => e.id)).toEqual([3, 4]);
+  });
+
+  it("ignores failed events when status range does not match", () => {
+    const events = [makeEvent({ id: 1, status: 200, failed: true })];
+    expect(filterNetworkEvents(events, { status: "4xx" })).toHaveLength(0);
+  });
+
+  it("limits results and keeps newest last", () => {
+    const events = Array.from({ length: 10 }, (_, i) =>
+      makeEvent({ id: i + 1, url: `https://x/${i}` }),
+    );
+    const result = filterNetworkEvents(events, { limit: 3 });
+    expect(result).toHaveLength(3);
+    expect(result.map((e) => e.id)).toEqual([8, 9, 10]);
+  });
+
+  it("combines filters", () => {
+    const events = [
+      makeEvent({ id: 1, tabId: 1, resourceType: "xhr", status: 200, url: "/api/a" }),
+      makeEvent({ id: 2, tabId: 1, resourceType: "xhr", status: 404, url: "/api/b" }),
+      makeEvent({ id: 3, tabId: 2, resourceType: "xhr", status: 404, url: "/api/b" }),
+      makeEvent({ id: 4, tabId: 1, resourceType: "script", status: 404, url: "/api/b" }),
+    ];
+    const result = filterNetworkEvents(events, {
+      tabId: 1,
+      resourceType: "xhr",
+      status: "4xx",
+      urlPattern: "/api/b",
+      limit: 1,
+    });
+    expect(result.map((e) => e.id)).toEqual([2]);
+  });
+});
+
+describe("validateUrlPattern", () => {
+  it("returns undefined for valid substring patterns", () => {
+    expect(validateUrlPattern("/api/")).toBeUndefined();
+    expect(validateUrlPattern("example.com")).toBeUndefined();
+  });
+
+  it("returns undefined for valid regex patterns", () => {
+    expect(validateUrlPattern("/api/i")).toBeUndefined();
+    expect(validateUrlPattern("/^https://")).toBeUndefined();
+  });
+
+  it("returns an error for invalid regex patterns", () => {
+    const err = validateUrlPattern("/[");
+    expect(err).toMatch(/^Invalid regex:/);
+  });
+
+  it("returns undefined for empty/undefined patterns", () => {
+    expect(validateUrlPattern(undefined)).toBeUndefined();
+    expect(validateUrlPattern("")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path containment — assertInsideRoot / containmentDisabled.
+//
+// Real-filesystem tests under a tmpdir; create root + a sibling dir, verify
+// allow/deny + the escape hatch ("*").
+// ---------------------------------------------------------------------------
+
+describe("containmentDisabled", () => {
+  it("is true for empty/null/undefined", () => {
+    expect(containmentDisabled("")).toBe(true);
+    expect(containmentDisabled(null)).toBe(true);
+    expect(containmentDisabled(undefined)).toBe(true);
+  });
+  it("is true for the literal '*'", () => {
+    expect(containmentDisabled("*")).toBe(true);
+  });
+  it("is false for a real path", () => {
+    expect(containmentDisabled("/tmp/anything")).toBe(false);
+  });
+});
+
+describe("assertInsideRoot", () => {
+  let root: string;
+  let outside: string;
+
+  beforeAll(async () => {
+    const base = await fs.mkdtemp(path.join(os.tmpdir(), "steel-assert-"));
+    root = path.join(base, "root");
+    outside = path.join(base, "outside");
+    await fs.mkdir(root, { recursive: true });
+    await fs.mkdir(outside, { recursive: true });
+    await fs.writeFile(path.join(root, "good.txt"), "ok");
+    await fs.writeFile(path.join(outside, "evil.txt"), "x");
+  });
+
+  it("returns the path when it lies inside the root", async () => {
+    const target = path.join(root, "good.txt");
+    const resolved = await assertInsideRoot(target, root, "upload path");
+    expect(resolved).toBe(await fs.realpath(target));
+  });
+
+  it("rejects a path that escapes via ../", async () => {
+    const traversal = path.join(root, "..", "outside", "evil.txt");
+    await expect(assertInsideRoot(traversal, root, "upload path")).rejects.toThrow(
+      /escapes the configured root/,
+    );
+  });
+
+  it("rejects a path in a completely separate directory", async () => {
+    await expect(
+      assertInsideRoot(path.join(outside, "evil.txt"), root, "upload path"),
+    ).rejects.toThrow(/escapes the configured root/);
+  });
+
+  it("rejects a path that is a sibling with a prefix-matching name", async () => {
+    // Create /tmp/.../root-evil — the rootWithSep check must reject this
+    // even though the directory name starts with the same prefix.
+    const prefixSibling = path.join(path.dirname(root), `${path.basename(root)}-evil`);
+    await fs.mkdir(prefixSibling, { recursive: true });
+    try {
+      await expect(
+        assertInsideRoot(path.join(prefixSibling, "x"), root, "upload path"),
+      ).rejects.toThrow(/escapes the configured root/);
+    } finally {
+      await fs.rm(prefixSibling, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the check when root is '*' (escape hatch)", async () => {
+    const target = path.join(outside, "evil.txt");
+    // No throw — returns the path verbatim.
+    const resolved = await assertInsideRoot(target, "*", "upload path");
+    expect(resolved).toBe(target);
+  });
+
+  it("accepts a not-yet-existing path under the root (newly-written output)", async () => {
+    const newFile = path.join(root, "subdir", "fresh.txt");
+    const resolved = await assertInsideRoot(newFile, root, "outputPath");
+    // The parent dir exists; we don't create the leaf — the check should
+    // resolve against the parent realpath and rejoin the leaf.
+    expect(resolved.endsWith(path.join("subdir", "fresh.txt"))).toBe(true);
   });
 });

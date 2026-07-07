@@ -10,10 +10,12 @@
  *   POST /push     — receive session data from extension
  */
 
+import crypto from "crypto";
 import http from "http";
 import fs from "fs/promises";
 import path from "path";
 import { encryptJSON, decryptJSON } from "./crypto.js";
+import { assertSafeProfilePath, isValidProfileName } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -54,6 +56,7 @@ export interface PushResult {
 
 export interface RelayConfig {
   port: number;
+  bindAddr: string;
   secret: string;
   profilesDir: string;
   credentialsFile: string;
@@ -103,9 +106,18 @@ async function handlePush(payload: PushPayload, config: RelayConfig): Promise<Pu
   if (!profileName || typeof profileName !== "string") {
     throw new Error("profile name is required");
   }
+  // Reject path-traversal payloads before constructing any file path.
+  // Also validates name length (1–64) and character set.
+  if (!isValidProfileName(profileName)) {
+    throw new Error(
+      `Invalid profile name "${profileName}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
+    );
+  }
 
   // --- Cookies + localStorage → profile JSON ---
-  const profilePath = path.join(config.profilesDir, `${profileName}.json`);
+  // Defense in depth: assertSafeProfilePath validates the name AND confirms
+  // the resolved path stays under profilesDir (catches bugs in the regex).
+  const profilePath = assertSafeProfilePath(profileName, config.profilesDir);
   await fs.mkdir(config.profilesDir, { recursive: true });
 
   // Load existing profile state if it exists, merge new data
@@ -212,6 +224,14 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   });
 }
 
+// Timing-safe comparison — hashes both sides to equal lengths, then
+// crypto.timingSafeEqual avoids leaking byte position of the first mismatch.
+function timingSafeCompare(a: string, b: string): boolean {
+  const hashA = crypto.createHash("sha256").update(a).digest();
+  const hashB = crypto.createHash("sha256").update(b).digest();
+  return crypto.timingSafeEqual(hashA, hashB);
+}
+
 function jsonResponse(res: http.ServerResponse, status: number, body: unknown): void {
   const json = JSON.stringify(body);
   res.writeHead(status, {
@@ -247,10 +267,11 @@ export function startRelayServer(config: RelayConfig): http.Server {
 
     // POST /push — requires auth
     if (req.method === "POST" && url.pathname === "/push") {
-      // Auth check
+      // Auth check — timing-safe to avoid leaking the expected secret length
+      // or the position of the first mismatch byte.
       const authHeader = req.headers.authorization;
       const expected = `Bearer ${config.secret}`;
-      if (!authHeader || authHeader !== expected) {
+      if (!authHeader || !timingSafeCompare(authHeader, expected)) {
         jsonResponse(res, 401, { error: "Unauthorized. Set the correct RELAY_SECRET." });
         return;
       }
@@ -282,8 +303,8 @@ export function startRelayServer(config: RelayConfig): http.Server {
     }
   });
 
-  srv.listen(config.port, "0.0.0.0", () => {
-    console.error(`[steel-mcp] Relay server listening on http://0.0.0.0:${config.port}`);
+  srv.listen(config.port, config.bindAddr, () => {
+    console.error(`[steel-mcp] Relay server listening on http://${config.bindAddr}:${config.port}`);
   });
 
   // Don't block Node process exit

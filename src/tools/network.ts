@@ -1,22 +1,59 @@
 import fs from "fs/promises";
 import path from "path";
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import type { BrowserContext } from "playwright";
+import type { BrowserContext } from "patchright";
 import type { BrowserManager, Env } from "../manager.js";
 import {
+  assertInsideRoot,
   cleanErrorMessage,
   deriveDownloadFilename,
   matchesCookieHost,
   mimeToExt,
+  validateCookies,
+  validateUrlPattern,
 } from "../helpers.js";
+import { withBackgroundTab, writeToFile } from "../utils.js";
+import type { ToolRegistrar } from "./shared.js";
+import { tabTarget } from "./shared.js";
 
-export function register(server: McpServer, mgr: BrowserManager, env: Env): void {
+/**
+ * Single owner-auth chokepoint for every `get_network` body fetch.
+ *
+ * Rule (intentionally narrow — a bare tabId is NEVER authorization):
+ *   * event.tabId undefined (untabbed event) → readable (no owning tab)
+ *   * tab has an owner AND caller passes that owner → readable
+ *   * otherwise → DENIED with a clear error that names the owning agent
+ *
+ * Both the `requestId` branch and the `body:true` single-match branch of
+ * the get_network handler must call this immediately before
+ * `mgr.getResponseBody()`. There must be exactly one authorization site —
+ * adding a sibling inline check is a regression waiting to happen.
+ */
+export function authorizeBodyFetch(
+  event: { id: number; tabId?: number },
+  callerOwner: string | undefined,
+  mgr: { getTabOwner: (tabId: number) => string | undefined },
+): { ok: true } | { ok: false; error: string } {
+  if (event.tabId === undefined) return { ok: true };
+  const tabOwner = mgr.getTabOwner(event.tabId);
+  if (tabOwner === undefined) return { ok: true };
+  if (callerOwner !== undefined && callerOwner === tabOwner) return { ok: true };
+  return {
+    ok: false,
+    error: `Response body for request #${event.id} belongs to owner "${tabOwner}"'s tab — pass owner:"${tabOwner}" to read it.`,
+  };
+}
+
+export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // cookies -------------------------------------------------------------------
-  server.tool(
-    "cookies",
-    `Get or set browser cookies. Default: return cookies (filter by domain). Pass setCookies to inject cookies (e.g. restore a saved session). Cap: 50 cookies unless limit=0.`,
-    {
+  register({
+    name: "cookies",
+    title: "Browser Cookies",
+    description: `Get or set browser cookies for the current session. Default: return all cookies (filter by domain or URL); pass setCookies to inject cookies (e.g. restore a saved session). Set mode does NOT persist across browser restarts — use save_profile for durable storage. Do NOT use to transfer cookies between profiles; each profile has its own isolated cookie jar.
+
+CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
+    toolset: "network",
+    inputSchema: {
       domain: z
         .union([z.string(), z.array(z.string())])
         .optional()
@@ -47,15 +84,44 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           "Inject cookies into the browser context. Each needs name+value and either url or domain+path.",
         ),
     },
-    async ({ urls, domain, limit, setCookies }) => {
+    outputSchema: {
+      cookies: z
+        .array(
+          z.object({
+            name: z.string(),
+            value: z.string(),
+            domain: z.string(),
+            path: z.string(),
+          }),
+        )
+        .optional(),
+      count: z.number().optional(),
+    },
+    annotations: {
+      readOnlyHint: false, // set mode mutates
+      destructiveHint: false,
+      idempotentHint: true, // get is idempotent; set is also safe to repeat
+      openWorldHint: false,
+    },
+    handler: async ({ urls, domain, limit, setCookies }) => {
       try {
         await mgr.initialize();
         const ctx = mgr.context!;
 
         // Set mode — inject cookies and return
         if (setCookies && setCookies.length > 0) {
+          const violations = validateCookies(setCookies);
+          if (violations.length > 0) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: violations.join("\n") }],
+            };
+          }
           await ctx.addCookies(setCookies as Parameters<BrowserContext["addCookies"]>[0]);
-          return { content: [{ type: "text", text: `Set ${setCookies.length} cookie(s).` }] };
+          return {
+            content: [{ type: "text", text: `Set ${setCookies.length} cookie(s).` }],
+            structuredContent: { count: setCookies.length },
+          };
         }
 
         // Get mode
@@ -66,7 +132,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         if (urls && urls.length > 0 && cookies.length === 0) {
           const all = await ctx.cookies();
           const hosts = urls
-            .map((u) => {
+            .map((u: string) => {
               try {
                 return new URL(u).hostname;
               } catch {
@@ -74,7 +140,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
               }
             })
             .filter(Boolean);
-          cookies = all.filter((c) => hosts.some((h) => matchesCookieHost(c.domain, h)));
+          cookies = all.filter((c) => hosts.some((h: string) => matchesCookieHost(c.domain, h)));
         }
 
         // Domain filter (substring match — handles leading-dot + subdomain quirks)
@@ -100,6 +166,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
               : "";
           return {
             content: [{ type: "text", text: `No cookies in the browser context.${hint}` }],
+            structuredContent: { cookies: [] },
           };
         }
 
@@ -108,21 +175,31 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           ? `\n\n[CAPPED — ${total} total cookies in context, returning first ${cap}. Set limit=0 or use domain/urls filter for full list.]`
           : "";
 
+        const structured = cookies.map((c) => ({
+          name: c.name,
+          value: c.value,
+          domain: c.domain,
+          path: c.path,
+        }));
+
         return {
           content: [{ type: "text", text: body + footer }],
+          structuredContent: { cookies: structured },
         };
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // download_file -------------------------------------------------------------
-  server.tool(
-    "download_file",
-    `Download a URL to disk. Handles both attachment downloads and inline binaries (auto-fallback to fetch). Uses browser cookies for auth. Pass forceFetch: true to skip download-event detection.`,
-    {
+  register({
+    name: "download_file",
+    title: "Download File",
+    description: `Download a URL to disk using browser cookies for authentication. Handles both Content-Disposition attachment downloads and inline binary files (auto-fallback to fetch). Use for downloading PDFs, images, spreadsheets, or any file behind authentication. Uses a temporary background tab so the caller's active tab is never navigated away — do NOT use for small text responses (use fetch_urls instead).`,
+    toolset: "media",
+    inputSchema: {
       url: z.string().describe("The download URL to fetch."),
       outputPath: z
         .string()
@@ -153,7 +230,22 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .optional()
         .describe("Optional tab ID. Omit to use the current active tab."),
     },
-    async ({ url, outputPath, timeout = 30000, forceFetch = false, tabId }) => {
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    // tabId is kept in the schema for backward compatibility — downloads now
+    // use a temporary tab so the caller's active tab is never navigated away.
+    handler: async ({ url, outputPath, timeout = 30000, forceFetch = false, tabId: _tabId }) => {
+      // Validate outputPath up-front so we fail fast (before the browser does
+      // the download) when the destination escapes OUTPUT_ROOT.
+      const resolveSavePath = async (suggested: string): Promise<string> =>
+        outputPath === undefined
+          ? path.join(env.OUTPUT_DIR, suggested)
+          : await assertInsideRoot(outputPath, env.OUTPUT_ROOT, "outputPath");
+
       const saveViaFetch = async (via: string): Promise<string> => {
         const ctx = mgr.context!;
         const resp = await ctx.request.fetch(url, { timeout: timeout + 5000 });
@@ -166,7 +258,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           const ext = mimeToExt(resp.headers()["content-type"] ?? null);
           if (ext) suggested += ext;
         }
-        const savePath = outputPath ?? path.join(env.OUTPUT_DIR, suggested);
+        const savePath = await resolveSavePath(suggested);
         await fs.mkdir(path.dirname(savePath), { recursive: true });
         await fs.writeFile(savePath, body);
         const stat = await fs.stat(savePath);
@@ -180,59 +272,260 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           };
         }
 
-        const page = await mgr.getPage(tabId);
-        try {
-          const [download] = await Promise.all([
-            page.waitForEvent("download", { timeout }),
-            page.goto(url).catch((err) => {
-              const msg = (err as Error).message;
-              if (
-                !/ERR_ABORTED|net::ERR_ABORTED|Download is starting|Cannot load download URL/i.test(
-                  msg,
-                )
-              ) {
-                throw err;
-              }
-            }),
-          ]);
-          const suggested = download.suggestedFilename() || deriveDownloadFilename(url);
-          const savePath = outputPath ?? path.join(env.OUTPUT_DIR, suggested);
-          await fs.mkdir(path.dirname(savePath), { recursive: true });
+        // Use a temporary background tab so the caller's active tab is
+        // never navigated away and the active-tab pointer is preserved.
+        const resultText = await withBackgroundTab(mgr, async (page) => {
           try {
-            await download.saveAs(savePath);
-          } catch (saveErr) {
-            const sMsg = (saveErr as Error).message;
-            if (/ENOENT|no such file or directory|copyfile/i.test(sMsg)) {
-              return {
-                content: [
-                  { type: "text", text: await saveViaFetch("fetch-fallback-after-saveAs-ENOENT") },
-                ],
-              };
+            const [download] = await Promise.all([
+              page.waitForEvent("download", { timeout }),
+              page.goto(url).catch((err) => {
+                const msg = (err as Error).message;
+                if (
+                  !/ERR_ABORTED|net::ERR_ABORTED|Download is starting|Cannot load download URL/i.test(
+                    msg,
+                  )
+                ) {
+                  throw err;
+                }
+              }),
+            ]);
+            const suggested = download.suggestedFilename() || deriveDownloadFilename(url);
+            const savePath = await resolveSavePath(suggested);
+            await fs.mkdir(path.dirname(savePath), { recursive: true });
+            try {
+              await download.saveAs(savePath);
+            } catch (saveErr) {
+              const sMsg = (saveErr as Error).message;
+              if (/ENOENT|no such file or directory|copyfile/i.test(sMsg)) {
+                return await saveViaFetch("fetch-fallback-after-saveAs-ENOENT");
+              }
+              throw saveErr;
             }
-            throw saveErr;
+            const stat = await fs.stat(savePath);
+            return `Downloaded ${suggested} [via download-event]\nSaved to: ${savePath}\nSize: ${stat.size.toLocaleString()} bytes`;
+          } catch (err) {
+            const msg = (err as Error).message;
+            if (!/waitForEvent.*[Tt]imeout|Timeout.*waitForEvent|Timeout.*download/.test(msg)) {
+              throw err;
+            }
+            return await saveViaFetch("fetch-fallback");
           }
-          const stat = await fs.stat(savePath);
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Downloaded ${suggested} [via download-event]\nSaved to: ${savePath}\nSize: ${stat.size.toLocaleString()} bytes`,
-              },
-            ],
-          };
-        } catch (err) {
-          const msg = (err as Error).message;
-          if (!/waitForEvent.*[Tt]imeout|Timeout.*waitForEvent|Timeout.*download/.test(msg)) {
-            throw err;
-          }
-          return {
-            content: [{ type: "text", text: await saveViaFetch("fetch-fallback") }],
-          };
-        }
+        });
+
+        return { content: [{ type: "text", text: resultText }] };
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
+
+  // get_network ---------------------------------------------------------------
+  register({
+    name: "get_network",
+    title: "Network Traffic",
+    description: `Inspect the request/response traffic a page has generated (XHR, fetch, document, scripts, etc.). Useful for finding API endpoints, debugging SPA loads, or verifying form submissions. Returns a compact list by default; set body=true (or pass requestId) to fetch one response body on demand.
+
+CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgraded to file mode if it exceeds MAX_INLINE_BYTES.`,
+    toolset: "network",
+    inputSchema: {
+      urlPattern: z
+        .string()
+        .optional()
+        .describe("Filter by URL substring (e.g. '/api/') or /regex/ (e.g. /api\\/i)."),
+      resourceType: z
+        .string()
+        .optional()
+        .describe(
+          "Filter by Playwright resource type (e.g. 'xhr', 'fetch', 'script', 'document').",
+        ),
+      status: z
+        .string()
+        .optional()
+        .describe("Filter by status: exact digits (200, 404) or range (4xx, 5xx)."),
+      limit: z.number().default(30).optional().describe("Max events to return. Default 30."),
+      body: z
+        .boolean()
+        .optional()
+        .describe(
+          "Return the response body of the single matching request. Requires exactly one match unless requestId is given.",
+        ),
+      requestId: z
+        .number()
+        .int()
+        .optional()
+        .describe("Exact network event id to fetch body for. Overrides body matching."),
+      ...tabTarget,
+    },
+    outputSchema: {
+      events: z
+        .array(
+          z.object({
+            id: z.number(),
+            method: z.string(),
+            url: z.string(),
+            resourceType: z.string(),
+            status: z.number().optional(),
+            sizeBytes: z.number().optional(),
+            durationMs: z.number().optional(),
+          }),
+        )
+        .optional(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async ({
+      urlPattern,
+      resourceType,
+      status,
+      limit = 30,
+      body,
+      requestId,
+      tabId,
+      owner,
+    }: {
+      urlPattern?: string;
+      resourceType?: string;
+      status?: string;
+      limit?: number;
+      body?: boolean;
+      requestId?: number;
+      tabId?: number;
+      owner?: string;
+    }) => {
+      try {
+        if (urlPattern) {
+          const validationError = validateUrlPattern(urlPattern);
+          if (validationError) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: validationError }],
+              structuredContent: { events: [] },
+            };
+          }
+        }
+
+        // Only scope to a resolved tab when the caller explicitly asked for one.
+        // Untabbed events (tabId undefined) are visible only without a tab/owner
+        // filter, matching the requestId cross-tab isolation rule.
+        const resolved =
+          tabId !== undefined || owner ? mgr.resolveTab({ tabId, owner }) : undefined;
+        const events = mgr.getNetworkEvents({
+          urlPattern,
+          resourceType,
+          status,
+          tabId: resolved,
+          owner,
+          limit,
+        });
+
+        if (body || requestId !== undefined) {
+          let targetId: number | undefined;
+          let targetEvent: any;
+          if (requestId !== undefined) {
+            // Enforce scope: the requested id must be visible through the same
+            // tab/owner filter used for the list path. This is the strict
+            // cross-tab isolation gate — a body fetch must never return
+            // another owner's tab body just because the requestId appears
+            // in the unscoped event list.
+            targetEvent = events.find((e) => e.id === requestId);
+            if (!targetEvent) {
+              return {
+                isError: true,
+                content: [
+                  {
+                    type: "text",
+                    text: `requestId ${requestId} not found in your tabs`,
+                  },
+                ],
+                structuredContent: { events },
+              };
+            }
+            targetId = requestId;
+          } else {
+            if (events.length !== 1) {
+              return {
+                isError: true,
+                content: [
+                  {
+                    type: "text",
+                    text: `${events.length} matches; pass requestId to fetch a specific body, or narrow the filter so exactly one request matches.`,
+                  },
+                ],
+                structuredContent: { events },
+              };
+            }
+            targetEvent = events[0];
+            targetId = targetEvent?.id;
+          }
+          if (targetId === undefined || targetEvent === undefined) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: "No matching network request found." }],
+              structuredContent: { events },
+            };
+          }
+
+          // Single owner-auth chokepoint for ALL body fetches. Both the
+          // requestId branch and the body:true single-match branch land
+          // here — every getResponseBody call must pass through this gate.
+          // Rule:
+          //   * event.tabId undefined (untabbed) → readable (no owning tab)
+          //   * tab has an owner AND caller passes that owner → readable
+          //   * otherwise → DENIED (caller didn't pass owner OR passed
+          //     a different one; a bare tabId never authorizes an owned
+          //     tab's body)
+          const auth = authorizeBodyFetch(targetEvent, owner, mgr);
+          if (!auth.ok) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: auth.error }],
+              structuredContent: { events },
+            };
+          }
+
+          const bodyText = await mgr.getResponseBody(targetId);
+          const capped =
+            bodyText.length > 10000
+              ? bodyText.slice(0, 10000) + "\n[TRUNCATED at 10000 chars]"
+              : bodyText;
+          if (Buffer.byteLength(capped) > env.MAX_INLINE_BYTES) {
+            const filePath = await writeToFile(
+              Buffer.from(capped, "utf8"),
+              `network-body-${targetId}.txt`,
+              env,
+            );
+            return {
+              content: [{ type: "text", text: `Body written to: ${filePath}` }],
+              structuredContent: { events: [] },
+            };
+          }
+          return { content: [{ type: "text", text: capped }], structuredContent: { events: [] } };
+        }
+
+        const lines = events.map((e: any) => {
+          const statusOrFailed = e.failed ? "FAILED" : (e.status ?? "-");
+          const size = e.sizeBytes !== undefined ? `${e.sizeBytes}B` : "-";
+          const duration = e.durationMs !== undefined ? `${e.durationMs}ms` : "-";
+          return `#${e.id} ${e.method} ${statusOrFailed} ${e.resourceType} ${e.url} (${size} ${duration})`;
+        });
+
+        return {
+          content: [{ type: "text", text: lines.join("\n") || "No network events matched." }],
+          structuredContent: { events },
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          isError: true,
+          content: [{ type: "text", text: cleanErrorMessage(error) }],
+          structuredContent: { events: [] },
+        };
+      }
+    },
+  });
 }

@@ -1,6 +1,9 @@
 // Pure helpers shared by multiple tool handlers. Node-side — safe to unit test
 // without a browser.
 
+import path from "path";
+import fs from "fs/promises";
+
 import mime from "mime-types";
 
 export interface Link {
@@ -59,6 +62,12 @@ export function detectErrorPage(title: string): string | null {
   return null;
 }
 
+/** TTL for ErrorTracker entries — entries older than this are evicted. */
+export const ERROR_TRACKER_TTL_MS = 30 * 60 * 1000;
+
+/** Hard cap on ErrorTracker entries (evict oldest when exceeded). */
+export const ERROR_TRACKER_MAX_ENTRIES = 200;
+
 /**
  * Tracks recent navigation errors (404s, bot walls) to detect agents stuck in
  * retry loops. Ring buffer keyed by URL origin+pathname (strips query/fragment).
@@ -72,11 +81,27 @@ export class ErrorTracker {
   private readonly maxEntries: number;
   private readonly domainThreshold: number;
   private readonly urlThreshold: number;
+  private readonly now: () => number;
 
-  constructor(opts?: { maxEntries?: number; domainThreshold?: number; urlThreshold?: number }) {
-    this.maxEntries = opts?.maxEntries ?? 30;
+  constructor(opts?: {
+    maxEntries?: number;
+    domainThreshold?: number;
+    urlThreshold?: number;
+    now?: () => number;
+  }) {
+    this.maxEntries = opts?.maxEntries ?? ERROR_TRACKER_MAX_ENTRIES;
     this.domainThreshold = opts?.domainThreshold ?? 5;
     this.urlThreshold = opts?.urlThreshold ?? 2;
+    this.now = opts?.now ?? Date.now;
+  }
+
+  /** Evict entries older than TTL and enforce the hard cap. */
+  private evict(): void {
+    const cutoff = this.now() - ERROR_TRACKER_TTL_MS;
+    this.entries = this.entries.filter((e) => e.ts >= cutoff);
+    if (this.entries.length > ERROR_TRACKER_MAX_ENTRIES) {
+      this.entries.splice(0, this.entries.length - ERROR_TRACKER_MAX_ENTRIES);
+    }
   }
 
   /** Normalise a URL to origin+pathname for dedup (strip query, fragment). */
@@ -91,8 +116,9 @@ export class ErrorTracker {
 
   /** Record a failed navigation. */
   record(url: string): void {
+    this.evict();
     const { key, domain } = this.normalise(url);
-    this.entries.push({ key, domain, ts: Date.now() });
+    this.entries.push({ key, domain, ts: this.now() });
     if (this.entries.length > this.maxEntries) {
       this.entries.shift();
     }
@@ -103,6 +129,7 @@ export class ErrorTracker {
    * agent appears to be looping, or null if the URL looks fresh.
    */
   check(url: string): string | null {
+    this.evict();
     const { key, domain } = this.normalise(url);
 
     // Exact URL repeat
@@ -192,6 +219,133 @@ export function capText(s: string, maxChars: number): string {
   return s.slice(0, maxChars) + "…";
 }
 
+// ---------------------------------------------------------------------------
+// Fingerprint consistency — used by smoke_test, unit-testable without a browser
+// ---------------------------------------------------------------------------
+
+/** Raw browser identity collected by smoke_test via page.evaluate(). */
+export interface FingerprintInput {
+  userAgent: string;
+  platform: string;
+  userAgentData?: {
+    brands?: Array<{ brand: string; version: string }>;
+    platform?: string;
+    mobile?: boolean;
+  };
+  webdriver: boolean | undefined;
+  languages: readonly string[] | string[];
+  pluginsCount: number;
+  timeZone: string;
+  screen?: { width: number; height: number };
+}
+
+/** One consistency check result. */
+export interface FingerprintCheck {
+  check: string;
+  observed: string;
+  pass: boolean;
+}
+
+/**
+ * Consistency checks for a browser fingerprint. Never hardcodes an expected
+ * OS — it compares the platform token in the UA to navigator.platform (and
+ * navigator.userAgentData.platform when present). Detection signals such as
+ * plugins.length and screen size are reported, not hard-failed.
+ */
+export function checkFingerprintConsistency(fp: FingerprintInput): FingerprintCheck[] {
+  const results: FingerprintCheck[] = [];
+
+  // The bot tell is webdriver === true; false and undefined are both normal
+  // for real browsers, so only the true value fails.
+  results.push({
+    check: "webdriver hidden",
+    observed: `webdriver=${String(fp.webdriver)}`,
+    pass: fp.webdriver !== true,
+  });
+
+  // Rough family match between the UA platform token and navigator.platform.
+  const uaFamily = inferUaPlatformFamily(fp.userAgent);
+  const navFamily = normalizePlatformFamily(fp.platform);
+  const uaDataFamily = fp.userAgentData?.platform
+    ? normalizePlatformFamily(fp.userAgentData.platform)
+    : undefined;
+
+  const familyMatch = uaFamily === undefined || uaFamily === navFamily;
+  const uaDataMatch = uaDataFamily === undefined || uaDataFamily === navFamily;
+  const observedParts = [
+    `ua=${fp.userAgent.slice(0, 80)}`,
+    `platform=${fp.platform}`,
+    fp.userAgentData?.platform ? `userAgentData.platform=${fp.userAgentData.platform}` : null,
+  ].filter((s): s is string => !!s);
+
+  results.push({
+    check: "UA/platform consistency",
+    observed: observedParts.join(", "),
+    pass: familyMatch && uaDataMatch,
+  });
+
+  const langs = Array.isArray(fp.languages) ? fp.languages : [];
+  results.push({
+    check: "languages non-empty",
+    observed: `languages=${langs.slice(0, 5).join(",") || "(empty)"}`,
+    pass: langs.length > 0,
+  });
+
+  // plugins.length is a signal (headless Chromium often reports 0), not a fail.
+  results.push({
+    check: "plugins count",
+    observed: `plugins=${fp.pluginsCount}`,
+    pass: true,
+  });
+
+  // Validate that the browser reports a real IANA time zone.
+  let tzValid = false;
+  if (fp.timeZone) {
+    try {
+      new Intl.DateTimeFormat("en-US", { timeZone: fp.timeZone });
+      tzValid = true;
+    } catch {
+      tzValid = false;
+    }
+  }
+  results.push({
+    check: "timeZone valid",
+    observed: `timeZone=${fp.timeZone || "(empty)"}`,
+    pass: tzValid,
+  });
+
+  // Screen dimensions are reported as a signal, not a hard-fail check.
+  if (fp.screen) {
+    results.push({
+      check: "screen dimensions",
+      observed: `screen=${fp.screen.width}x${fp.screen.height}`,
+      pass: true,
+    });
+  }
+
+  return results;
+}
+
+function inferUaPlatformFamily(userAgent: string): string | undefined {
+  const ua = userAgent.toLowerCase();
+  if (ua.includes("windows nt") || ua.includes("win64") || ua.includes("win32")) return "windows";
+  if (ua.includes("macintosh") || ua.includes("mac os x")) return "mac";
+  if (ua.includes("linux") || ua.includes("x11")) return "linux";
+  if (ua.includes("android")) return "android";
+  if (ua.includes("iphone") || ua.includes("ipad") || ua.includes("ipod")) return "ios";
+  return undefined;
+}
+
+function normalizePlatformFamily(platform: string): string {
+  const p = platform.toLowerCase();
+  if (p.startsWith("win")) return "windows";
+  if (p === "macintel" || p.startsWith("mac")) return "mac";
+  if (p.startsWith("linux")) return "linux";
+  if (p === "android") return "android";
+  if (p === "iphone" || p === "ipad" || p === "ipod") return "ios";
+  return p;
+}
+
 /**
  * Detect Playwright "browser/context has been closed" errors. These arise when
  * the browser process died, the Steel session expired, or a context got
@@ -247,6 +401,29 @@ export function detectFieldKind(
     if (ty === "radio") return "radio";
   }
   return "text";
+}
+
+/**
+ * In-page function: takes an array of CSS selectors and returns a map of
+ * selector → { tag, type } or null (element not found). Designed to be
+ * serialized and run via page.evaluate so that kind-detection for an
+ * entire form is a single round-trip instead of N per-field evaluates.
+ */
+export function detectFieldsInPage(
+  selectors: string[],
+): Record<string, { tag: string; type: string } | null> {
+  const out: Record<string, { tag: string; type: string } | null> = {};
+  for (const sel of selectors) {
+    const el = document.querySelector(sel) as HTMLElement | null;
+    if (!el) {
+      out[sel] = null;
+      continue;
+    }
+    const tag = el.tagName;
+    const type = (el as HTMLInputElement).type ?? "";
+    out[sel] = { tag, type };
+  }
+  return out;
 }
 
 /**
@@ -349,6 +526,164 @@ export function deriveDownloadFilename(url: string): string {
   return `download_${Date.now()}`;
 }
 
+// -----------------------------------------------------------------------------
+// Content-area extraction — shared logic for get_page_text, go_to_url readPage,
+// scroll readAfterScroll, and fetch_urls fallback.
+//
+// The extraction function is designed to be passed to page.evaluate() (runs in
+// the browser) AND usable under linkedom in tests. It must be self-contained
+// (no closure over module scope) because evaluate() serializes it.
+// -----------------------------------------------------------------------------
+
+/**
+ * Self-contained content-area extraction function designed to be passed to
+ * page.evaluate() (Playwright serializes it to the browser) AND run under
+ * linkedom in tests. Contains all dependencies inline — no module closure.
+ *
+ * Two modes:
+ *   mode="walk" (default) — walk-based extraction with block-tag awareness.
+ *     When includeLinks is true, anchor text gets [href] appended and links
+ *     are collected separately. Anchor text uses textContent?.trim() (preserves
+ *     internal whitespace like "A\n B") matching the original get_page_text
+ *     includeLinks behavior.
+ *   mode="innerText" — uses HTMLElement.innerText (simpler, matches the
+ *     go_to_url readPage / scroll readAfterScroll / fetch_urls fallback path).
+ *
+ * Returns { text, links?, __noMatch? }.
+ */
+export function extractPageContent(
+  opts: {
+    selector?: string | null;
+    includeLinks?: boolean;
+    mode?: "walk" | "innerText";
+  },
+  doc?: Document,
+): { text: string; links?: Array<{ text: string; href: string }>; __noMatch?: boolean } {
+  // Self-contained: all constants inlined so the function works when
+  // serialized to the browser via page.evaluate().
+  const CONTENT_AREA_SELECTORS = ["main", "article", '[role="main"]', "body"] as const;
+  const BLOCK_TAGS = new Set([
+    "P",
+    "DIV",
+    "LI",
+    "H1",
+    "H2",
+    "H3",
+    "H4",
+    "H5",
+    "H6",
+    "TR",
+    "BLOCKQUOTE",
+    "PRE",
+    "SECTION",
+    "ARTICLE",
+    "HEADER",
+    "FOOTER",
+    "NAV",
+    "ASIDE",
+    "MAIN",
+    "DETAILS",
+    "SUMMARY",
+    "FIGCAPTION",
+    "DT",
+    "DD",
+  ]);
+
+  const d = doc || document;
+  const sel = opts.selector ?? null;
+  const includeLinks = opts.includeLinks ?? false;
+  const mode = opts.mode ?? "walk";
+
+  // Find content root
+  let root: Element | null = null;
+  if (sel) {
+    root = d.querySelector(sel);
+  } else {
+    for (const s of CONTENT_AREA_SELECTORS) {
+      if (s === "body") {
+        root = d.body;
+        break;
+      }
+      const el = d.querySelector(s);
+      if (el && (el.textContent?.trim().length ?? 0) > 100) {
+        root = el;
+        break;
+      }
+    }
+    if (!root) root = d.body;
+  }
+  if (!root) return sel ? { text: "", __noMatch: true } : { text: "" };
+
+  if (mode === "innerText") {
+    const text = ((root as HTMLElement)?.innerText ?? "")
+      .replace(/[^\S\n]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    return { text };
+  }
+
+  // Walk-based extraction — matches original get_page_text includeLinks behavior.
+  // Anchor text uses textContent?.trim() (preserves internal whitespace like
+  // "A\n B" — the outer normalizer only collapses non-newline whitespace).
+  const rawLinks: Array<{ text: string; href: string }> = [];
+
+  const walk = (node: Element): string => {
+    if (node.tagName === "BR") return "\n";
+    if (node.tagName === "A") {
+      const href = (node as HTMLAnchorElement).href;
+      const txt = (node.textContent ?? "").trim();
+      if (includeLinks && href) rawLinks.push({ text: txt, href });
+      return includeLinks ? `${txt} [${href}]` : txt;
+    }
+    const inner = Array.from(node.childNodes)
+      .map((n) => (n.nodeType === 3 ? (n.textContent ?? "") : walk(n as Element)))
+      .join("");
+    return BLOCK_TAGS.has(node.tagName) ? "\n" + inner + "\n" : inner;
+  };
+
+  const text = walk(root)
+    .replace(/[^\S\n]+/g, " ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+
+  if (includeLinks) {
+    return { text, links: rawLinks };
+  }
+  return { text };
+}
+
+/**
+ * Validate that each cookie in a set has either `url` or (`domain` AND `path`).
+ * Returns an array of violation messages (empty = all valid).
+ */
+export function validateCookies(
+  cookies: Array<{ name: string; value?: string; url?: string; domain?: string; path?: string }>,
+): string[] {
+  const violations: string[] = [];
+  for (const c of cookies) {
+    if (!c.url && !(c.domain && c.path)) {
+      violations.push(`Cookie "${c.name}": needs url, or domain+path.`);
+    }
+  }
+  return violations;
+}
+
+/**
+ * Validate a JavaScript expression before sending it to page.evaluate().
+ * Uses new Function() to syntax-check — statements like `let x=1; x` will
+ * fail because the tool contract requires a single expression.
+ * Returns an error message string, or null if valid.
+ */
+export function validateExpression(expression: string): string | null {
+  try {
+    new Function(`return (${expression})`);
+  } catch (e) {
+    const msg = (e as Error).message;
+    return `Expression is not valid JavaScript: ${msg}. The expression must be a single expression (not a statement). Wrap multi-line logic in an IIFE: (() => { ... })()`;
+  }
+  return null;
+}
+
 /**
  * Clean Playwright error messages for LLM consumption:
  *   - Strip ANSI colour escapes (ESC + `[` + digits + `m`) that Playwright
@@ -375,4 +710,285 @@ export function cleanErrorMessage(msg: unknown): string {
     .join("\n")
     .trimEnd();
   return filtered;
+}
+
+// ---------------------------------------------------------------------------
+// Profile name validation — prevents path traversal in profilesDir file paths.
+// Matches the same pattern that relay /push and profile tools accept.
+// ---------------------------------------------------------------------------
+
+const PROFILE_NAME_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/**
+ * Returns true if the name is safe to use as a profile filename component.
+ * Rejects traversal attempts (../), separators (a/b), absolute paths,
+ * empty strings, and names longer than 64 characters.
+ */
+export function isValidProfileName(name: string): boolean {
+  return PROFILE_NAME_RE.test(name);
+}
+
+/**
+ * Validates that the resolved path for a profile name stays under the given
+ * profiles directory. Throws if the name is invalid or if the resolved path
+ * escapes the directory (defense in depth — even if the validator has a bug).
+ */
+export function assertSafeProfilePath(name: string, profilesDir: string): string {
+  if (!isValidProfileName(name)) {
+    throw new Error(
+      `Invalid profile name "${name}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
+    );
+  }
+  const resolvedDir = path.resolve(profilesDir);
+  const resolvedPath = path.resolve(path.join(resolvedDir, `${name}.json`));
+  if (!resolvedPath.startsWith(resolvedDir + path.sep)) {
+    throw new Error(`Profile path "${resolvedPath}" escapes profiles directory "${resolvedDir}".`);
+  }
+  return resolvedPath;
+}
+
+// ---------------------------------------------------------------------------
+// Path containment — upload/output source-vs-root realpath guard.
+//
+// Used by upload_file (source paths must resolve under UPLOAD_ROOT) and by
+// writeToFile + download_file (outputPath must resolve under OUTPUT_ROOT).
+// Defeats "../" traversal and symlink escape. The escape hatch is a root
+// value of "*" (resolved from "" or "*" at env.ts transform time).
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve `p` to its real path (following symlinks). If the path does not
+ * exist yet (e.g. outputPath for a brand-new file), walk up the path
+ * ancestors until one exists, realpath that, then rejoin the missing
+ * tail — that lets us validate a write destination whose parent dir
+ * doesn't exist yet either (mkdir -p later).
+ */
+export async function safeRealpath(p: string): Promise<string> {
+  let cur = p;
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      const resolved = await fs.realpath(cur);
+      return missing.length === 0 ? resolved : path.join(resolved, ...missing.reverse());
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) {
+        // Reached filesystem root without finding an existing ancestor —
+        // give up (caller will surface a clearer error).
+        throw new Error(`Cannot resolve path "${p}": no existing ancestor found.`);
+      }
+      missing.push(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+/**
+ * Return true when `p` is null, undefined, empty, or the literal "*" —
+ * i.e. when containment checking has been intentionally disabled by the
+ * operator (escape hatch).
+ */
+export function containmentDisabled(root: string | undefined | null): boolean {
+  return !root || root === "*";
+}
+
+/**
+ * Resolve `p` to its real path and verify it lies inside `root`. When root
+ * is "*" (or empty), the check is skipped and the real path is returned
+ * verbatim (escape hatch — operator trust mode).
+ *
+ * Throws with a descriptive error on:
+ *   - path resolution failure (parent doesn't exist, etc.)
+ *   - resolved path escaping `root` (including trailing-sep boundary bugs)
+ */
+export async function assertInsideRoot(
+  p: string,
+  root: string | undefined | null,
+  label: string,
+): Promise<string> {
+  if (containmentDisabled(root)) return p;
+  const resolvedRoot = await fs.realpath(root!);
+  const resolved = await safeRealpath(p);
+  // Append path.sep to root so /foo doesn't match /foobar.
+  const rootWithSep = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
+  if (resolved !== resolvedRoot && !resolved.startsWith(rootWithSep)) {
+    throw new Error(
+      `${label} "${p}" (resolved to "${resolved}") escapes the configured root "${resolvedRoot}". ` +
+        `Set the root env var to "*" to disable containment (escape hatch).`,
+    );
+  }
+  return resolved;
+}
+
+// ---------------------------------------------------------------------------
+// SPA-shell / challenge detection — used by fetch_urls to decide when to
+// escalate from the HTTP fast-path to a real browser tab.
+//
+// A "shell" is what the server returns when the meaningful content is rendered
+// by client-side JavaScript (React/Next/Vue SPA roots) or when an anti-bot
+// challenge page is delivered instead of the real content. The HTTP path can't
+// execute JS, so it can't see the real text — it should fall back to the
+// browser path which can run the SPA or solve the challenge.
+//
+// Three detection signals, any one of which triggers escalation:
+//   1. SPA mount point: extracted text is short (<200 chars) AND the HTML has
+//      a root-level <div id="root|app|__next"> AND the HTML is non-trivial.
+//   2. Anti-bot challenge markers: "Just a moment...", "Checking your browser",
+//      "cf-challenge" — Cloudflare/Imperva/etc.
+//   3. Empty response: HTML is tiny (<2000 chars) with no extracted content.
+//   4. HTTP error status (403/429/503) — caller passes the status in.
+// ---------------------------------------------------------------------------
+
+const SPA_ROOT_RE = /<div[^>]+id=["'](?:root|app|__next)["']/i;
+const CHALLENGE_RE =
+  /cf-challenge|Just a moment|Checking your browser|Verify you are human|Attention Required/i;
+
+/**
+ * Returns true when the HTTP fast-path result looks like an SPA shell or a
+ * challenge page — i.e. caller should escalate to a real browser tab.
+ *
+ * Pure function; safe to unit-test with synthetic HTML. The optional `status`
+ * arg carries the HTTP response status; 403/429/503 always escalate.
+ */
+export function isSpaShell(html: string, extractedText: string, status?: number): boolean {
+  if (status === 403 || status === 429 || status === 503) return true;
+  if (CHALLENGE_RE.test(html)) return true;
+  const trimmed = extractedText.trim();
+  if (trimmed.length >= 200) return false;
+  // Short or empty text: shell or challenge.
+  if (html.length < 2000) return true;
+  if (SPA_ROOT_RE.test(html)) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
+// Network event filtering — pure helpers for get_network
+// ---------------------------------------------------------------------------
+
+/** Lightweight shape used by filterNetworkEvents so the helper stays testable
+ * without importing the full BrowserManager type. */
+export interface NetworkEventLike {
+  id: number;
+  tabId?: number;
+  method: string;
+  url: string;
+  resourceType: string;
+  status?: number;
+  failed?: boolean;
+  contentType?: string;
+  sizeBytes?: number;
+  durationMs?: number;
+  at: number;
+}
+
+/**
+ * Validate a URL pattern before filtering. Returns a descriptive error message
+ * for invalid /regex/ patterns; returns undefined for valid patterns and
+ * plain substrings.
+ */
+export function validateUrlPattern(pattern?: string): string | undefined {
+  if (!pattern || !pattern.startsWith("/")) return undefined;
+
+  const lastSlash = pattern.lastIndexOf("/");
+  if (lastSlash <= 0) {
+    // A leading slash with no closing slash cannot be a valid regex literal.
+    try {
+      new RegExp(pattern.slice(1));
+      return undefined;
+    } catch (err) {
+      return `Invalid regex: ${(err as Error).message}`;
+    }
+  }
+
+  const body = pattern.slice(1, lastSlash);
+  const flags = pattern.slice(lastSlash + 1);
+  try {
+    new RegExp(body, flags);
+    return undefined;
+  } catch (err) {
+    return `Invalid regex: ${(err as Error).message}`;
+  }
+}
+
+/**
+ * Match a URL against a pattern. Patterns wrapped in /.../ are treated as a
+ * RegExp (flags supported, e.g. /api/i); otherwise the pattern is a substring.
+ */
+export function matchesUrlPattern(url: string, pattern: string): boolean {
+  if (pattern.length >= 2 && pattern.startsWith("/") && pattern.endsWith("/")) {
+    try {
+      return new RegExp(pattern.slice(1, -1)).test(url);
+    } catch {
+      return false;
+    }
+  }
+  if (pattern.length >= 2 && pattern.startsWith("/") && /\/[imsuy]*$/.test(pattern)) {
+    // Regex with flags: /.../i
+    const lastSlash = pattern.lastIndexOf("/");
+    const body = pattern.slice(1, lastSlash);
+    const flags = pattern.slice(lastSlash + 1);
+    try {
+      return new RegExp(body, flags).test(url);
+    } catch {
+      return false;
+    }
+  }
+  return url.includes(pattern);
+}
+
+/**
+ * Match an event status against a filter token.
+ *   - "4xx", "5xx", etc. match the corresponding HTTP range.
+ *   - Exact digits match the exact status code.
+ */
+export function matchesNetworkStatus(
+  status: number | undefined,
+  failed: boolean | undefined,
+  filter: string,
+): boolean {
+  if (/^(\d)xx$/i.test(filter)) {
+    const first = parseInt(filter[0], 10);
+    return status !== undefined && status >= first * 100 && status < (first + 1) * 100;
+  }
+  if (/^\d+$/.test(filter)) {
+    return status === parseInt(filter, 10);
+  }
+  if (filter === "failed" || filter === "FAIL") {
+    return !!failed;
+  }
+  return false;
+}
+
+/**
+ * Pure filter for get_network. Preserves chronological order; applies limit
+ * from the newest end so callers see the most recent matches.
+ */
+export function filterNetworkEvents(
+  events: NetworkEventLike[],
+  filter: {
+    urlPattern?: string;
+    resourceType?: string;
+    status?: string;
+    tabId?: number;
+    limit?: number;
+  },
+): NetworkEventLike[] {
+  let result = events.slice();
+  if (filter.tabId !== undefined) {
+    result = result.filter((e) => e.tabId === filter.tabId);
+  }
+  if (filter.resourceType) {
+    result = result.filter((e) => e.resourceType === filter.resourceType);
+  }
+  if (filter.urlPattern) {
+    result = result.filter((e) => matchesUrlPattern(e.url, filter.urlPattern!));
+  }
+  if (filter.status) {
+    result = result.filter((e) => matchesNetworkStatus(e.status, e.failed, filter.status!));
+  }
+  const limit = filter.limit ?? 30;
+  if (limit > 0 && result.length > limit) {
+    result = result.slice(-limit);
+  }
+  return result;
 }

@@ -7,3 +7,4 @@ export { register as registerSession } from "./session.js";
 export { register as registerNetwork } from "./network.js";
 export { register as registerCredentials } from "./credentials.js";
 export { register as registerProfiles } from "./profiles.js";
+export { register as registerAct } from "./act.js";

@@ -13,11 +13,19 @@ import fs from "fs/promises";
 import path from "path";
 import { sleep } from "./utils.js";
 
-import { chromium, Browser, BrowserContext, Page } from "playwright";
+import { chromium, Browser, BrowserContext, Page, Request, Response } from "patchright";
 import { Steel } from "steel-sdk";
 import { z } from "zod";
 import { EnvSchema } from "./env";
-import { isBrowserClosedError, isSteelSessionStuck } from "./helpers";
+import {
+  filterNetworkEvents,
+  isBrowserClosedError,
+  isSteelSessionStuck,
+  isValidProfileName,
+  assertSafeProfilePath,
+} from "./helpers";
+import { clearSnapshot, clearAllSnapshots } from "./snapshot.js";
+import { SETTLE_INIT_SCRIPT } from "./settle.js";
 
 // Inferred type of the parsed env object.
 export type Env = z.infer<typeof EnvSchema>;
@@ -30,8 +38,59 @@ export type ConsoleMessage = {
   level: string;
   text: string;
   timestamp: number;
+  tabId?: number;
   location?: { url: string; lineNumber: number; columnNumber: number };
 };
+
+// -----------------------------------------------------------------------------
+// NetworkEvent — request/response metadata captured by BrowserManager
+// -----------------------------------------------------------------------------
+
+export interface NetworkEvent {
+  id: number;
+  tabId?: number;
+  method: string;
+  url: string;
+  resourceType: string;
+  status?: number;
+  contentType?: string;
+  sizeBytes?: number;
+  durationMs?: number;
+  at: number;
+  failed?: boolean;
+}
+
+// -----------------------------------------------------------------------------
+// Error classes for owner-isolated tab access
+// -----------------------------------------------------------------------------
+
+/**
+ * Thrown when an agent tries to access a tab owned by a different agent
+ * without the `force: true` override.
+ */
+export class TabOwnershipError extends Error {
+  constructor(
+    public readonly tabId: number,
+    public readonly tabOwner: string,
+    public readonly caller: string,
+  ) {
+    super(
+      `Tab ${tabId} belongs to owner "${tabOwner}" — you are "${caller}". ` +
+        `Pass force:true to override, or target your own tab.`,
+    );
+    this.name = "TabOwnershipError";
+  }
+}
+
+/**
+ * Thrown when an owner-based lookup finds no open tab for the given owner.
+ */
+export class NoTabError extends Error {
+  constructor(public readonly owner: string) {
+    super(`No open tab for owner "${owner}" — call new_tab with your owner first.`);
+    this.name = "NoTabError";
+  }
+}
 
 // -----------------------------------------------------------------------------
 // BrowserManager — index.ts lines 59–938
@@ -63,12 +122,63 @@ export class BrowserManager {
   private nextTabId = 1;
   private currentTabId = 1;
 
+  // Per-owner active tab tracking. Updated whenever a tab is touched
+  // with an explicit owner context (touchTab, newTab with owner).
+  // resolveTab uses this for owner-only lookup (no explicit tabId).
+  private ownerActiveTab = new Map<string, number>();
+
   // Profile management — multiple isolated BrowserContexts within one browser.
   // Each profile has its own cookies/localStorage/cache. Tabs from all profiles
   // share the global tabs map (globally unique tabId), so existing tools work
   // unchanged — agents just pass their tabId.
   private profiles: Map<string, { context: BrowserContext; tabIds: Set<number> }> = new Map();
   private tabToProfile: Map<number, string> = new Map(); // tabId → profileName
+
+  // Tracks pages → tabIds for idempotent allocation. A context.on("page")
+  // listener fires for ALL new pages including our own context.newPage()
+  // calls — if allocateTab didn't deduplicate, every newTab/createProfile
+  // page would be registered twice.
+  private pageToTabId = new WeakMap<Page, number>();
+
+  // Dialog management — per-tab policy + last dialog record.
+  // Playwright dialogs block page operations until handled, so we resolve them
+  // the instant they fire using a pre-armed policy (default: dismiss). The
+  // previous pending/timer model allowed a later tool call to decide, but the
+  // triggering action itself hangs until the dialog is resolved — a serial MCP
+  // client cannot call handle_dialog until the action returns.
+  private dialogPolicy = new Map<
+    number,
+    { action: "accept" | "dismiss"; promptText?: string; once?: boolean }
+  >();
+  private lastDialogs = new Map<
+    number,
+    {
+      type: string;
+      message: string;
+      defaultValue: string;
+      action: "accepted" | "dismissed";
+      promptText?: string;
+      autoHandled: boolean;
+      reported: boolean;
+      at: number;
+    }
+  >();
+
+  // Network capture — request/response ring buffer shared across contexts.
+  // Response bodies are kept via WeakRef so busy pages cannot pin hundreds of
+  // full Response objects in memory; the map entry is deleted on eviction/stop.
+  private networkEvents: NetworkEvent[] = [];
+  private nextNetworkEventId = 1;
+  private requestStartTimes = new WeakMap<Request, number>();
+  private responsesById = new Map<number, WeakRef<Response>>();
+  private wiredNetworkContexts = new WeakSet<BrowserContext>();
+
+  // Last known URL per tab, used by crash recovery to re-navigate after a
+  // page is detected as closed/crashed.
+  private tabLastUrl = new Map<number, string>();
+
+  // One-shot notices appended to the next tool result for a recovered tab.
+  private recoveryNotices = new Map<number, string>();
 
   constructor(private readonly env: Env) {}
 
@@ -77,30 +187,348 @@ export class BrowserManager {
     return this.browserContext;
   }
 
-  /** Mark a tab as recently used. Called on every page-interacting tool. */
-  touchTab(tabId: number): void {
-    if (this.tabs.has(tabId)) this.tabLastActivity.set(tabId, Date.now());
+  /** Expose the active tab id for tests and tool-side pointer checks. */
+  get activeTabId(): number {
+    return this.currentTabId;
+  }
+
+  /**
+   * Mark a tab as recently used. Called on every page-interacting tool.
+   * When an owner is given, also updates the per-owner active tab pointer
+   * so that owner-only resolveTab lookups find the right tab.
+   */
+  touchTab(tabId: number, owner?: string): void {
+    if (this.tabs.has(tabId)) {
+      this.tabLastActivity.set(tabId, Date.now());
+      if (owner) this.ownerActiveTab.set(owner, tabId);
+    }
+  }
+
+  /**
+   * Return the owner string for `tabId`, or undefined if the tab is unknown
+   * or unowned. Public surface so tool handlers (e.g. get_network's
+   * cross-tab body gate) can ask without reaching into private state.
+   */
+  getTabOwner(tabId: number): string | undefined {
+    return this.tabOwners.get(tabId);
+  }
+
+  /**
+   * Resolve a tab ID from an optional explicit ID, owner context, and
+   * force flag. This is the single ownership guard that all page-accessing
+   * calls should route through.
+   *
+   * Rules (first match wins):
+   * 1. explicit tabId + owner given AND tab has different owner AND !force →
+   *    throw TabOwnershipError
+   * 2. explicit tabId → return it (caller validates existence)
+   * 3. owner given, no tabId → ownerActiveTab lookup; fall back to that
+   *    owner's most-recently-touched surviving tab; none → NoTabError
+   * 4. neither → return currentTabId (global active tab pointer)
+   */
+  resolveTab(opts: { tabId?: number; owner?: string; force?: boolean }): number {
+    // Explicit tabId + optional ownership check
+    if (opts.tabId !== undefined) {
+      if (opts.owner) {
+        const tabOwner = this.tabOwners.get(opts.tabId);
+        if (tabOwner !== undefined && tabOwner !== opts.owner && !opts.force) {
+          throw new TabOwnershipError(opts.tabId, tabOwner, opts.owner);
+        }
+      }
+      return opts.tabId;
+    }
+
+    // Owner-based lookup (no explicit tabId)
+    if (opts.owner) {
+      // 3a. Check cached per-owner active tab — common case
+      const active = this.ownerActiveTab.get(opts.owner);
+      if (active !== undefined) {
+        const page = this.tabs.get(active);
+        if (page && !page.isClosed()) return active;
+        // Stale pointer — page was closed externally. Fall through to scan.
+      }
+
+      // 3b. Fall back to most-recently-touched surviving tab for this owner
+      let bestId: number | undefined;
+      let bestTime = 0;
+      for (const [id, last] of this.tabLastActivity) {
+        if (this.tabOwners.get(id) === opts.owner && last > bestTime) {
+          const page = this.tabs.get(id);
+          if (page && !page.isClosed()) {
+            bestId = id;
+            bestTime = last;
+          }
+        }
+      }
+      if (bestId !== undefined) {
+        // Repair the stale pointer
+        this.ownerActiveTab.set(opts.owner, bestId);
+        return bestId;
+      }
+
+      // 3c. Nothing found
+      throw new NoTabError(opts.owner);
+    }
+
+    // Neither — legacy global active pointer
+    return this.currentTabId;
   }
 
   private allocateTab(page: Page, owner?: string): number {
+    // Idempotent: if this page was already registered (e.g. by the
+    // context.on("page") listener that fires for ALL new pages including
+    // our own context.newPage() calls), return the existing tabId.
+    const existing = this.pageToTabId.get(page);
+    if (existing !== undefined) {
+      // Merge owner metadata: listener-registered pages have no owner, but
+      // an explicit caller may supply one. Refresh activity so the tab stays
+      // alive. Never steal a tab from its existing owner.
+      if (owner) {
+        const existingOwner = this.tabOwners.get(existing);
+        if (existingOwner === undefined) {
+          this.tabOwners.set(existing, owner);
+        } else if (existingOwner !== owner) {
+          console.error(
+            `[steel-mcp] allocateTab re-registration warning: tab ${existing} already owned by "${existingOwner}"; ignoring owner "${owner}".`,
+          );
+        }
+      }
+      this.tabLastActivity.set(existing, Date.now());
+      return existing;
+    }
+
     const id = this.nextTabId++;
     this.tabs.set(id, page);
     if (owner) this.tabOwners.set(id, owner);
     this.tabLastActivity.set(id, Date.now());
     this.attachConsoleListener(page);
-    // Auto-cleanup tab bookkeeping if the page closes externally.
-    page.on("close", () => {
-      this.tabs.delete(id);
-      this.tabOwners.delete(id);
-      this.tabLastActivity.delete(id);
-      const profileName = this.tabToProfile.get(id);
-      if (profileName) {
-        this.tabToProfile.delete(id);
-        const profile = this.profiles.get(profileName);
-        if (profile) profile.tabIds.delete(id);
+    this.attachPageListeners(page, id);
+    this.pageToTabId.set(page, id);
+    return id;
+  }
+
+  /**
+   * Attach dialog + close listeners to a page. Extracted so crash recovery
+   * can re-wire listeners on a replacement page without re-running the full
+   * allocateTab allocation path. Guards ignore events from a page that has
+   * been replaced in the tab registry.
+   */
+  private attachPageListeners(page: Page, id: number): void {
+    // Dialog capture: Playwright dialogs block all page operations until
+    // handled, so we resolve them immediately using the tab's pre-armed policy.
+    // Default policy is dismiss (Playwright's conservative default). The agent
+    // arms accept/accept+promptText via handle_dialog BEFORE the action that
+    // triggers the dialog. beforeunload is always accepted so navigation isn't
+    // blocked. The whole handler is wrapped in try/catch with a best-effort
+    // dismiss fallback so a listener bug never wedges the tab.
+    page.on("dialog", async (dialog) => {
+      // Ignore events from a page that is no longer the registered one
+      // (e.g. the original page was replaced during crash recovery).
+      if (this.tabs.get(id) !== page) return;
+
+      const type = dialog.type();
+      const message = dialog.message();
+      const defaultValue = dialog.defaultValue();
+
+      try {
+        if (type === "beforeunload") {
+          // beforeunload: auto-accept — blocking navigation is never useful for an agent.
+          await dialog.accept();
+          this.lastDialogs.set(id, {
+            type,
+            message,
+            defaultValue,
+            action: "accepted",
+            promptText: undefined,
+            autoHandled: true,
+            reported: true, // beforeunload is normal navigation noise; don't report
+            at: Date.now(),
+          });
+          return;
+        }
+
+        const policy = this.dialogPolicy.get(id);
+        const action = policy?.action ?? "dismiss";
+        const promptText = policy?.promptText;
+
+        if (action === "accept") {
+          await dialog.accept(promptText);
+        } else {
+          await dialog.dismiss();
+        }
+
+        this.lastDialogs.set(id, {
+          type,
+          message,
+          defaultValue,
+          action: action === "accept" ? "accepted" : "dismissed",
+          promptText,
+          autoHandled: true,
+          reported: false,
+          at: Date.now(),
+        });
+
+        if (policy?.once) {
+          this.dialogPolicy.delete(id);
+        }
+      } catch (err) {
+        // Internal failure in the listener — dismiss best-effort so the
+        // dialog does not wedge the tab permanently. Only log when the
+        // fallback dismiss ALSO fails (i.e. the dialog is truly stuck) —
+        // a known accept-throw under policy=accept is expected, the
+        // dismiss fallback handles it, and operators don't need a
+        // console.error for the expected path (which also keeps the gate
+        // output pristine).
+        try {
+          await dialog.dismiss();
+        } catch (fallbackErr) {
+          console.error(
+            `[steel-mcp] dialog handler error for tab ${id}: accept threw (${(err as Error).message}) AND dismiss fallback failed (${(fallbackErr as Error).message}); dialog may wedge the tab.`,
+          );
+        }
       }
     });
-    return id;
+
+    page.on("close", () => {
+      // Ignore close events from a page that was replaced by crash recovery
+      // so the new page's registry entry isn't wiped out.
+      if (this.tabs.get(id) !== page) return;
+      this.clearTabState(id);
+    });
+  }
+
+  /**
+   * Recreate a tab in-place: open a fresh page, swap it into the registry
+   * under the same tabId, re-wire listeners, and re-navigate to the last known
+   * URL. Sets a one-shot recovery notice for the tab.
+   *
+   * Owner / per-owner-active / profile / dialog metadata is *preserved*
+   * across recovery — the recovery path is a page-replacement, not a
+   * tab-disposal. softReset() is destructive and DOES drop owner state
+   * (browser death means no surviving tabs to keep track of).
+   */
+  private async _recoverTab(tabId: number): Promise<Page> {
+    // Snapshot metadata BEFORE any allocation so the replacement page can
+    // inherit it even when the allocation path triggers a transient-id
+    // remap that overwrites the original tabId's owner.
+    const priorOwner = this.tabOwners.get(tabId);
+    const priorProfile = this.tabToProfile.get(tabId);
+    const replacePage = async (page: Page): Promise<Page> => {
+      const oldPage = this.tabs.get(tabId);
+      if (oldPage) this.pageToTabId.delete(oldPage);
+
+      // Route the replacement page through the idempotent allocation path.
+      // The context "page" listener fires for context.newPage() too, so it
+      // may have already registered this page under a transient tabId. Using
+      // allocateTab merges that registration; we then remap to the original
+      // tabId and drop any transient entry so the registry stays coherent.
+      const allocatedId = this.allocateTab(page, priorOwner);
+      if (allocatedId !== tabId) {
+        this.tabs.delete(allocatedId);
+        this.tabOwners.delete(allocatedId);
+        this.tabLastActivity.delete(allocatedId);
+      }
+
+      this.tabs.set(tabId, page);
+      this.pageToTabId.set(page, tabId);
+      this.tabLastActivity.set(tabId, Date.now());
+      // Restore owner / profile metadata — allocateTab may have set owner
+      // on the transient id; we copy it back onto the original tabId and
+      // repair ownerActiveTab if the cached pointer was dropped.
+      if (priorOwner !== undefined) this.tabOwners.set(tabId, priorOwner);
+      if (priorProfile !== undefined) {
+        this.tabToProfile.set(tabId, priorProfile);
+        const profile = this.profiles.get(priorProfile);
+        if (profile && !profile.tabIds.has(tabId)) profile.tabIds.add(tabId);
+      }
+      if (priorOwner !== undefined && this.ownerActiveTab.get(priorOwner) === undefined) {
+        this.ownerActiveTab.set(priorOwner, tabId);
+      }
+      // allocateTab already wired console listeners; re-wire page-specific
+      // listeners so they reference the original tabId (the transient-id
+      // listeners will ignore events once the transient entry is gone).
+      this.attachPageListeners(page, tabId);
+      const lastUrl = this.tabLastUrl.get(tabId) ?? "about:blank";
+      try {
+        await page.goto(lastUrl, { waitUntil: "commit", timeout: 10000 });
+      } catch {
+        // Navigation failure on a crashed tab is best-effort; the caller
+        // still gets a live page to continue from.
+      }
+      this.tabLastUrl.set(tabId, page.url());
+      this.recoveryNotices.set(tabId, `⚠ tab ${tabId} crashed and was restored to ${page.url()}`);
+      return page;
+    };
+
+    try {
+      const newPage = await this.browserContext!.newPage();
+      return await replacePage(newPage);
+    } catch (err) {
+      if (!isBrowserClosedError(err)) throw err;
+      // Browser death: every tab is dead too — softReset clears all owner
+      // state by design (no surviving tabs to keep track of). The caller
+      // will re-create the requested tab on the fresh context.
+      await this.softReset();
+      await sleep(2000);
+      await this.initialize();
+      const newPage = await this.browserContext!.newPage();
+      return await replacePage(newPage);
+    }
+  }
+
+  /**
+   * Single-source per-tab cleanup. Drops every per-tab map entry that
+   * belongs to `id` — tabs, owners, activity, lastUrl, recoveryNotices,
+   * pageToTabId, dialogPolicy, lastDialogs, snapshot store, profile
+   * membership, and any ownerActiveTab pointer that pointed here.
+   *
+   * Called from:
+   *   - closeTab (manual close)
+   *   - the page.on("close") listener (Playwright-driven close)
+   *   - softReset / stop (full teardown — loops every id through this)
+   *
+   * Centralizing keeps the close-listener path and the manual-close path
+   * in lockstep so cleanup parity can't drift.
+   */
+  private clearTabState(id: number): void {
+    const page = this.tabs.get(id);
+
+    this.tabs.delete(id);
+    this.tabOwners.delete(id);
+    this.tabLastActivity.delete(id);
+    this.tabLastUrl.delete(id);
+    this.recoveryNotices.delete(id);
+    this.dialogPolicy.delete(id);
+    this.lastDialogs.delete(id);
+    if (page) this.pageToTabId.delete(page);
+
+    clearSnapshot(id);
+
+    for (const [o, activeId] of this.ownerActiveTab) {
+      if (activeId === id) this.ownerActiveTab.delete(o);
+    }
+
+    const profileName = this.tabToProfile.get(id);
+    if (profileName) {
+      this.tabToProfile.delete(id);
+      const profile = this.profiles.get(profileName);
+      if (profile) profile.tabIds.delete(id);
+    }
+  }
+
+  /**
+   * Return true if a page reference is unusable (closed or detached/crashed).
+   * `page.isClosed()` is free. `page.url()` is synchronous and throws on a
+   * detached/crashed target, so it adds no healthy-path CDP round-trip.
+   */
+  private isPageDead(page?: Page): boolean {
+    if (!page || page.isClosed()) return true;
+    try {
+      page.url();
+      return false;
+    } catch {
+      return true;
+    }
   }
 
   /** Start the idle sweeper. Idempotent; no-op if TAB_IDLE_TIMEOUT_MS=0. */
@@ -192,6 +620,9 @@ export class BrowserManager {
 
     this.browser = await chromium.connectOverCDP(wsUrl);
     this.browserContext = this.browser.contexts()[0];
+    // Settle detection init runs before any page script on future pages;
+    // the first page (already loaded) will be guarded by the undefined probe.
+    await this.browserContext.addInitScript(SETTLE_INIT_SCRIPT);
     const initialPage = this.browserContext.pages()[0];
     this.currentTabId = this.allocateTab(initialPage);
     // Mark as primary — idle sweeper must never close this tab, else Steel's
@@ -281,6 +712,7 @@ export class BrowserManager {
           height: this.env.DEFAULT_VIEWPORT_HEIGHT,
         },
       });
+      await this.browserContext.addInitScript(SETTLE_INIT_SCRIPT);
       const initialPage = await this.browserContext.newPage();
       this.currentTabId = this.allocateTab(initialPage);
       // Mark primary — consistency with steel mode, and protects the only
@@ -289,6 +721,16 @@ export class BrowserManager {
     }
 
     this.initialized = true;
+
+    // Wire network capture before popup capture so requests made by the
+    // initial page are recorded from the start.
+    this._wireNetworkCapture(this.browserContext!);
+
+    // Register popup/new-page detection. Pages created by the site
+    // (target=_blank, window.open) bypass allocateTab — this listener
+    // catches them and wires them into the tab registry.
+    this._wirePopupCapture(this.browserContext!);
+
     this.startIdleSweeper();
 
     // Health check: prove the context is actually usable before returning.
@@ -316,15 +758,190 @@ export class BrowserManager {
 
   /** Attach console log capture to a page (idempotent label via WeakSet). */
   private listenedPages = new WeakSet<Page>();
+
+  /**
+   * Wire request/response capture on a BrowserContext. Idempotent per context;
+   * skipped entirely when NETWORK_BUFFER_SIZE is 0.
+   */
+  private _wireNetworkCapture(context: BrowserContext): void {
+    if (this.env.NETWORK_BUFFER_SIZE <= 0) return;
+    if (this.wiredNetworkContexts.has(context)) return;
+    this.wiredNetworkContexts.add(context);
+
+    context.on("request", (request) => {
+      try {
+        this.requestStartTimes.set(request, Date.now());
+      } catch {
+        // Never let a listener bug escape into Playwright.
+      }
+    });
+
+    context.on("response", async (response) => {
+      try {
+        const request = response.request();
+        const start = this.requestStartTimes.get(request);
+        const page = request.frame()?.page();
+        const tabId = page ? this.pageToTabId.get(page) : undefined;
+        const headers = response.headers();
+        const contentType = headers["content-type"];
+        const contentLength = headers["content-length"];
+        const sizeBytes = contentLength ? parseInt(contentLength, 10) : undefined;
+
+        const event = {
+          id: this.nextNetworkEventId++,
+          tabId,
+          method: request.method(),
+          url: request.url(),
+          resourceType: request.resourceType(),
+          status: response.status(),
+          contentType,
+          sizeBytes,
+          durationMs: start ? Date.now() - start : undefined,
+          at: Date.now(),
+        };
+        this.pushNetworkEvent(event);
+        this.responsesById.set(event.id, new WeakRef(response));
+      } catch {
+        // best-effort capture
+      }
+    });
+
+    context.on("requestfailed", (request) => {
+      try {
+        const page = request.frame()?.page();
+        const tabId = page ? this.pageToTabId.get(page) : undefined;
+        this.pushNetworkEvent({
+          id: this.nextNetworkEventId++,
+          tabId,
+          method: request.method(),
+          url: request.url(),
+          resourceType: request.resourceType(),
+          failed: true,
+          at: Date.now(),
+        });
+      } catch {
+        // best-effort capture
+      }
+    });
+  }
+
+  /** Append a network event to the ring buffer and evict oldest if over capacity. */
+  private pushNetworkEvent(event: NetworkEvent): void {
+    if (this.env.NETWORK_BUFFER_SIZE <= 0) return;
+    this.networkEvents.push(event);
+    if (this.networkEvents.length > this.env.NETWORK_BUFFER_SIZE) {
+      const evicted = this.networkEvents.splice(
+        0,
+        this.networkEvents.length - this.env.NETWORK_BUFFER_SIZE,
+      );
+      for (const e of evicted) {
+        this.responsesById.delete(e.id);
+      }
+    }
+  }
+
+  /**
+   * Return network events matching the given filter. Results are chronological
+   * (oldest first) with the newest `limit` entries when capped. Owner filtering
+   * is applied here because only the manager knows tab ownership.
+   */
+  getNetworkEvents(filter?: {
+    urlPattern?: string;
+    resourceType?: string;
+    status?: string;
+    tabId?: number;
+    owner?: string;
+    limit?: number;
+  }): NetworkEvent[] {
+    let events = this.networkEvents.slice();
+
+    if (filter?.owner) {
+      const ownedIds = new Set<number>();
+      for (const [id, owner] of this.tabOwners) {
+        if (owner === filter.owner) ownedIds.add(id);
+      }
+      events = events.filter((e) => e.tabId !== undefined && ownedIds.has(e.tabId!));
+    }
+
+    return filterNetworkEvents(events, {
+      urlPattern: filter?.urlPattern,
+      resourceType: filter?.resourceType,
+      status: filter?.status,
+      tabId: filter?.tabId,
+      limit: filter?.limit,
+    }) as NetworkEvent[];
+  }
+
+  /**
+   * Fetch the response body for a buffered network event. Throws if the event
+   * has been evicted or the WeakRef Response was collected.
+   */
+  async getResponseBody(id: number): Promise<string> {
+    const event = this.networkEvents.find((e) => e.id === id);
+    if (!event) {
+      throw new Error("body no longer available");
+    }
+    const ref = this.responsesById.get(id);
+    const response = ref?.deref();
+    if (!response) {
+      throw new Error("body no longer available");
+    }
+    const body = await response.body();
+    return body.toString();
+  }
+
+  /**
+   * Record the last known URL for a tab. Called by navigation tools after a
+   * successful navigation so crash recovery can restore to the right place.
+   */
+  setTabLastUrl(tabId: number, url: string): void {
+    this.tabLastUrl.set(tabId, url);
+  }
+
+  /**
+   * Consume and return the recovery notice for a tab, if any. The notice is
+   * cleared after the first read so it is appended to only one tool result.
+   */
+  consumeRecoveryNotice(tabId: number): string {
+    const notice = this.recoveryNotices.get(tabId);
+    if (!notice) return "";
+    this.recoveryNotices.delete(tabId);
+    return notice;
+  }
+
+  /**
+   * Wire popup/page capture on a BrowserContext so pages opened by the site
+   * (target=_blank, window.open) are registered in the tab bookkeeping
+   * with full dialog + console capture. Idempotent per context.
+   */
+  private _wirePopupCapture(context: BrowserContext): void {
+    context.on("page", (popup) => {
+      // allocateTab is idempotent — pages already registered (e.g.
+      // through _doNewTab) just return their existing tabId.
+      this.allocateTab(popup);
+    });
+  }
   private attachConsoleListener(page: Page) {
     if (this.listenedPages.has(page)) return;
     this.listenedPages.add(page);
+
+    // Resolve page → tabId once per entry so messages are taggable.
+    // The page may have been recreated after a crash — if not in the
+    // registry, tabId stays undefined (harmless, messages still land).
+    const resolveTabId = () => {
+      for (const [id, p] of this.tabs) {
+        if (p === page) return id;
+      }
+      return undefined;
+    };
+
     page.on("console", (msg) => {
       const loc = msg.location();
       this.consoleLogs.push({
         level: msg.type(),
         text: msg.text(),
         timestamp: Date.now(),
+        tabId: resolveTabId(),
         location:
           loc && loc.url
             ? { url: loc.url, lineNumber: loc.lineNumber, columnNumber: loc.columnNumber }
@@ -343,6 +960,7 @@ export class BrowserManager {
         level: "error",
         text: `[pageerror] ${err.name}: ${err.message}`,
         timestamp: Date.now(),
+        tabId: resolveTabId(),
       });
       if (this.consoleLogs.length > 500) {
         this.consoleLogs.splice(0, this.consoleLogs.length - 500);
@@ -354,62 +972,92 @@ export class BrowserManager {
    * Return the Page for `tabId` (if given) or the current active tab.
    * Auto-recovers from transient "browser has been closed" errors with one
    * soft-reset + retry. Use tabId for concurrent agent workflows where
-   * different agents hold different tabs. Touches the tab's lastActivity
-   * timestamp so the idle sweeper leaves active tabs alone.
+   * different agents hold different tabs.
+   *
+   * Overload 1: legacy — `getPage(tabId?)` for backward compatibility.
+   * Overload 2: owner-aware — `getPage({ tabId?, owner?, force? })` routes
+   *             through resolveTab to enforce per-agent tab isolation.
    */
-  async getPage(tabId?: number): Promise<Page> {
+  async getPage(tabId?: number): Promise<Page>;
+  async getPage(opts: { tabId?: number; owner?: string; force?: boolean }): Promise<Page>;
+  async getPage(arg?: number | { tabId?: number; owner?: string; force?: boolean }): Promise<Page> {
     await this.initialize();
-    if (tabId !== undefined) {
-      const page = this.tabs.get(tabId);
-      if (!page) throw new Error(`Tab ${tabId} does not exist.`);
-      if (page.isClosed()) throw new Error(`Tab ${tabId} is closed.`);
-      this.touchTab(tabId);
-      return page;
-    }
-    const page = this.currentPage;
-    if (page && !page.isClosed()) {
-      this.touchTab(this.currentTabId);
-      return page;
-    }
-    // Current tab missing or closed — open a fresh one with retry guard.
-    return this._openFreshPage();
-  }
 
-  private async _openFreshPage(): Promise<Page> {
-    try {
-      const newPage = await this.browserContext!.newPage();
-      this.currentTabId = this.allocateTab(newPage);
-      return newPage;
-    } catch (err) {
-      if (!isBrowserClosedError(err)) throw err;
-      await this.softReset();
-      await sleep(2000);
-      await this.initialize();
-      const newPage = await this.browserContext!.newPage();
-      this.currentTabId = this.allocateTab(newPage);
-      return newPage;
+    let tabId: number | undefined;
+    let owner: string | undefined;
+    let force = false;
+
+    if (typeof arg === "number") {
+      tabId = arg;
+    } else if (arg) {
+      tabId = arg.tabId;
+      owner = arg.owner;
+      force = arg.force ?? false;
     }
+
+    // Owner-aware path: resolveTab handles ownership validation + lookup
+    if (tabId !== undefined || owner) {
+      const resolved = this.resolveTab({ tabId, owner, force });
+      const page = this.tabs.get(resolved);
+      if (!page || this.isPageDead(page)) {
+        const recovered = await this._recoverTab(resolved);
+        if (this.isPageDead(recovered)) {
+          throw new Error(`Tab ${resolved} crashed and could not be restored.`);
+        }
+        this.touchTab(resolved, owner);
+        this.tabLastUrl.set(resolved, recovered.url());
+        return recovered;
+      }
+      this.touchTab(resolved, owner);
+      this.tabLastUrl.set(resolved, page.url());
+      return page;
+    }
+
+    // Legacy path: getPage() with no args at all
+    const page = this.currentPage;
+    if (!this.isPageDead(page)) {
+      this.touchTab(this.currentTabId);
+      this.tabLastUrl.set(this.currentTabId, page!.url());
+      return page!;
+    }
+
+    // Current tab missing or closed/crashed — recreate in-place and retry once.
+    const recovered = await this._recoverTab(this.currentTabId);
+    if (this.isPageDead(recovered)) {
+      throw new Error(`Tab ${this.currentTabId} crashed and could not be restored.`);
+    }
+    this.touchTab(this.currentTabId);
+    this.tabLastUrl.set(this.currentTabId, recovered.url());
+    return recovered;
   }
 
   /**
-   * Open a new tab, register it, switch to it, and return its ID and page.
+   * Open a new tab, register it, and return its ID and page.
+   * When `activate` is true (the default), the new tab becomes the active
+   * tab (currentTabId is updated).  When false, the tab is created in the
+   * background — the caller's active tab pointer is unchanged.  This is
+   * the right choice for temporary tabs that are created and immediately
+   * closed (e.g. download_file, fetch_urls) so they don't silently move
+   * the active pointer out from under the caller.
+   *
    * `owner` tag lets concurrent agents clean up only their own tabs later
-   * via close_tabs_by_owner. Auto-retries on transient browser-closed errors.
+   * via close_tabs_by_owner.  Auto-retries on transient browser-closed errors.
    */
   async newTab(
     url?: string,
     owner?: string,
     profileName?: string,
+    activate = true,
   ): Promise<{ tabId: number; page: Page }> {
     await this.initialize();
     try {
-      return await this._doNewTab(url, owner, profileName);
+      return await this._doNewTab(url, owner, profileName, activate);
     } catch (err) {
       if (!isBrowserClosedError(err)) throw err;
       await this.softReset();
       await sleep(2000);
       await this.initialize();
-      return await this._doNewTab(url, owner, profileName);
+      return await this._doNewTab(url, owner, profileName, activate);
     }
   }
 
@@ -417,6 +1065,7 @@ export class BrowserManager {
     url?: string,
     owner?: string,
     profileName?: string,
+    activate = true,
   ): Promise<{ tabId: number; page: Page }> {
     // If a profile is specified, open the tab in that profile's context
     let context = this.browserContext!;
@@ -430,7 +1079,11 @@ export class BrowserManager {
     // Profile tabs get JS-level stealth via addInitScript (set on context creation).
     // HTTP UA in profiles shows HeadlessChrome — acceptable, see createProfile comment.
     const tabId = this.allocateTab(page, owner);
-    this.currentTabId = tabId;
+    if (activate) {
+      this.currentTabId = tabId;
+      // Track per-owner active tab so owner-only resolveTab works
+      if (owner) this.ownerActiveTab.set(owner, tabId);
+    }
     // Track profile membership
     if (profileName) {
       const profile = this.profiles.get(profileName)!;
@@ -466,6 +1119,26 @@ export class BrowserManager {
     return closed;
   }
 
+  /**
+   * Return a snapshot of live tabs grouped by owner. Used by stop_browser
+   * safety guards: if other agents still have tabs open, the guard can
+   * warn or block. Passing `excludeOwner` omits that owner from the result
+   * — e.g. the agent requesting the stop.
+   */
+  ownersWithLiveTabs(excludeOwner?: string): Array<{ owner: string; tabIds: number[] }> {
+    const byOwner = new Map<string, number[]>();
+    for (const [id, owner] of this.tabOwners) {
+      if (excludeOwner !== undefined && owner === excludeOwner) continue;
+      const page = this.tabs.get(id);
+      if (page && !page.isClosed()) {
+        const list = byOwner.get(owner);
+        if (list) list.push(id);
+        else byOwner.set(owner, [id]);
+      }
+    }
+    return Array.from(byOwner, ([owner, tabIds]) => ({ owner, tabIds }));
+  }
+
   /** Drop all state without trying to close a browser that may already be gone. */
   private async softReset(): Promise<void> {
     if (this.idleSweeperHandle) {
@@ -476,17 +1149,26 @@ export class BrowserManager {
     for (const [, profile] of this.profiles) {
       await profile.context.close().catch(() => {});
     }
+    // Loop every live tab through the same per-tab cleanup helper that
+    // closeTab + the close-listener use — guarantees cleanup parity
+    // across all teardown paths. Array.from snapshots the keys because
+    // clearTabState mutates the map mid-iteration.
+    for (const id of Array.from(this.tabs.keys())) {
+      this.clearTabState(id);
+    }
     this.profiles.clear();
     this.tabToProfile.clear();
-    this.tabs.clear();
-    this.tabOwners.clear();
-    this.tabLastActivity.clear();
+    this.dialogPolicy.clear();
+    this.lastDialogs.clear();
+    this.ownerActiveTab.clear();
+    clearAllSnapshots();
     this.primaryTabId = undefined;
     this.nextTabId = 1;
     this.currentTabId = 1;
     this.browserContext = undefined;
     this.browser = undefined;
     this.consoleLogs = [];
+    // Network buffer intentionally survives softReset — it is session telemetry.
     this.initialized = false;
   }
 
@@ -500,18 +1182,45 @@ export class BrowserManager {
         `Tab ${id} is the primary tab and cannot be closed. Closing it would poison Steel's session (page_refresh failure). Use stop_browser to end the session instead.`,
       );
     }
-    await page.close().catch(() => {});
-    this.tabs.delete(id);
-    this.tabOwners.delete(id);
-    this.tabLastActivity.delete(id);
 
-    // Clean up profile membership
-    const profileName = this.tabToProfile.get(id);
-    if (profileName) {
-      this.tabToProfile.delete(id);
-      const profile = this.profiles.get(profileName);
-      if (profile) profile.tabIds.delete(id);
+    // Snapshot the per-owner active-tab pointers that point at this tab
+    // BEFORE cleanup runs — we need them to repair each owner's active
+    // pointer to the most-recently-touched surviving tab.
+    const ownersToRepair: string[] = [];
+    for (const [owner, activeId] of this.ownerActiveTab) {
+      if (activeId === id) ownersToRepair.push(owner);
     }
+
+    // Centralized per-tab cleanup — wipes every per-tab map entry. Runs
+    // before page.close() so the close-listener (also routing through
+    // clearTabState) becomes a no-op safety net rather than a duplicate.
+    this.clearTabState(id);
+
+    // Repair ownerActiveTab pointers: for each owner whose active tab was
+    // this one, fall back to that owner's most-recently-touched surviving
+    // tab; delete the entry if no tabs remain.
+    for (const owner of ownersToRepair) {
+      let bestId: number | undefined;
+      let bestTime = 0;
+      for (const [tid, last] of this.tabLastActivity) {
+        if (this.tabOwners.get(tid) === owner && last > bestTime) {
+          const p = this.tabs.get(tid);
+          if (p && !p.isClosed()) {
+            bestId = tid;
+            bestTime = last;
+          }
+        }
+      }
+      if (bestId !== undefined) {
+        this.ownerActiveTab.set(owner, bestId);
+      } else {
+        this.ownerActiveTab.delete(owner);
+      }
+    }
+
+    // Fire the actual page close — the allocateTab listener will run its
+    // own cleanup as a safety net (no-op since entries already deleted).
+    await page.close().catch(() => {});
 
     // If we closed the active tab, switch to the highest remaining tab.
     if (id === this.currentTabId) {
@@ -523,7 +1232,7 @@ export class BrowserManager {
     }
   }
 
-  /** Return a snapshot of all open tabs, including owner tags. */
+  /** Return a snapshot of all open tabs, including owner tags and idle age. */
   async listTabs(): Promise<
     {
       tabId: number;
@@ -532,9 +1241,17 @@ export class BrowserManager {
       active: boolean;
       owner?: string;
       profile?: string;
+      idleSeconds: number;
     }[]
   > {
     await this.initialize();
+    const now = Date.now();
+    const openTabs = Array.from(this.tabs).filter(([, page]) => !page.isClosed());
+
+    // Fetch all titles in parallel — each wrapped to handle closed pages.
+    const titlePromises = openTabs.map(([, page]) => page.title().catch(() => "<unavailable>"));
+    const titles = await Promise.all(titlePromises);
+
     const result: {
       tabId: number;
       url: string;
@@ -542,9 +1259,12 @@ export class BrowserManager {
       active: boolean;
       owner?: string;
       profile?: string;
+      idleSeconds: number;
     }[] = [];
-    for (const [id, page] of this.tabs) {
-      if (page.isClosed()) continue;
+    for (let i = 0; i < openTabs.length; i++) {
+      const [id, page] = openTabs[i];
+      const lastActivity = this.tabLastActivity.get(id);
+      const idleSeconds = lastActivity ? Math.round((now - lastActivity) / 1000) : 0;
       const row: {
         tabId: number;
         url: string;
@@ -552,11 +1272,13 @@ export class BrowserManager {
         active: boolean;
         owner?: string;
         profile?: string;
+        idleSeconds: number;
       } = {
         tabId: id,
         url: page.url(),
-        title: await page.title(),
+        title: titles[i],
         active: id === this.currentTabId,
+        idleSeconds,
       };
       const o = this.tabOwners.get(id);
       if (o) row.owner = o;
@@ -742,6 +1464,11 @@ export class BrowserManager {
 
   async createProfile(name: string, url?: string): Promise<{ tabId: number; restored: boolean }> {
     await this.initialize();
+    if (!isValidProfileName(name)) {
+      throw new Error(
+        `Invalid profile name "${name}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
+      );
+    }
     if (this.profiles.has(name)) {
       throw new Error(`Profile "${name}" already exists. Use delete_profile first.`);
     }
@@ -765,6 +1492,13 @@ export class BrowserManager {
 
     // Inject stealth overrides (extensions don't work in non-default contexts)
     await this.injectStealthIntoContext(context);
+    // Settle detection for profile pages
+    await context.addInitScript(SETTLE_INIT_SCRIPT);
+
+    // Wire network + popup capture on profile contexts so profile tabs get
+    // the same request/response and new-page tracking as the default context.
+    this._wireNetworkCapture(context);
+    this._wirePopupCapture(context);
 
     const page = await context.newPage();
 
@@ -777,7 +1511,7 @@ export class BrowserManager {
 
     // Restore saved state if it exists
     let restored = false;
-    const savedPath = path.join(this.env.PROFILES_DIR, `${name}.json`);
+    const savedPath = assertSafeProfilePath(name, this.env.PROFILES_DIR);
     try {
       const raw = await fs.readFile(savedPath, "utf8");
       const state = JSON.parse(raw) as {
@@ -825,6 +1559,11 @@ export class BrowserManager {
    * localStorage is captured from all origins the profile has visited.
    */
   async saveProfile(name: string): Promise<string> {
+    if (!isValidProfileName(name)) {
+      throw new Error(
+        `Invalid profile name "${name}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
+      );
+    }
     const profile = this.profiles.get(name);
     if (!profile) throw new Error(`Profile "${name}" is not active.`);
 
@@ -855,7 +1594,7 @@ export class BrowserManager {
     }
 
     const state = { cookies, localStorage, savedAt: new Date().toISOString() };
-    const savedPath = path.join(this.env.PROFILES_DIR, `${name}.json`);
+    const savedPath = assertSafeProfilePath(name, this.env.PROFILES_DIR);
     await fs.mkdir(path.dirname(savedPath), { recursive: true });
     await fs.writeFile(savedPath, JSON.stringify(state, null, 2));
 
@@ -929,17 +1668,28 @@ export class BrowserManager {
    * Delete a profile: close its context + all tabs, optionally remove saved state.
    */
   async deleteProfile(name: string, removeSaved = false): Promise<void> {
+    if (!isValidProfileName(name)) {
+      throw new Error(
+        `Invalid profile name "${name}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
+      );
+    }
     const profile = this.profiles.get(name);
     if (profile) {
-      // Close all tabs in this profile
-      for (const tabId of profile.tabIds) {
+      // Close all tabs in this profile. Route per-tab cleanup through
+      // clearTabState (the single-source helper) so this path stays in
+      // lockstep with closeTab / softReset / stop — otherwise
+      // deleteProfile silently leaks tabLastUrl, recoveryNotices,
+      // dialogPolicy, lastDialogs, snapshots, ownerActiveTab pointers,
+      // and pageToTabId entries.
+      for (const tabId of Array.from(profile.tabIds)) {
         try {
           const page = this.tabs.get(tabId);
+          // clearTabState captures the page reference first, then wipes
+          // every per-tab map entry. After this returns the page is no
+          // longer in the tabs map, so the close-listener becomes a
+          // no-op safety net (it checks `this.tabs.get(id) !== page`).
+          this.clearTabState(tabId);
           if (page && !page.isClosed()) await page.close().catch(() => {});
-          this.tabs.delete(tabId);
-          this.tabOwners.delete(tabId);
-          this.tabLastActivity.delete(tabId);
-          this.tabToProfile.delete(tabId);
         } catch {
           /* */
         }
@@ -950,9 +1700,69 @@ export class BrowserManager {
     }
 
     if (removeSaved) {
-      const savedPath = path.join(this.env.PROFILES_DIR, `${name}.json`);
+      const savedPath = assertSafeProfilePath(name, this.env.PROFILES_DIR);
       await fs.unlink(savedPath).catch(() => {});
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Dialog management — per-tab policy + last dialog record
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Arm a dialog policy for a tab. Dialogs raised by the next action(s) on
+   * this tab will be accepted/dismissed immediately as they fire. once=true
+   * removes the policy after it is applied once, reverting to the default.
+   */
+  setDialogPolicy(
+    tabId: number,
+    policy: { action: "accept" | "dismiss"; promptText?: string; once?: boolean },
+  ): void {
+    this.dialogPolicy.set(tabId, policy);
+  }
+
+  /**
+   * Return the armed dialog policy for a tab, or undefined if no policy is set
+   * (the default is dismiss).
+   */
+  getDialogPolicy(
+    tabId: number,
+  ): { action: "accept" | "dismiss"; promptText?: string; once?: boolean } | undefined {
+    return this.dialogPolicy.get(tabId);
+  }
+
+  /**
+   * Return the last dialog record for a tab, or null if none.
+   */
+  getLastDialog(tabId: number): {
+    type: string;
+    message: string;
+    defaultValue: string;
+    action: "accepted" | "dismissed";
+    promptText?: string;
+    autoHandled: boolean;
+    reported: boolean;
+    at: number;
+  } | null {
+    const d = this.lastDialogs.get(tabId);
+    if (!d) return null;
+    return { ...d };
+  }
+
+  /**
+   * Return a dialog-status notice string for action-tool output.
+   * Reports the last auto-handled dialog once, within a 5-second window of
+   * when it fired, so the just-completed action can mention it. Empty string
+   * when there is nothing to report.
+   */
+  dialogNotice(tabId: number): string {
+    const last = this.lastDialogs.get(tabId);
+    if (last && last.autoHandled && !last.reported && Date.now() - last.at < 5000) {
+      last.reported = true;
+      const actionWord = last.action === "accepted" ? "accepted" : "dismissed";
+      return `\n⚠ dialog appeared: ${last.type} "${last.message}" — auto-${actionWord}. (Pre-set behavior with handle_dialog before the action to change it.)`;
+    }
+    return "";
   }
 
   async stop() {
@@ -982,15 +1792,26 @@ export class BrowserManager {
       this.idleSweeperHandle = undefined;
     }
     this.browserContext = undefined;
-    this.tabs.clear();
-    this.tabOwners.clear();
-    this.tabLastActivity.clear();
+    // Centralized per-tab cleanup — covers every live tab.
+    // Array.from snapshots the keys because clearTabState mutates the
+    // map mid-iteration.
+    for (const id of Array.from(this.tabs.keys())) {
+      this.clearTabState(id);
+    }
+    this.ownerActiveTab.clear();
+    this.dialogPolicy.clear();
+    this.lastDialogs.clear();
+    this.recoveryNotices.clear();
     this.primaryTabId = undefined;
     this.nextTabId = 1;
     this.currentTabId = 1;
     this.consoleLogs = [];
+    this.networkEvents = [];
+    this.nextNetworkEventId = 1;
+    this.responsesById.clear();
     this.debugUrl = undefined;
     this.sessionViewerUrl = undefined;
+    clearAllSnapshots();
     this.initialized = false;
   }
 }

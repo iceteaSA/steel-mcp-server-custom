@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, beforeEach } from "bun:test";
 import http from "http";
 import fs from "fs/promises";
 import path from "path";
@@ -36,6 +36,7 @@ beforeAll(async () => {
   tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "relay-test-"));
   config = {
     port: 0, // will pick a random available port
+    bindAddr: "127.0.0.1",
     secret: "test-secret",
     profilesDir: path.join(tmpDir, "profiles"),
     credentialsFile: path.join(tmpDir, "credentials.json"),
@@ -235,6 +236,7 @@ describe("POST /push — encrypted credentials", () => {
   it("encrypts and decrypts credentials with passphrase", async () => {
     const encConfig: RelayConfig = {
       port: 0, // random port — must NOT inherit config.port which is already bound
+      bindAddr: "127.0.0.1",
       secret: "test-secret",
       profilesDir: config.profilesDir,
       credentialsFile: path.join(tmpDir, "encrypted-creds.json"),
@@ -290,6 +292,46 @@ describe("POST /push — validation", () => {
       body: "not json",
     });
     expect(res.status).toBe(400);
+  });
+});
+
+describe("POST /push — profile name traversal prevention", () => {
+  it("rejects ../ path traversal", async () => {
+    const res = await postPush({ profile: "../etc-passwd" });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects path with slash separator", async () => {
+    const res = await postPush({ profile: "a/b" });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects absolute path", async () => {
+    const res = await postPush({ profile: "/etc/passwd" });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects names longer than 64 characters", async () => {
+    const res = await postPush({ profile: "x".repeat(65) });
+    expect(res.status).toBe(400);
+  });
+
+  it("accepts valid name with hyphens and underscores", async () => {
+    const res = await postPush({
+      profile: "my-profile_1",
+      cookies: [{ name: "a", value: "1", domain: "example.com", path: "/" }],
+    });
+    expect(res.ok).toBe(true);
+    const data = await res.json();
+    expect(data.profile).toBe("my-profile_1");
+  });
+
+  it("accepts valid single-char name", async () => {
+    const res = await postPush({
+      profile: "x",
+      cookies: [{ name: "a", value: "1", domain: "example.com", path: "/" }],
+    });
+    expect(res.ok).toBe(true);
   });
 });
 

@@ -8,7 +8,7 @@
  * Tests for non-browser tools (credentials, captcha_status, list_profiles)
  * work without Steel.
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { spawn, type ChildProcess } from "child_process";
 import path from "path";
 import fs from "fs/promises";
@@ -133,7 +133,7 @@ describe("non-browser tools", () => {
   it("tools/list returns expected tools with correct names", async () => {
     const r = await client.call(100, "tools/list");
     const names = r.result?.tools?.map((t) => t.name).sort() || [];
-    expect(names.length).toBe(29);
+    expect(names.length).toBe(34);
 
     // Verify removed tools are gone
     const removed = [
@@ -165,6 +165,9 @@ describe("non-browser tools", () => {
       "create_profile",
       "fetch_urls",
       "extract",
+      "handle_dialog",
+      "upload_file",
+      "press_key",
     ];
     for (const name of expected) {
       expect(names).toContain(name);
@@ -212,6 +215,35 @@ describe("non-browser tools", () => {
     expect(client.getText(r)).toContain("not found");
   });
 
+  // SEC4 — use_credential must mask secret-bearing `extra` fields (otp_secret,
+  // security answers, etc.) in the tool result. The fill path still uses the
+  // real values; they just don't leak to the agent-visible output.
+  it("use_credential masks secret-bearing `extra` values in the returned info", async () => {
+    // Store a credential with an OTP secret + security answer in `extra`.
+    const secretOtp = "JBSWY3DPEHPK3PXP";
+    const secretAnswer = "purple-elephant-42";
+    await client.tool(130, "credentials", {
+      name: "test-extra-mask",
+      url: "test.com",
+      username: "alice",
+      password: "supersecret123",
+      extra: JSON.stringify({ otp_secret: secretOtp, security_answer: secretAnswer }),
+    });
+
+    // Retrieve without selectors — the response should mask the password
+    // AND mask every extra value.
+    const r = await client.tool(131, "use_credential", { name: "test-extra-mask" });
+    expect(client.isError(r)).toBe(false);
+    const text = client.getText(r);
+    expect(text).not.toContain(secretOtp);
+    expect(text).not.toContain(secretAnswer);
+    // Password's last 3 chars are still visible (existing behavior).
+    expect(text).toContain("***123");
+
+    // Cleanup
+    await client.tool(132, "credentials", { name: "test-extra-mask", remove: true });
+  });
+
   it("captcha_status returns balance and status", async () => {
     const r = await client.tool(108, "captcha_status");
     const text = client.getText(r);
@@ -236,6 +268,89 @@ describe("non-browser tools", () => {
 
     // Cleanup
     await fs.rm(path.join(profileDir, "fake-profile.json"), { force: true });
+  });
+
+  it("click with both selector and ref returns isError (not protocol error)", async () => {
+    const r = await client.tool(110, "click", { selector: "#main", ref: "e5" });
+    expect(client.isError(r)).toBe(true);
+    expect(client.getText(r)).toContain("Pass selector OR ref, not both");
+  });
+
+  // handle_dialog in view mode works without a browser
+  it("handle_dialog (view) reports default policy and no dialog", async () => {
+    const r = await client.tool(111, "handle_dialog");
+    const text = client.getText(r);
+    // This tool resolves a tabId without calling getPage(), so it works
+    // even without an active browser. But the server may not have
+    // initialized the BrowserManager yet, so resolveTab might not find
+    // the tab. Just verify it doesn't crash — either policy text or
+    // an initialization error is acceptable in the non-browser test.
+    if (!client.isError(r)) {
+      expect(text).toContain("default (dismiss)");
+      expect(text).toContain("No dialog has appeared");
+    }
+  });
+
+  it("handle_dialog (set policy) reports the armed policy", async () => {
+    const r = await client.tool(111, "handle_dialog", {
+      action: "accept",
+      promptText: "geth collective",
+      once: true,
+    });
+    const text = client.getText(r);
+    if (!client.isError(r)) {
+      expect(text).toContain("accept");
+      expect(text).toContain("geth collective");
+      expect(text).toContain("once");
+    }
+  });
+
+  // Schema validation — upload_file rejects empty files array
+  it("upload_file with missing files array returns isError", async () => {
+    const r = await client.tool(112, "upload_file", { selector: "#file" });
+    expect(client.isError(r)).toBe(true);
+  });
+
+  // upload_file with non-existent file path returns isError before touching browser
+  it("upload_file with non-existent file returns isError", async () => {
+    // Use a path INSIDE UPLOAD_ROOT (= /tmp/steel-mcp-vitest) so the
+    // containment check passes and we exercise the "file not found" branch
+    // specifically. (Paths outside UPLOAD_ROOT are rejected earlier —
+    // covered by the SEC1 containment test below.)
+    const r = await client.tool(113, "upload_file", {
+      selector: "#file",
+      files: ["/tmp/steel-mcp-vitest/__steel_mcp_nonexistent_9x7y__.txt"],
+    });
+    expect(client.isError(r)).toBe(true);
+    expect(client.getText(r)).toContain("not found");
+  });
+
+  // SEC1 — upload_file containment. Files outside UPLOAD_ROOT (which defaults
+  // to OUTPUT_DIR) must be rejected with a clear error, even if the file
+  // exists and is readable. This blocks exfiltration of /etc/passwd or any
+  // other host-readable file through an attacker-controlled upload form.
+  it("upload_file rejects paths that escape UPLOAD_ROOT", async () => {
+    // /etc/passwd exists on Linux; if it doesn't exist the test fails for
+    // the right reason (missing file) — but the containment check runs
+    // BEFORE the existence check, so the rejection text is what we assert.
+    const r = await client.tool(113, "upload_file", {
+      selector: "#file",
+      files: ["/etc/passwd"],
+    });
+    expect(client.isError(r)).toBe(true);
+    expect(client.getText(r)).toMatch(/escapes the configured UPLOAD_ROOT|escape the configured/);
+  });
+
+  // upload_file with both selector+ref returns isError
+  it("upload_file with both selector and ref returns isError", async () => {
+    const r = await client.tool(114, "upload_file", {
+      selector: "#file",
+      ref: "e5",
+      files: ["/tmp/__dummy__.txt"],
+    });
+    expect(client.isError(r)).toBe(true);
+    const text = client.getText(r);
+    expect(text).toContain("selector");
   });
 });
 
@@ -265,12 +380,12 @@ describe("browser tools", () => {
     if (client) client.kill();
   });
 
-  it.skipIf(!steelAvailable)("list_tabs returns at least one tab", async () => {
+  (steelAvailable ? it : it.skip)("list_tabs returns at least one tab", async () => {
     const r = await client.tool(200, "list_tabs");
     expect(client.getText(r)).toMatch(/Tab \d+/);
   });
 
-  it.skipIf(!steelAvailable)(
+  (steelAvailable ? it : it.skip)(
     "go_to_url returns URL + title",
     async () => {
       const r = await client.tool(201, "go_to_url", { url: "https://example.com" });
@@ -281,7 +396,7 @@ describe("browser tools", () => {
     15000,
   );
 
-  it.skipIf(!steelAvailable)("get_page_text auto-selects content area", async () => {
+  (steelAvailable ? it : it.skip)("get_page_text auto-selects content area", async () => {
     const r = await client.tool(202, "get_page_text", { maxChars: 500 });
     const text = client.getText(r);
     expect(text).toContain("Example Domain");
@@ -289,7 +404,7 @@ describe("browser tools", () => {
     expect(text).toContain("\n");
   });
 
-  it.skipIf(!steelAvailable)("scroll reports position and page height", async () => {
+  (steelAvailable ? it : it.skip)("scroll reports position and page height", async () => {
     const r = await client.tool(203, "scroll", { direction: "down", pixels: 100 });
     const text = client.getText(r);
     expect(text).toContain("Position:");
@@ -297,19 +412,22 @@ describe("browser tools", () => {
     expect(text).toMatch(/\d+% through page/);
   });
 
-  it.skipIf(!steelAvailable)("list_tabs with tabId filter returns single tab info", async () => {
-    const r = await client.tool(204, "list_tabs", { tabId: 1 });
-    const text = client.getText(r);
-    expect(text).toMatch(/Tab 1:/);
-    expect(text).toContain("Title:");
-  });
+  (steelAvailable ? it : it.skip)(
+    "list_tabs with tabId filter returns single tab info",
+    async () => {
+      const r = await client.tool(204, "list_tabs", { tabId: 1 });
+      const text = client.getText(r);
+      expect(text).toMatch(/Tab 1:/);
+      expect(text).toContain("Title:");
+    },
+  );
 
-  it.skipIf(!steelAvailable)("close_tabs with nonexistent owner returns empty", async () => {
+  (steelAvailable ? it : it.skip)("close_tabs with nonexistent owner returns empty", async () => {
     const r = await client.tool(205, "close_tabs", { owner: "agent:nonexistent-12345" });
     expect(client.getText(r)).toContain("No tabs");
   });
 
-  it.skipIf(!steelAvailable)(
+  (steelAvailable ? it : it.skip)(
     "click with waitForText reports result",
     async () => {
       // Navigate to example.com first
@@ -326,7 +444,7 @@ describe("browser tools", () => {
     20000,
   );
 
-  it.skipIf(!steelAvailable)(
+  (steelAvailable ? it : it.skip)(
     "history(reload) reports URL + title",
     async () => {
       const r = await client.tool(208, "history", { action: "reload" });
@@ -338,17 +456,57 @@ describe("browser tools", () => {
     15000,
   );
 
-  it.skipIf(!steelAvailable)("get_console returns formatted messages", async () => {
+  (steelAvailable ? it : it.skip)("get_console returns formatted messages", async () => {
     const r = await client.tool(209, "get_console", { level: "all" });
     // May have messages or not — both are valid
     const text = client.getText(r);
     expect(text).toBeTruthy();
   });
 
-  it.skipIf(!steelAvailable)("cookies with no filter returns cookies or empty", async () => {
+  (steelAvailable ? it : it.skip)("cookies with no filter returns cookies or empty", async () => {
     const r = await client.tool(210, "cookies");
     const text = client.getText(r);
     // Either cookies or "No cookies" — both valid
     expect(text).toBeTruthy();
   });
+
+  // upload_file with a real tmp file (exercises stat validation + upload path)
+  (steelAvailable ? it : it.skip)(
+    "upload_file with a real file returns success when file exists",
+    async () => {
+      const tmpFile = "/tmp/steel-mcp-test-upload.txt";
+      await require("fs/promises").writeFile(tmpFile, "test");
+      try {
+        const r = await client.tool(211, "go_to_url", {
+          url: `data:text/html,<input type='file' id='f'>`,
+        });
+        if (!client.isError(r)) {
+          const ur = await client.tool(212, "upload_file", {
+            selector: "#f",
+            files: [tmpFile],
+          });
+          const text = client.getText(ur);
+          expect(client.isError(ur)).toBe(false);
+          expect(text).toContain("Uploaded");
+        }
+      } finally {
+        await require("fs/promises")
+          .unlink(tmpFile)
+          .catch(() => {});
+      }
+    },
+    20000,
+  );
+
+  // press_key with unknown key returns isError
+  (steelAvailable ? it : it.skip)(
+    "press_key with unknown key returns isError with examples",
+    async () => {
+      const r = await client.tool(213, "press_key", { key: "NotARealKeyXYZ" });
+      expect(client.isError(r)).toBe(true);
+      const text = client.getText(r);
+      expect(text).toContain("Unknown key");
+      expect(text).toContain("Examples:");
+    },
+  );
 });

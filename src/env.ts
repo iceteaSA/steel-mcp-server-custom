@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 import { z } from "zod";
 
-dotenv.config();
+dotenv.config({ quiet: true });
 
 export const EnvSchema = z
   .object({
@@ -20,6 +20,19 @@ export const EnvSchema = z
     MAX_INLINE_BYTES: z.coerce.number().default(512000),
     // Directory for file-mode outputs (screenshots, page text, etc.).
     OUTPUT_DIR: z.string().default("/tmp/steel-mcp"),
+    // Root directory under which file-mode outputs are allowed to write.
+    // When set, outputPath supplied to tools (get_screenshot, evaluate, etc.)
+    // is realpath-resolved and must resolve under this directory; otherwise
+    // the call is rejected. Defaults to OUTPUT_DIR, so only files written
+    // inside the output area are permitted out of the box. Set to "" or "*"
+    // to disable the check (escape hatch — the MCP service account can then
+    // write anywhere it has permission).
+    OUTPUT_ROOT: z.string().default(""),
+    // Root directory under which upload_file source paths must resolve.
+    // Defaults to OUTPUT_DIR; realpath-resolves each upload path and rejects
+    // anything that escapes this root (defeats ../ traversal + symlinks).
+    // Set to "" or "*" to disable the check (escape hatch — trust the agent).
+    UPLOAD_ROOT: z.string().default(""),
     // Default JPEG quality for screenshots (1–100).
     DEFAULT_SCREENSHOT_QUALITY: z.coerce.number().min(1).max(100).default(80),
     // Default viewport dimensions.
@@ -27,6 +40,9 @@ export const EnvSchema = z
     DEFAULT_VIEWPORT_HEIGHT: z.coerce.number().default(720),
     // Seconds to wait after each action tool (for slow-loading pages).
     GLOBAL_WAIT_SECONDS: z.coerce.number().default(0),
+    // Maximum time in ms to wait for network idle + DOM quiet after actions.
+    // Set 0 to disable post-action settle detection entirely.
+    SETTLE_TIMEOUT_MS: z.coerce.number().default(5000),
     // Session auto-release timeout in ms. Safety net if stop_browser is never
     // called. Default: 5 minutes. Set higher for long-running tasks.
     SESSION_TIMEOUT_MS: z.coerce.number().default(300000),
@@ -67,12 +83,37 @@ export const EnvSchema = z
     // http://localhost:<RELAY_PORT>. Set when the MCP server runs on a
     // remote machine (e.g. http://your-host:3001).
     RELAY_PUBLIC_URL: z.string().optional(),
+    // Address the relay HTTP server binds to. Defaults to localhost-only.
+    // Use 0.0.0.0 to accept connections from other machines (only when the
+    // relay is behind a reverse proxy or firewall, since auth is Bearer-token
+    // based and not TLS-wrapped at the HTTP layer).
+    RELAY_BIND_ADDR: z.string().default("127.0.0.1"),
+    // Comma-separated toolset names to activate (core is always active).
+    // Valid: core, tabs, extract, media, network, auth, debug, ai.
+    // Default (unset): all toolsets. Overridden by --toolsets CLI flag.
+    // Use to reduce the tool surface for context-budget-constrained agents.
+    TOOLSETS: z.string().optional(),
+    // OpenAI-compatible endpoint for the act / extract_ai tools.
+    // Base URL is used as-is; append /v1 yourself if the provider expects it.
+    ACT_LLM_BASE_URL: z.string().optional(),
+    // Model name sent to the LLM endpoint (e.g. gemma3, qwen2.5).
+    ACT_LLM_MODEL: z.string().optional(),
+    // Optional API key. When unset, no Authorization header is sent (ollama).
+    ACT_LLM_API_KEY: z.string().optional(),
+    // Maximum number of request/response events to keep for get_network.
+    // Set 0 to disable network capture entirely (no listeners, empty results).
+    NETWORK_BUFFER_SIZE: z.coerce.number().min(0).default(500),
   })
   .transform((env) => ({
     ...env,
     // Derive persistent paths from OUTPUT_DIR if not explicitly set.
     PROFILES_DIR: env.PROFILES_DIR ?? `${env.OUTPUT_DIR}/profiles`,
     CREDENTIALS_FILE: env.CREDENTIALS_FILE ?? `${env.OUTPUT_DIR}/credentials.json`,
+    // Resolve containment roots: "*" disables the check (escape hatch);
+    // otherwise callers must realpath-resolve under this directory. Default
+    // to OUTPUT_DIR so the security guard is on out of the box.
+    OUTPUT_ROOT: env.OUTPUT_ROOT === "*" ? "*" : env.OUTPUT_ROOT || env.OUTPUT_DIR,
+    UPLOAD_ROOT: env.UPLOAD_ROOT === "*" ? "*" : env.UPLOAD_ROOT || env.OUTPUT_DIR,
   }))
   .refine(
     (env) => {

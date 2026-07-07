@@ -1,4 +1,5 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect } from "bun:test";
+import { spawnSync } from "child_process";
 import { z } from "zod";
 
 // Test the env schema validation logic in isolation.
@@ -67,5 +68,43 @@ describe("env schema", () => {
     });
     expect(env.DEFAULT_VIEWPORT_WIDTH).toBe(1440);
     expect(env.DEFAULT_VIEWPORT_HEIGHT).toBe(900);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Stdout cleanliness — dotenv must not print to stdout (MCP transport)
+// ---------------------------------------------------------------------------
+describe("stdout cleanliness", () => {
+  it("dotenv.config({ quiet: true }) does not print to stdout", () => {
+    // Spawn the built server with an initialize message and capture stdout only.
+    // The server reads from stdin, processes the JSON-RPC initialize, and writes
+    // the response to stdout. We use node's spawnSync (Bun.spawnSync has a bug
+    // with stdin piping in bun 1.3.14).
+    const proc = spawnSync("node", ["dist/index.cjs"], {
+      input:
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2024-11-05",
+            capabilities: {},
+            clientInfo: { name: "t", version: "0" },
+          },
+        }) + "\n",
+      env: {
+        ...process.env,
+        BROWSER_MODE: "steel",
+        STEEL_BASE_URL: "http://10.1.1.1:3000",
+      },
+      timeout: 30000,
+    });
+    const stdout = proc.stdout.toString();
+    const stderr = proc.stderr.toString();
+    // First byte of stdout must be '{' (JSON-RPC response, not dotenv banner)
+    expect(stdout.length).toBeGreaterThan(0);
+    expect(stdout[0]).toBe("{");
+    // stderr may contain startup messages — that's fine
+    expect(stderr).toContain("Steel MCP Server running on stdio");
   });
 });

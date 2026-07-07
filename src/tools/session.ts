@@ -1,15 +1,24 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
-import { cleanErrorMessage } from "../helpers.js";
+import { checkFingerprintConsistency, cleanErrorMessage } from "../helpers.js";
+import { sleep } from "../utils.js";
+import type { ToolRegistrar } from "./shared.js";
 
-export function register(server: McpServer, mgr: BrowserManager, env: Env): void {
+export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // start_browser -------------------------------------------------------------
-  server.tool(
-    "start_browser",
-    `Start the browser. Returns Session Viewer (read-only) and Interactive URL (human takeover for CAPTCHA/login/2FA). Auto-starts on first tool call — only needed for the URLs.`,
-    {},
-    async () => {
+  register({
+    name: "start_browser",
+    title: "Start Browser",
+    description: `Start the browser and return Session Viewer (read-only) and Interactive URL for human takeover (CAPTCHA, login, 2FA). The browser auto-starts on first tool call — call this only when you need the Interactive URL for a human-in-the-loop step. Do NOT use for routine navigation; tools like go_to_url auto-initialize.`,
+    toolset: "core",
+    inputSchema: {},
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async () => {
       try {
         await mgr.initialize();
         const lines: string[] = ["Browser started."];
@@ -29,15 +38,56 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // stop_browser --------------------------------------------------------------
-  server.tool(
-    "stop_browser",
-    "Stop the browser and clean up resources. Releases the Steel session if one is active.",
-    {},
-    async () => {
+  register({
+    name: "stop_browser",
+    title: "Stop Browser",
+    description: `Stop the browser and release all resources (Steel session, tabs, profiles). Destroys the entire session — use close_tabs for per-agent cleanup instead. Do NOT call this unless you want to end the entire browser session for all agents.`,
+    toolset: "core",
+    inputSchema: {
+      owner: z
+        .string()
+        .optional()
+        .describe(
+          "Your agent identity. When provided, checks whether other agents still have live tabs before stopping.",
+        ),
+      force: z
+        .boolean()
+        .optional()
+        .describe(
+          "Override the safety check and kill everything even when other agents have live tabs.",
+        ),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+    handler: async ({ owner, force }) => {
       try {
+        // Safety check: if the caller has an owner tag but other agents
+        // still have live tabs, block unless force:true.
+        if (owner && !force) {
+          const others = mgr.ownersWithLiveTabs(owner);
+          if (others.length > 0) {
+            const totalTabs = others.reduce((sum, o) => sum + o.tabIds.length, 0);
+            const ownerList = others
+              .map((o) => `"${o.owner}" (tabs ${o.tabIds.join(",")})`)
+              .join(", ");
+            return {
+              isError: true,
+              content: [
+                {
+                  type: "text",
+                  text: `stop_browser blocked: ${totalTabs} tabs owned by ${ownerList}. Use close_tabs({owner}) for your own cleanup, or force:true to kill everything.`,
+                },
+              ],
+            };
+          }
+        }
         await mgr.stop();
         return { content: [{ type: "text", text: "Browser stopped." }] };
       } catch (err) {
@@ -45,19 +95,47 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // smoke_test ----------------------------------------------------------------
-  server.tool(
-    "smoke_test",
-    `Self-test: navigates to example.com, checks fingerprint consistency, verifies stealth properties, and reports pass/fail for each check. Use to verify the browser is working correctly after restarts or config changes.`,
-    {},
-    async () => {
+  register({
+    name: "smoke_test",
+    title: "Smoke Test",
+    description: `Self-test: navigates to example.com and bot.sannysoft.com, checks fingerprint consistency against the real browser identity, reports headless-detection failures, restores the WebGL spoofing check, and verifies CapSolver balance. Use after browser restarts or config changes to verify stealth posture. Creates and cleans up its own test tab — does not affect your active tabs.`,
+    toolset: "debug",
+    inputSchema: {},
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async () => {
+      let tabId: number | undefined;
       try {
-        const { tabId, page } = await mgr.newTab("https://example.com");
-        const results: Array<{ check: string; pass: boolean; detail: string }> = [];
+        // Background tab so the test never moves the caller's active pointer.
+        const { tabId: tid, page } = await mgr.newTab(
+          "https://example.com",
+          "smoke:test",
+          undefined,
+          false,
+        );
+        tabId = tid;
 
-        // 1. Navigation
+        const results: Array<{ check: string; pass: boolean; detail: string }> = [];
+        const identity: {
+          userAgent?: string;
+          platform?: string;
+          tz?: string;
+          locale?: string;
+          screen?: { width: number; height: number };
+        } = {};
+
+        type ProbeResult =
+          | { ok: true; failures: string[] }
+          | { ok: false; reason: string; failures: [] };
+        let probe: ProbeResult = { ok: false, reason: "probe not started", failures: [] };
+
         try {
           const title = await page.title();
           results.push({
@@ -69,60 +147,121 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           results.push({ check: "Navigation", pass: false, detail: (e as Error).message });
         }
 
-        // 2. Fingerprint
         try {
-          const fp = await page.evaluate(() => ({
-            ua: navigator.userAgent,
-            platform: navigator.platform,
-            webdriver: navigator.webdriver,
-            plugins: navigator.plugins.length,
-            langs: navigator.languages,
-            webgl: (() => {
-              const c = document.createElement("canvas");
-              const gl = c.getContext("webgl");
-              if (!gl) return "none";
-              const d = gl.getExtension("WEBGL_debug_renderer_info");
-              return d ? gl.getParameter(d.UNMASKED_RENDERER_WEBGL) : "no ext";
-            })(),
-          }));
+          const raw = await page.evaluate(() => {
+            const uaData = (
+              navigator as Navigator & {
+                userAgentData?: {
+                  brands?: Array<{ brand: string; version: string }>;
+                  platform?: string;
+                  mobile?: boolean;
+                };
+              }
+            ).userAgentData;
+            return {
+              userAgent: navigator.userAgent,
+              platform: navigator.platform,
+              userAgentData: uaData
+                ? {
+                    brands: uaData.brands,
+                    platform: uaData.platform,
+                    mobile: uaData.mobile,
+                  }
+                : undefined,
+              webdriver: navigator.webdriver,
+              languages: Array.from(navigator.languages),
+              pluginsCount: navigator.plugins.length,
+              timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+              screen: { width: screen.width, height: screen.height },
+            };
+          });
 
-          const uaMac = fp.ua.includes("Macintosh");
-          const platMac = fp.platform === "MacIntel";
-          results.push({
-            check: "UA → macOS",
-            pass: uaMac,
-            detail: fp.ua.substring(0, 80),
-          });
-          results.push({
-            check: "Platform match",
-            pass: uaMac === platMac,
-            detail: `platform=${fp.platform}`,
-          });
-          results.push({
-            check: "Webdriver hidden",
-            pass: fp.webdriver === false,
-            detail: `webdriver=${fp.webdriver}`,
-          });
-          results.push({
-            check: "Plugins spoofed",
-            pass: fp.plugins >= 3,
-            detail: `${fp.plugins} plugins`,
-          });
-          results.push({
-            check: "WebGL spoofed",
-            pass: fp.webgl !== "none" && !fp.webgl.includes("SwiftShader"),
-            detail: (fp.webgl as string).substring(0, 60),
-          });
-          results.push({
-            check: "Languages",
-            pass: fp.langs.length > 0,
-            detail: fp.langs.join(", "),
-          });
+          identity.userAgent = raw.userAgent;
+          identity.platform = raw.platform;
+          identity.tz = raw.timeZone;
+          identity.locale = raw.languages[0] ?? "unknown";
+          identity.screen = raw.screen;
+
+          const consistency = checkFingerprintConsistency(raw);
+          for (const c of consistency) {
+            results.push({ check: c.check, pass: c.pass, detail: c.observed });
+          }
         } catch (e) {
-          results.push({ check: "Fingerprint", pass: false, detail: (e as Error).message });
+          results.push({
+            check: "Fingerprint consistency",
+            pass: false,
+            detail: (e as Error).message,
+          });
         }
 
-        // 3. Canvas noise
+        try {
+          const renderer = await page.evaluate(() => {
+            const c = document.createElement("canvas");
+            const gl = c.getContext("webgl");
+            if (!gl) return "none";
+            const ext = gl.getExtension("WEBGL_debug_renderer_info");
+            return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "no ext";
+          });
+          const webglOk =
+            renderer !== "none" &&
+            typeof renderer === "string" &&
+            !renderer.includes("SwiftShader");
+          results.push({
+            check: "WebGL spoofed",
+            pass: webglOk,
+            detail: String(renderer).slice(0, 60),
+          });
+        } catch (e) {
+          results.push({ check: "WebGL spoofed", pass: false, detail: (e as Error).message });
+        }
+
+        try {
+          await page.goto("https://bot.sannysoft.com", {
+            waitUntil: "domcontentloaded",
+            timeout: 20000,
+          });
+          const cellsReady = await page
+            .waitForFunction(
+              () => document.querySelectorAll("td.failed, td.passed, td.warn").length >= 3,
+              { timeout: 15000 },
+            )
+            .then(() => true)
+            .catch(() => false);
+
+          if (!cellsReady) {
+            probe = {
+              ok: false,
+              reason: "result table did not populate (timed out)",
+              failures: [],
+            };
+          } else {
+            // Give dynamic tests a moment to settle.
+            await sleep(2000);
+
+            const scraped = await page.evaluate(() => {
+              const failures: string[] = [];
+              for (const row of document.querySelectorAll("tr")) {
+                const cells = Array.from(row.querySelectorAll("td, th"));
+                if (cells.length < 2) continue;
+                const failedCell = cells.find((c) => c.classList.contains("failed"));
+                if (!failedCell) continue;
+                const label = (cells[0].textContent ?? "").trim().replace(/\s+/g, " ");
+                const status = (failedCell.textContent ?? "").trim().replace(/\s+/g, " ");
+                failures.push(`${label}: ${status || "failed"}`);
+              }
+              return failures;
+            });
+            probe = { ok: true, failures: scraped };
+          }
+        } catch (e) {
+          probe = { ok: false, reason: (e as Error).message, failures: [] };
+        }
+        results.push({
+          check: "Headless detection probe",
+          pass: probe.ok,
+          detail: probe.ok ? `${probe.failures.length} failure(s)` : probe.reason,
+        });
+
         try {
           const noised = await page.evaluate(() => {
             const c = document.createElement("canvas");
@@ -143,7 +282,6 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           results.push({ check: "Canvas noise", pass: false, detail: (e as Error).message });
         }
 
-        // 4. CapSolver
         const apiKey = process.env.CAPSOLVER_API_KEY;
         if (apiKey) {
           try {
@@ -166,35 +304,105 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           results.push({ check: "CapSolver", pass: false, detail: "No API key set" });
         }
 
-        // Clean up temp tab
-        await mgr.closeTab(tabId).catch(() => {});
+        const lines: string[] = [];
+        lines.push("Connectivity:");
+        const nav = results.find((r) => r.check === "Navigation");
+        lines.push(
+          nav ? `${nav.pass ? "✓" : "✗"} ${nav.check}: ${nav.detail}` : "? Navigation: unknown",
+        );
 
-        const passed = results.filter((r) => r.pass).length;
-        const total = results.length;
-        const lines = results.map((r) => `${r.pass ? "✓" : "✗"} ${r.check}: ${r.detail}`);
-        lines.push(`\n${passed}/${total} checks passed`);
+        lines.push("\nFingerprint consistency:");
+        const fpChecks = results.filter((r) =>
+          [
+            "webdriver hidden",
+            "UA/platform consistency",
+            "languages non-empty",
+            "plugins count",
+            "timeZone valid",
+            "screen dimensions",
+          ].includes(r.check),
+        );
+        for (const r of fpChecks) {
+          lines.push(`${r.pass ? "✓" : "✗"} ${r.check}: ${r.detail}`);
+        }
+
+        lines.push("\nHeadless detection:");
+        if (probe.ok) {
+          if (probe.failures.length === 0) {
+            lines.push("Probe ran: 0 failures reported by bot.sannysoft.com");
+          } else {
+            lines.push("Probe ran; failures:");
+            for (const f of probe.failures.slice(0, 20)) {
+              lines.push(`- ${f}`);
+            }
+          }
+        } else {
+          lines.push(`Headless detection probe unavailable: ${probe.reason}`);
+        }
+
+        lines.push("\nStealth checks:");
+        for (const r of results.filter((r) =>
+          ["Canvas noise", "WebGL spoofed", "CapSolver"].includes(r.check),
+        )) {
+          lines.push(`${r.pass ? "✓" : "✗"} ${r.check}: ${r.detail}`);
+        }
+
+        lines.push("\nIdentity:");
+        lines.push(`timeZone: ${identity.tz ?? "unknown"}`);
+        lines.push(`locale: ${identity.locale ?? "unknown"}`);
+        lines.push(
+          `screen: ${identity.screen ? `${identity.screen.width}x${identity.screen.height}` : "unknown"}`,
+        );
+        lines.push(`ua: ${identity.userAgent ?? "unknown"}`);
+        lines.push(`platform: ${identity.platform ?? "unknown"}`);
+        lines.push(
+          `\nNote: browser tz/locale reflect the Steel container config, not the proxy geo. Mismatches vs proxy geo require Steel-side configuration.`,
+        );
+
+        const fpPassed = fpChecks.filter((r) => r.pass).length;
+        const fpTotal = fpChecks.length;
+        lines.push(`\n${fpPassed}/${fpTotal} fingerprint consistency checks passed`);
 
         return {
           content: [{ type: "text", text: lines.join("\n") }],
-          ...(passed < total ? { isError: true } : {}),
+          structuredContent: {
+            checks: results,
+            headlessDetection: {
+              available: probe.ok,
+              reason: probe.ok ? undefined : probe.reason,
+              failures: probe.failures.slice(0, 20),
+            },
+            identity,
+          },
         };
       } catch (err) {
         const error = err as Error;
         return {
           isError: true,
           content: [
-            { type: "text", text: `Smoke test failed to run: ${cleanErrorMessage(error)}` },
+            {
+              type: "text",
+              text: `Smoke test failed to run: ${cleanErrorMessage(error)}`,
+            },
           ],
         };
+      } finally {
+        if (tabId !== undefined) await mgr.closeTab(tabId).catch(() => {});
       }
     },
-  );
+  });
 
   // get_console ---------------------------------------------------------------
-  server.tool(
-    "get_console",
-    `Get browser console messages. Filter by level (error/warning/info/log). Use clear: true to reset buffer after reading.`,
-    {
+  register({
+    name: "get_console",
+    title: "Get Console Logs",
+    description: `Get browser console messages captured since the session started. Filter by severity level (error/warning/info/log), owner, or tabId, and optionally clear the buffer after reading. Use to debug JavaScript errors or verify page behavior. Do NOT use to check if a page loaded — use wait_for or go_to_url with waitFor instead.
+
+CONTEXT BUDGET — output capped at maxEntries (default 50). The buffer holds up to 500 messages total.
+
+NOTE: when clear=true with a filter, ALL entries captured up to read time are removed (not just the filtered level/tab). Messages arriving during the read survive.`,
+    toolset: "debug",
+    inputSchema: {
       level: z
         .enum(["all", "error", "warning", "info", "log"])
         .default("all")
@@ -212,23 +420,62 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .default(false)
         .optional()
         .describe("Clear the captured log buffer after returning results. Default: false."),
+      tabId: z
+        .number()
+        .int()
+        .optional()
+        .describe("Filter to messages from a specific tab. Omit for all tabs."),
+      owner: z
+        .string()
+        .optional()
+        .describe("Filter to messages from tabs owned by this agent. Omit for all owners."),
     },
-    async ({ level = "all", maxEntries = 50, clear = false }) => {
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async ({ level = "all", maxEntries = 50, clear = false, tabId, owner }) => {
       try {
         await mgr.initialize();
 
+        // Build the set of tabIds owned by the given owner for filtering.
+        let ownerTabIds: Set<number> | undefined;
+        if (owner) {
+          const tabs = await mgr.listTabs();
+          ownerTabIds = new Set(tabs.filter((t) => t.owner === owner).map((t) => t.tabId));
+        }
+
+        // Snapshot the array length at read start so splice removes only
+        // entries that existed at that moment. Messages arriving between
+        // snapshot and splice survive the clear.
+        const snapshotLength = mgr.consoleLogs.length;
         let logs = mgr.consoleLogs;
         if (level !== "all") logs = logs.filter((m) => m.level === level);
+        if (tabId !== undefined) logs = logs.filter((m) => m.tabId === tabId);
+        // Owner filter excludes unattributed entries (tabId === undefined)
+        // so logs from unregistered pages don't leak across owners.
+        if (ownerTabIds)
+          logs = logs.filter((m) => m.tabId !== undefined && ownerTabIds.has(m.tabId));
         const slice = logs.slice(-maxEntries);
 
-        if (clear) mgr.consoleLogs = [];
+        if (clear) {
+          // Remove everything up to snapshotLength regardless of filter.
+          mgr.consoleLogs.splice(0, snapshotLength);
+        }
 
         if (slice.length === 0) {
+          const filterParts: string[] = [];
+          if (level !== "all") filterParts.push(`level '${level}'`);
+          if (tabId !== undefined) filterParts.push(`tab ${tabId}`);
+          if (owner) filterParts.push(`owner "${owner}"`);
+          const filterNote = filterParts.length > 0 ? ` (filter: ${filterParts.join(", ")})` : "";
           return {
             content: [
               {
                 type: "text",
-                text: `No console messages captured${level !== "all" ? ` at level '${level}'` : ""}.`,
+                text: `No console messages captured${filterNote}.`,
               },
             ],
           };
@@ -236,7 +483,8 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
 
         const formatted = slice
           .map((m) => {
-            const base = `[${new Date(m.timestamp).toISOString()}] [${m.level.toUpperCase()}] ${m.text}`;
+            const tag = m.tabId !== undefined ? `[tab ${m.tabId}] ` : "";
+            const base = `[${new Date(m.timestamp).toISOString()}] ${tag}[${m.level.toUpperCase()}] ${m.text}`;
             if (!m.location || !m.location.url) return base;
             const { url, lineNumber, columnNumber } = m.location;
             const locStr =
@@ -245,11 +493,13 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           })
           .join("\n");
 
+        const filterNote = level !== "all" ? ` (level: ${level})` : "";
+
         return {
           content: [
             {
               type: "text",
-              text: `${slice.length} console message(s)${level !== "all" ? ` (level: ${level})` : ""}:\n\n${formatted}`,
+              text: `${slice.length} console message(s)${filterNote}:\n\n${formatted}`,
             },
           ],
         };
@@ -258,18 +508,32 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // captcha_status ------------------------------------------------------------
-  server.tool(
-    "captcha_status",
-    `Check CapSolver CAPTCHA solving status: API balance and whether the extension is loaded. Useful before tasks that may encounter CAPTCHAs.`,
-    {},
-    async () => {
+  register({
+    name: "captcha_status",
+    title: "CAPTCHA Solver Status",
+    description: `Check whether CapSolver CAPTCHA auto-solving is available: API key configured, balance, and supported CAPTCHA types. Use before tasks that may encounter CAPTCHAs (Cloudflare, reCAPTCHA, hCaptcha). The solver runs automatically during go_to_url — this tool is for pre-flight checks, not for solving.`,
+    toolset: "debug",
+    inputSchema: {},
+    outputSchema: {
+      apiKeyConfigured: z.boolean(),
+      balance: z.number().nullable(),
+      apiError: z.string().nullable(),
+      supported: z.string(),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async () => {
       try {
         const apiKey = process.env.CAPSOLVER_API_KEY;
         let balance: number | null = null;
-        let apiError: string | undefined;
+        let apiError: string | null = null;
 
         if (apiKey) {
           try {
@@ -293,20 +557,29 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           }
         }
 
+        const supported =
+          "reCAPTCHA v2/v3, hCaptcha, Cloudflare Turnstile, AWS WAF, GeeTest, DataDome, ImageToText";
+
         const lines: string[] = [];
         lines.push(`CapSolver API key: ${apiKey ? "configured" : "NOT SET"}`);
         if (balance !== null) lines.push(`Balance: $${balance.toFixed(2)}`);
         if (apiError) lines.push(`API error: ${apiError}`);
         lines.push(`Extension: loaded in Steel container (token mode)`);
-        lines.push(
-          `Supported: reCAPTCHA v2/v3, hCaptcha, Cloudflare Turnstile, AWS WAF, GeeTest, DataDome, ImageToText`,
-        );
+        lines.push(`Supported: ${supported}`);
 
-        return { content: [{ type: "text", text: lines.join("\n") }] };
+        return {
+          content: [{ type: "text", text: lines.join("\n") }],
+          structuredContent: {
+            apiKeyConfigured: !!apiKey,
+            balance,
+            apiError,
+            supported,
+          },
+        };
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 }

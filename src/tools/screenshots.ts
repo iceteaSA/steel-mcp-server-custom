@@ -1,9 +1,10 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Transformer } from "@napi-rs/image";
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
 import { writeToFile } from "../utils.js";
 import { cleanErrorMessage } from "../helpers.js";
+import type { ToolRegistrar } from "./shared.js";
+import { tabTarget } from "./shared.js";
 
 /**
  * Post-process a screenshot buffer: resize to fit within maxWidth/maxHeight
@@ -75,12 +76,16 @@ async function constrainImage(
   return result;
 }
 
-export function register(server: McpServer, mgr: BrowserManager, env: Env): void {
+export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // get_screenshot ------------------------------------------------------------
-  server.tool(
-    "get_screenshot",
-    `Screenshot the page. Default: webp, viewport only, saves to file. Use outputMode='inline' to get base64 data. Auto-downgrades inline to file if too large. Use selector or clip to capture a specific region. Reduce size: scale < 1.0, format 'jpeg', lower quality.`,
-    {
+  register({
+    name: "get_screenshot",
+    title: "Take Screenshot",
+    description: `Capture a screenshot of the current page or a specific element, saving to file by default (inline base64 auto-downgrades above MAX_INLINE_BYTES). Supports full-page, element-level, and clipped captures with post-capture resize/compression. Use to visually verify page state, inspect layout, or capture evidence. Do NOT use to read page content — use get_page_text for text extraction.
+
+CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-downgrades above MAX_INLINE_BYTES.`,
+    toolset: "media",
+    inputSchema: {
       outputMode: z
         .enum(["inline", "file"])
         .default("file")
@@ -172,14 +177,15 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .describe(
           "Max bytes before auto-switching to file mode. Default: MAX_INLINE_BYTES env var (512000). Set lower to protect context budget.",
         ),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTarget,
     },
-    async ({
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({
       outputMode = "file",
       outputPath,
       format = "webp",
@@ -193,6 +199,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
       maxFileBytes,
       maxInlineBytes,
       tabId,
+      owner,
     }) => {
       try {
         if (clip && selector) {
@@ -220,7 +227,7 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
             };
           }
         }
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner });
         const effectiveQuality = quality ?? env.DEFAULT_SCREENSHOT_QUALITY;
         const effectiveMaxInlineBytes = maxInlineBytes ?? env.MAX_INLINE_BYTES;
 
@@ -239,7 +246,6 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
             });
           }
           if (format === "webp") {
-            // Playwright screenshot API doesn't expose webp; go through CDP.
             const client = await page.context().newCDPSession(page);
             const cdpArgs: {
               format: "png" | "jpeg" | "webp";
@@ -345,5 +351,5 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 }

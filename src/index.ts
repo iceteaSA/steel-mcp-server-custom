@@ -14,6 +14,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { EnvSchema } from "./env.js";
 import { BrowserManager } from "./manager.js";
 import { startRelayServer } from "./relay.js";
+import { makeRegistrar, resolveToolsets } from "./tools/shared.js";
 import {
   registerTabs,
   registerScreenshots,
@@ -24,32 +25,48 @@ import {
   registerNetwork,
   registerCredentials,
   registerProfiles,
+  registerAct,
 } from "./tools/index.js";
+import { llmConfigured } from "./llm.js";
 
 // -----------------------------------------------------------------------------
-// Parse environment + create core instances
+// Parse environment + CLI flags
 // -----------------------------------------------------------------------------
 const env = EnvSchema.parse(process.env);
 
+// --toolsets CLI flag takes priority over TOOLSETS env var.
+const toolsetsCli = process.argv.find((a, i) => a === "--toolsets" && i < process.argv.length - 1)
+  ? process.argv[process.argv.indexOf("--toolsets") + 1]
+  : undefined;
+const activeToolsets = resolveToolsets(toolsetsCli, env.TOOLSETS);
+
+// -----------------------------------------------------------------------------
+// Create core instances
+// -----------------------------------------------------------------------------
 const server = new McpServer(
-  { name: "Steel Browser MCP Server", version: "1.0.0" },
+  { name: "Steel Browser MCP Server", version: "0.8.0" },
   { capabilities: { tools: {} } },
 );
 
 const mgr = new BrowserManager(env);
 
 // -----------------------------------------------------------------------------
-// Register tools (order doesn't matter — each file calls server.tool())
+// Register tools via the gated wrapper
 // -----------------------------------------------------------------------------
-registerTabs(server, mgr, env);
-registerScreenshots(server, mgr, env);
-registerExtraction(server, mgr, env);
-registerInteraction(server, mgr, env);
-registerNavigation(server, mgr, env);
-registerSession(server, mgr, env);
-registerNetwork(server, mgr, env);
-registerCredentials(server, mgr, env);
-registerProfiles(server, mgr, env);
+const { register, toolCount } = makeRegistrar(server, activeToolsets);
+
+registerTabs(register, mgr, env);
+registerScreenshots(register, mgr, env);
+registerExtraction(register, mgr, env);
+registerInteraction(register, mgr, env);
+registerNavigation(register, mgr, env);
+registerSession(register, mgr, env);
+registerNetwork(register, mgr, env);
+registerCredentials(register, mgr, env);
+registerProfiles(register, mgr, env);
+if (llmConfigured(env)) {
+  registerAct(register, mgr, env);
+}
 
 // -----------------------------------------------------------------------------
 // Server lifecycle
@@ -57,7 +74,11 @@ registerProfiles(server, mgr, env);
 async function runServer() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
-  console.error("Steel MCP Server running on stdio");
+
+  const activeNames = [...activeToolsets].sort().join(",");
+  console.error(
+    `Steel MCP Server running on stdio | toolsets active: ${activeNames} (${toolCount()} tools)`,
+  );
 
   // Start relay HTTP server for browser extension cookie/credential push
   if (env.RELAY_PORT > 0) {
@@ -68,6 +89,7 @@ async function runServer() {
     } else {
       startRelayServer({
         port: env.RELAY_PORT,
+        bindAddr: env.RELAY_BIND_ADDR,
         secret: env.RELAY_SECRET,
         profilesDir: env.PROFILES_DIR,
         credentialsFile: env.CREDENTIALS_FILE,

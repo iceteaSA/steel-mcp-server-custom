@@ -1,25 +1,37 @@
-import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import type { Page } from "patchright";
 import type { BrowserManager, Env } from "../manager.js";
-import { globalWait, sleep } from "../utils.js";
+import { afterAction, actionFeedback, sleep } from "../utils.js";
 import {
   CAPTCHA_POLL_INTERVAL_MS,
   CAPTCHA_WAIT_TOTAL_MS,
   cleanErrorMessage,
   detectErrorPage,
   ErrorTracker,
+  extractPageContent,
   isBotWall,
 } from "../helpers.js";
+import type { ToolRegistrar } from "./shared.js";
+import { tabTargetForce } from "./shared.js";
 
 // Module-level ErrorTracker instance — persists across tool calls.
 const errorTracker = new ErrorTracker();
 
-export function register(server: McpServer, mgr: BrowserManager, env: Env): void {
+// Tracks pages with active media-blocking routes so we can restore media
+// without a tab-id lookup. Page identity survives tab resets better than
+// numeric IDs, and the WeakSet avoids leaking memory when pages close.
+const mediaBlockedTabs = new WeakSet<Page>();
+
+export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // go_to_url -----------------------------------------------------------------
-  server.tool(
-    "go_to_url",
-    `Navigate to a URL. Returns final URL + title. Auto-detects bot walls (waits up to 15s for CapSolver) and HTTP error pages (404/5xx). Use readPage to extract text in the same call.`,
-    {
+  register({
+    name: "go_to_url",
+    title: "Navigate to URL",
+    description: `Navigate the current tab to a URL and return the final URL + page title. Auto-detects bot walls (waits up to 15s for CapSolver auto-solve) and HTTP error pages (404/5xx). Combine with readPage to extract text in the same call, or waitFor to pause until a selector appears. Use this as the primary navigation tool — do NOT use new_tab just to change pages.
+
+CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (default 5K).`,
+    toolset: "core",
+    inputSchema: {
       url: z.string().describe("The URL to navigate to."),
       readPage: z
         .boolean()
@@ -51,14 +63,15 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         .describe(
           "Block images, fonts, stylesheets, and media during navigation. Faster for text-only scraping. Default: false.",
         ),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTargetForce,
     },
-    async ({
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({
       url,
       readPage = false,
       maxChars = 5000,
@@ -66,16 +79,22 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
       waitTimeout = 10000,
       disableMedia = false,
       tabId,
+      owner,
+      force,
     }) => {
       try {
         // Check error history before navigating — prepend warning if URL has
         // previously returned 404 or triggered a bot wall.
         const priorWarning = errorTracker.check(url);
 
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner, force });
 
-        // Block heavy resources if requested (images, fonts, CSS, media)
-        if (disableMedia) {
+        // Block heavy resources if requested (images, fonts, CSS, media).
+        // Tracks per-page state so repeated calls don't stack routes and so
+        // disableMedia=false can unblock previously blocked pages.
+        let mediaNote = "";
+        const alreadyBlocked = mediaBlockedTabs.has(page);
+        if (disableMedia && !alreadyBlocked) {
           await page.route("**/*", (route) => {
             const type = route.request().resourceType();
             if (["image", "font", "stylesheet", "media"].includes(type)) {
@@ -83,10 +102,21 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
             }
             return route.continue();
           });
+          mediaBlockedTabs.add(page);
+          mediaNote = "\nMedia blocking enabled.";
+        } else if (!disableMedia && alreadyBlocked) {
+          await page.unrouteAll({ behavior: "ignoreErrors" });
+          mediaBlockedTabs.delete(page);
+          if (env.OPTIMIZE_BANDWIDTH) {
+            mediaNote =
+              "\nRoute-level media blocking disabled (session-level OPTIMIZE_BANDWIDTH still active).";
+          } else {
+            mediaNote = "\nMedia blocking disabled.";
+          }
         }
 
         await page.goto(url, { waitUntil: "domcontentloaded" });
-        await globalWait(env);
+        await afterAction(page, env);
 
         let finalUrl = page.url();
         let title = await page.title().catch(() => "");
@@ -153,6 +183,11 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           }
         }
 
+        // Remember the final URL for crash recovery so the tab can be
+        // restored to the last successful navigation target.
+        const resolvedForLastUrl = mgr.resolveTab({ tabId, owner, force });
+        mgr.setTabLastUrl(resolvedForLastUrl, finalUrl);
+
         const navLine =
           finalUrl !== url
             ? `Navigated to ${url}\nFinal URL: ${finalUrl}`
@@ -164,18 +199,14 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         let pageText = "";
         if (readPage) {
           try {
-            const rawText: string = await page.evaluate(() => {
-              let root: Element | null = null;
-              for (const s of ["main", "article", "[role=main]"]) {
-                const el = document.querySelector(s);
-                if (el && (el.textContent?.trim().length ?? 0) > 100) {
-                  root = el;
-                  break;
-                }
-              }
-              if (!root) root = document.body;
-              return (root as HTMLElement)?.innerText ?? "";
-            });
+            const rawText: string =
+              (
+                await page.evaluate(extractPageContent, {
+                  selector: null,
+                  includeLinks: false,
+                  mode: "innerText" as const,
+                })
+              ).text ?? "";
             let cleaned = rawText
               .replace(/[^\S\n]+/g, " ")
               .replace(/\n{3,}/g, "\n\n")
@@ -191,10 +222,29 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
           }
         }
 
+        // Update snapshot baseline (silent when readPage already reports content).
+        const resolved = mgr.resolveTab({ tabId, owner, force });
+        const navFeedback = await actionFeedback(page, resolved, {
+          navigated: true,
+          silent: readPage,
+        });
+
+        const pageNotice = mgr.dialogNotice(resolved) + mgr.consumeRecoveryNotice(resolved);
         const warningPrefix = priorWarning ? `[WARNING: ${priorWarning}]\n` : "";
         return {
           content: [
-            { type: "text", text: warningPrefix + navLine + titleLine + waitMsg + pageText },
+            {
+              type: "text",
+              text:
+                warningPrefix +
+                navLine +
+                titleLine +
+                waitMsg +
+                mediaNote +
+                pageText +
+                (navFeedback ? `\n${navFeedback}` : "") +
+                pageNotice,
+            },
           ],
         };
       } catch (err) {
@@ -202,30 +252,31 @@ export function register(server: McpServer, mgr: BrowserManager, env: Env): void
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 
   // history -------------------------------------------------------------------
-  server.tool(
-    "history",
-    `Navigate the current (or specified) tab through its browser history.
-
-Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back", "forward", or "reload".`,
-    {
+  register({
+    name: "history",
+    title: "Navigate History",
+    description: `Navigate the current tab through its browser history: back (previous page), forward (next page), or reload (refresh). Use after clicking a link to go back, or to reload a stale page. Do NOT use for initial navigation — use go_to_url to load a URL for the first time.`,
+    toolset: "core",
+    inputSchema: {
       action: z
         .enum(["back", "forward", "reload"])
         .describe(
           "History action: 'back' (previous page), 'forward' (next page), 'reload' (refresh current page).",
         ),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTargetForce,
     },
-    async ({ action, tabId }) => {
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ action, tabId, owner, force }) => {
       try {
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner, force });
         const beforeUrl = page.url();
         let navResult: Awaited<ReturnType<typeof page.goBack>> | null = null;
         if (action === "back") {
@@ -235,8 +286,20 @@ Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back"
         } else {
           await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
         }
-        await globalWait(env);
+        await afterAction(page, env);
         const afterUrl = page.url();
+
+        // Snapshot feedback — compute navigated from actual URL comparison.
+        // Reload is always a navigation even if the URL stays the same
+        // (content may have changed), and no-ops report navigated:false.
+        const resolved = mgr.resolveTab({ tabId, owner, force });
+        mgr.setTabLastUrl(resolved, afterUrl);
+        const histFeedback = await actionFeedback(page, resolved, {
+          navigated: afterUrl !== beforeUrl || action === "reload",
+        });
+        const feedbackText = histFeedback ? `\n${histFeedback}` : "";
+        const pageNotice = mgr.dialogNotice(resolved) + mgr.consumeRecoveryNotice(resolved);
+
         const verb =
           action === "back" ? "Went back" : action === "forward" ? "Went forward" : "Reloaded";
         const noOp =
@@ -244,13 +307,16 @@ Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back"
           navResult === null &&
           beforeUrl === afterUrl;
         const suffix = noOp
-          ? ` (no-op — no ${action === "back" ? "previous" : "next"} entry in tab history; URL unchanged)`
+          ? ` — no history entry to go ${action === "back" ? "back" : "forward"} to. URL unchanged: ${beforeUrl}`
           : "";
         const pageTitle = await page.title().catch(() => "");
         const titlePart = pageTitle ? `\nTitle: ${pageTitle}` : "";
         return {
           content: [
-            { type: "text", text: `${verb}${suffix}.\nCurrent URL: ${afterUrl}${titlePart}` },
+            {
+              type: "text",
+              text: `${verb}${suffix}.\nCurrent URL: ${afterUrl}${titlePart}${feedbackText}${pageNotice}`,
+            },
           ],
         };
       } catch (err) {
@@ -258,5 +324,5 @@ Merges the old go_back / go_forward / refresh tools (0.4.0+). Pass action="back"
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
     },
-  );
+  });
 }
