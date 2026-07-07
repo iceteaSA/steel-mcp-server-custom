@@ -19,6 +19,7 @@ import { z } from "zod";
 import { EnvSchema } from "./env";
 import { isBrowserClosedError, isSteelSessionStuck } from "./helpers";
 import { isValidProfileName, assertSafeProfilePath } from "./helpers";
+import { clearSnapshot, clearAllSnapshots } from "./snapshot.js";
 
 // Inferred type of the parsed env object.
 export type Env = z.infer<typeof EnvSchema>;
@@ -205,6 +206,7 @@ export class BrowserManager {
       this.tabs.delete(id);
       this.tabOwners.delete(id);
       this.tabLastActivity.delete(id);
+      clearSnapshot(id);
       // Clean up ownerActiveTab if this was someone's active tab
       for (const [o, activeId] of this.ownerActiveTab) {
         if (activeId === id) this.ownerActiveTab.delete(o);
@@ -666,6 +668,7 @@ export class BrowserManager {
     this.tabOwners.clear();
     this.tabLastActivity.clear();
     this.ownerActiveTab.clear();
+    clearAllSnapshots();
     this.primaryTabId = undefined;
     this.nextTabId = 1;
     this.currentTabId = 1;
@@ -692,6 +695,7 @@ export class BrowserManager {
     this.tabs.delete(id);
     this.tabOwners.delete(id);
     this.tabLastActivity.delete(id);
+    clearSnapshot(id);
 
     // Clean up ownerActiveTab entries pointing at the closed tab.
     // For each owner whose active tab was this one, fall back to that
@@ -1237,6 +1241,7 @@ export class BrowserManager {
     this.consoleLogs = [];
     this.debugUrl = undefined;
     this.sessionViewerUrl = undefined;
+    clearAllSnapshots();
     this.initialized = false;
   }
 }
