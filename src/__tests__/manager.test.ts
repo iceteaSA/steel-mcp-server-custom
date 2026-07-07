@@ -713,3 +713,38 @@ describe("dialog capture", () => {
     await expect(mgr.handleDialog(tabId, "accept")).rejects.toThrow("No pending dialog");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Idempotent tab allocation — context.on("page") listener MUST NOT
+// double-allocate pages that _doNewTab already registered.
+// ---------------------------------------------------------------------------
+
+describe("idempotent tab allocation", () => {
+  it("allocateTab returns the same tabId when called twice for the same page", () => {
+    const mgr = setupMgr();
+    const page = fakePage();
+    const tabId1 = (mgr as any).allocateTab(page) as number;
+    const tabId2 = (mgr as any).allocateTab(page) as number;
+
+    expect(tabId1).toBe(tabId2);
+    // Only one tab registered in the bookkeeping maps.
+    expect(mgr.tabs.get(tabId1)).toBeDefined();
+    // nextTabId should have advanced only once (setupMgr starts at 10).
+    expect(mgr.nextTabId).toBe(11);
+  });
+
+  it("explicit + listener → idempotent, only one entry in tabs map", () => {
+    const mgr = setupMgr();
+    const page = fakePage();
+
+    // Simulate the race: context.on("page") listener fires (as the
+    // _wirePopupCapture handler would), then explicit allocateTab
+    // from _doNewTab — both on the same Page. Only ONE tabId assigned.
+    (mgr as any).allocateTab(page); // listener path
+    (mgr as any).allocateTab(page); // explicit path (idempotent)
+
+    // One entry in the tabs map, not two.
+    expect(mgr.tabs.size).toBe(1);
+    expect(mgr.nextTabId).toBe(11); // only advanced once
+  });
+});

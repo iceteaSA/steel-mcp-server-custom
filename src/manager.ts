@@ -111,9 +111,11 @@ export class BrowserManager {
   private profiles: Map<string, { context: BrowserContext; tabIds: Set<number> }> = new Map();
   private tabToProfile: Map<number, string> = new Map(); // tabId → profileName
 
-  // Tracks pages that have been through allocateTab so we can detect
-  // externally-created popup windows (S2 — context "page" event).
-  private allocatedPages = new WeakSet<Page>();
+  // Tracks pages → tabIds for idempotent allocation. A context.on("page")
+  // listener fires for ALL new pages including our own context.newPage()
+  // calls — if allocateTab didn't deduplicate, every newTab/createProfile
+  // page would be registered twice.
+  private pageToTabId = new WeakMap<Page, number>();
 
   // Dialog management — per-tab pending/last dialog state.
   // Playwright dialogs block page operations (clicks, fills, navigations) until
@@ -230,12 +232,18 @@ export class BrowserManager {
   }
 
   private allocateTab(page: Page, owner?: string): number {
+    // Idempotent: if this page was already registered (e.g. by the
+    // context.on("page") listener that fires for ALL new pages including
+    // our own context.newPage() calls), return the existing tabId.
+    const existing = this.pageToTabId.get(page);
+    if (existing !== undefined) return existing;
+
     const id = this.nextTabId++;
     this.tabs.set(id, page);
     if (owner) this.tabOwners.set(id, owner);
     this.tabLastActivity.set(id, Date.now());
     this.attachConsoleListener(page);
-    this.allocatedPages.add(page);
+    this.pageToTabId.set(page, id);
     // Dialog capture: Playwright dialogs block all page operations until
     // handled. Capture them here so the agent can accept/dismiss via the
     // handle_dialog tool. beforeunload is auto-accepted to avoid blocking
@@ -302,6 +310,7 @@ export class BrowserManager {
       this.tabs.delete(id);
       this.tabOwners.delete(id);
       this.tabLastActivity.delete(id);
+      this.pageToTabId.delete(page);
       clearSnapshot(id);
       // Clean up ownerActiveTab if this was someone's active tab
       for (const [o, activeId] of this.ownerActiveTab) {
@@ -555,9 +564,9 @@ export class BrowserManager {
    */
   private _wirePopupCapture(context: BrowserContext): void {
     context.on("page", (popup) => {
-      if (!this.allocatedPages.has(popup)) {
-        this.allocateTab(popup);
-      }
+      // allocateTab is idempotent — pages already registered (e.g.
+      // through _doNewTab) just return their existing tabId.
+      this.allocateTab(popup);
     });
   }
   private attachConsoleListener(page: Page) {
