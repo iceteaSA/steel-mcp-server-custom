@@ -36,11 +36,15 @@ export interface RunExtractAiDeps {
   writeToFile?: typeof defaultWriteToFile;
 }
 
+// reason is optional-but-encouraged. Strict models (e.g. gemma-4) sometimes
+// return a valid action without it; making it required breaks act entirely
+// for those models on the most common case. Default to "" so downstream
+// transcript rendering stays a single string concat.
 const ACT_ACTION_SCHEMA = z.object({
   action: z.enum(["click", "fill", "press_key", "scroll", "done", "stuck"]),
   ref: z.string().optional(),
   value: z.string().optional(),
-  reason: z.string(),
+  reason: z.string().default(""),
 });
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
@@ -153,7 +157,7 @@ export async function runAct(
   const WALL_CAP_MS = 60_000;
 
   const systemPrompt =
-    "You drive a browser via an accessibility tree. Each element may have [ref=eN]. Given the user's instruction and the current tree, choose the SINGLE next action. Use the ref of the target element. action=done when the instruction is satisfied; action=stuck (with reason) if impossible. Only click/fill/press_key/scroll are available.";
+    "You drive a browser via an accessibility tree. Each element may have [ref=eN]. Given the user's instruction and the current tree, choose the SINGLE next action. Use the ref of the target element. action=done when the instruction is satisfied; action=stuck if impossible. Only click/fill/press_key/scroll are available. Include a short `reason` string explaining the choice when useful — it is optional but encouraged for transparency.";
 
   const steps: string[] = [];
 
@@ -195,7 +199,8 @@ export async function runAct(
 
       checkCap(`step ${step}`);
       const valuePart = decision.value !== undefined ? ` "${decision.value}"` : "";
-      const stepLine = `step ${step}: ${decision.action} ${decision.ref ?? ""}${valuePart} — ${decision.reason}`;
+      const reasonPart = decision.reason ? ` — ${decision.reason}` : "";
+      const stepLine = `step ${step}: ${decision.action} ${decision.ref ?? ""}${valuePart}${reasonPart}`;
       steps.push(stepLine);
       const actionStart = Date.now();
       switch (decision.action) {

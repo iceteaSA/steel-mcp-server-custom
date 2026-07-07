@@ -245,4 +245,49 @@ describe("runAct", () => {
       Date.now = originalDateNow;
     }
   });
+
+  // Regression: small models (gemma-4) sometimes return a valid action WITHOUT
+  // a `reason` field, e.g. {"action":"click","ref":"e6"}. The schema must accept
+  // this and act must execute the click — not error with "LLM request failed
+  // after one repair retry".
+  it("executes a click when the model omits reason (gemma-4 case)", async () => {
+    const page = makeFakePage();
+    const mgr = makeFakeMgr(page);
+    mockCaptureSnapshot.mockResolvedValue({ text: "- link [ref=e6]", generation: 1 });
+    // exact gemma-4 payload — no reason field at all
+    mockLlmJson.mockResolvedValue({ action: "click", ref: "e6" });
+
+    const text = await runAct(
+      { instruction: "Click the 'Learn more' link", maxSteps: 1 },
+      mgr,
+      baseEnv as any,
+      baseDeps,
+    );
+
+    // The click must have been executed (not errored out on schema validation).
+    expect(text).not.toMatch(/LLM request failed|schema validation/i);
+    expect(text).toContain("step 1: click e6");
+    // Transcript must not render "undefined" when reason is missing.
+    expect(text).not.toContain("undefined");
+    expect(text).not.toMatch(/click e6\s+—\s*$/m); // no dangling dash for empty reason
+    expect(mockLlmJson).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders stuck transcript sanely when reason is omitted", async () => {
+    const page = makeFakePage();
+    const mgr = makeFakeMgr(page);
+    mockCaptureSnapshot.mockResolvedValue({ text: "- nothing", generation: 1 });
+    mockLlmJson.mockResolvedValue({ action: "stuck" });
+
+    const text = await runAct(
+      { instruction: "impossible", maxSteps: 3 },
+      mgr,
+      baseEnv as any,
+      baseDeps,
+    );
+
+    expect(text).toContain("step 1: stuck");
+    expect(text).not.toContain("undefined");
+    expect(text).not.toMatch(/stuck\s+—\s*$/m);
+  });
 });
