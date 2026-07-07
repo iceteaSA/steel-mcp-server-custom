@@ -417,19 +417,29 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
                 structuredContent: { events },
               };
             }
-            // Defense in depth: when the caller did NOT pass owner or tabId
-            // and the event belongs to a different owner's tab, deny. The
-            // unscoped list path returns these for context, but bodies are
-            // never readable cross-owner without an explicit scope.
-            if (!owner && tabId === undefined && targetEvent.tabId !== undefined) {
+            // Owner-required body gate for owned tabs.
+            //
+            // Rule: when the event's tabId belongs to a known owner,
+            // reading the body REQUIRES a matching `owner` argument. A
+            // bare `tabId` — even the correct one — does not authorize
+            // the body fetch; only the owning agent can. This closes the
+            // residual hole where owner A reads the unscoped list to
+            // learn owner B's tabId+requestId, then asks for the body
+            // with only tabId (no owner) and walks away with the body.
+            //
+            // An untabbed event (tabId === undefined) has no owning tab
+            // and is always readable when it survived the list filter —
+            // matches the existing "untabbed events only without
+            // tab/owner filter" carve-out.
+            if (targetEvent.tabId !== undefined) {
               const tabOwner = mgr.getTabOwner(targetEvent.tabId);
-              if (tabOwner !== undefined) {
+              if (tabOwner !== undefined && owner !== tabOwner) {
                 return {
                   isError: true,
                   content: [
                     {
                       type: "text",
-                      text: `requestId ${requestId} belongs to another owner's tab — pass owner or tabId to scope the body fetch.`,
+                      text: `requestId ${requestId} belongs to owner "${tabOwner}" — body fetch requires owner:"${tabOwner}".`,
                     },
                   ],
                   structuredContent: { events },

@@ -1102,3 +1102,128 @@ describe("clearTabState — single-source per-tab cleanup parity", () => {
     expect(mgr.tabToProfile.size).toBe(0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// deleteProfile must route its per-tab teardown through clearTabState so
+// every per-tab map entry is wiped (the previous manual partial cleanup
+// silently leaked tabLastUrl / recoveryNotices / dialogPolicy /
+// lastDialogs / snapshot / ownerActiveTab / pageToTabId).
+// ---------------------------------------------------------------------------
+
+describe("deleteProfile — per-tab cleanup parity via clearTabState", () => {
+  it("leaves no per-tab map entries for closed profile tabs", async () => {
+    const mgr = setupMgr();
+    // Build a minimal profile with one owned tab.
+    const profileName = "p-cleanup";
+    const tabId = addTab(mgr, "agent-A");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mgr as any).profiles.set(profileName, {
+      context: { close: async () => {} },
+      tabIds: new Set([tabId]),
+    });
+    mgr.tabToProfile.set(tabId, profileName);
+    // Stuff the other per-tab maps to prove the cleanup catches them all.
+    mgr.tabLastUrl.set(tabId, "https://x.test/");
+    mgr.recoveryNotices.set(tabId, "⚠");
+    mgr.dialogPolicy.set(tabId, { action: "accept" });
+    mgr.lastDialogs.set(tabId, {
+      type: "alert",
+      message: "x",
+      defaultValue: "",
+      action: "accepted",
+      autoHandled: true,
+      reported: false,
+      at: Date.now(),
+    });
+    mgr.ownerActiveTab.set("agent-A", tabId);
+
+    await mgr.deleteProfile(profileName);
+
+    // Per-tab maps must be empty for the closed tab.
+    expect(mgr.tabs.has(tabId)).toBe(false);
+    expect(mgr.tabOwners.has(tabId)).toBe(false);
+    expect(mgr.tabLastActivity.has(tabId)).toBe(false);
+    expect(mgr.tabLastUrl.has(tabId)).toBe(false);
+    expect(mgr.recoveryNotices.has(tabId)).toBe(false);
+    expect(mgr.dialogPolicy.has(tabId)).toBe(false);
+    expect(mgr.lastDialogs.has(tabId)).toBe(false);
+    expect(mgr.tabToProfile.has(tabId)).toBe(false);
+    // ownerActiveTab pointer that pointed here is cleared (no other
+    // surviving tabs for that owner).
+    expect(mgr.ownerActiveTab.has("agent-A")).toBe(false);
+    // Profile is gone.
+    expect(mgr.profiles.has(profileName)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// COR1 — owner metadata survives the FULL browser-closed recovery path:
+//   _recoverTab → newPage throws isBrowserClosedError → softReset wipes
+//   every per-tab map → initialize → newPage succeeds → replacePage
+//   restores owner / profile / ownerActiveTab on the replacement tab.
+//
+// This is the gap the earlier test (which only drove replacePage) didn't
+// cover. The softReset branch MUST still leave the recovered tab with
+// the prior owner attached — otherwise a multi-agent session loses
+// ownership on the first browser crash.
+// ---------------------------------------------------------------------------
+
+describe("_recoverTab preserves owner through the full softReset→initialize path", () => {
+  it("owner + ownerActiveTab survive browser-closed recovery", async () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-A");
+    mgr.ownerActiveTab.set("agent-A", id);
+    mgr.tabLastUrl.set(id, "https://before-crash.test/");
+
+    // First newPage() simulates a dead browser (isBrowserClosedError); the
+    // second one (after softReset + initialize) returns a fresh page.
+    const replacement = fakePage();
+    let newPageCalls = 0;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (mgr as any).browserContext = {
+      newPage: async () => {
+        newPageCalls++;
+        if (newPageCalls === 1) {
+          // The first call returns a Promise that rejects — exactly like
+          // a dead browser context.
+          throw new Error("Target page, context or browser has been closed");
+        }
+        return replacement;
+      },
+    };
+    // initialize() would try to connect to Steel — stub it out. We need
+    // initialize() to set up a fresh browserContext so the second newPage
+    // call has something to attach to. softReset wipes browserContext,
+    // so initialize must restore it.
+    let initCalls = 0;
+    mgr.initialize = async () => {
+      initCalls++;
+      mgr.initialized = true;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (mgr as any).browserContext = {
+        newPage: async () => {
+          newPageCalls++;
+          return replacement;
+        },
+      };
+    };
+
+    // Drive the full path: _recoverTab catches the first newPage throw,
+    // softResets (clears all per-tab state), initializes (no-op stub),
+    // then succeeds on the second newPage and calls replacePage.
+    const recovered = await mgr._recoverTab(id);
+
+    // The recovery path ran: first attempt failed, softReset cleared,
+    // initialize ran, second attempt succeeded.
+    expect(newPageCalls).toBe(2);
+    expect(initCalls).toBe(1);
+    expect(recovered).toBe(replacement);
+
+    // owner / ownerActiveTab must be restored on the same tabId. Profile
+    // membership is intentionally NOT asserted — softReset clears
+    // profiles by design (every BrowserContext died with the browser;
+    // the profile definition does not survive the soft reset).
+    expect(mgr.tabOwners.get(id)).toBe("agent-A");
+    expect(mgr.ownerActiveTab.get("agent-A")).toBe(id);
+  });
+});

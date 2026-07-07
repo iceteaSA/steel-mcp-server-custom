@@ -1675,15 +1675,21 @@ export class BrowserManager {
     }
     const profile = this.profiles.get(name);
     if (profile) {
-      // Close all tabs in this profile
-      for (const tabId of profile.tabIds) {
+      // Close all tabs in this profile. Route per-tab cleanup through
+      // clearTabState (the single-source helper) so this path stays in
+      // lockstep with closeTab / softReset / stop — otherwise
+      // deleteProfile silently leaks tabLastUrl, recoveryNotices,
+      // dialogPolicy, lastDialogs, snapshots, ownerActiveTab pointers,
+      // and pageToTabId entries.
+      for (const tabId of Array.from(profile.tabIds)) {
         try {
           const page = this.tabs.get(tabId);
+          // clearTabState captures the page reference first, then wipes
+          // every per-tab map entry. After this returns the page is no
+          // longer in the tabs map, so the close-listener becomes a
+          // no-op safety net (it checks `this.tabs.get(id) !== page`).
+          this.clearTabState(tabId);
           if (page && !page.isClosed()) await page.close().catch(() => {});
-          this.tabs.delete(tabId);
-          this.tabOwners.delete(tabId);
-          this.tabLastActivity.delete(tabId);
-          this.tabToProfile.delete(tabId);
         } catch {
           /* */
         }

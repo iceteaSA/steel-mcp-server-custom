@@ -31,8 +31,10 @@ function fakeMgr(
         result = result.filter((e) => e.tabId === filter.tabId);
       }
       if (filter.owner) {
-        // Stub owner filter: owner "A" owns tabId 1, owner "B" owns tabId 2.
-        const owned = filter.owner === "A" ? [1] : filter.owner === "B" ? [2] : [];
+        // Owner filter: invert the ownerMap to find tabIds owned by `filter.owner`.
+        const owned = Object.entries(ownerMap)
+          .filter(([, o]) => o === filter.owner)
+          .map(([id]) => Number(id));
         result = result.filter((e) => owned.includes(e.tabId));
       }
       if (filter.urlPattern) {
@@ -141,9 +143,17 @@ describe("get_network tool", () => {
   });
 
   // SEC3 — requestId cross-tab body leak: an agent must NEVER be able to
-  // read another owner's response body via the unscoped event list, even
-  // when no owner/tabId filter is supplied. The earlier carve-out that
-  // allowed untabbed events through unscoped body fetches is closed here.
+  // read another owner's response body. Rule (see tools/network.ts):
+  //   * event.tabId undefined  → untabbed, always readable when it survived
+  //                              the list filter (no owning tab to guard)
+  //   * event.tabId set, owner matches caller's owner → allowed
+  //   * event.tabId set, owner undefined (unowned tab) → allowed
+  //   * event.tabId set, owner != caller's owner     → DENIED, even when
+  //                                                    caller passes the
+  //                                                    correct tabId — only
+  //                                                    owner matches; a bare
+  //                                                    tabId does not authorize
+  //                                                    reading an owned tab's body.
   it("denies requestId body fetch when no scope given AND event belongs to another owner's tab", async () => {
     const { register, handlers } = makeRegistrar();
     const mgr = fakeMgr(
@@ -164,11 +174,14 @@ describe("get_network tool", () => {
     registerNetwork(register, mgr, env);
     const result = await handlers.get_network({ requestId: 42 });
     expect(result.isError).toBe(true);
-    expect(result.content[0].text).toMatch(/belongs to another owner/);
+    expect(result.content[0].text).toMatch(/belongs to owner "owner-B"/);
     expect(result.content[0].text).not.toContain("AUTH-TOKEN-LEAK");
   });
 
-  it("allows requestId body fetch when caller passes an explicit tabId", async () => {
+  // Residual hole: tabId alone must NOT authorize reading another owner's
+  // tab body — attacker reads the unscoped list to learn owner B's tabId,
+  // then asks for the body with only that tabId. Body must remain denied.
+  it("denies requestId body fetch when caller passes B's tabId but no owner", async () => {
     const { register, handlers } = makeRegistrar();
     const mgr = fakeMgr(
       [
@@ -183,14 +196,42 @@ describe("get_network tool", () => {
       ],
       { 50: "owned-body" },
       9,
-      { 9: "owner-A" },
+      { 9: "owner-B" },
     );
     registerNetwork(register, mgr, env);
-    // Explicit tabId scopes the body fetch to that tab's events; the
-    // other-owner gate is bypassed because the caller has scoped.
     const result = await handlers.get_network({
       requestId: 50,
       tabId: 9,
+      // owner intentionally omitted — the attacker only knows the tabId.
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/body fetch requires owner:"owner-B"/);
+    expect(result.content[0].text).not.toContain("owned-body");
+  });
+
+  // Positive: the owning agent can read its own body with a matching owner.
+  it("allows requestId body fetch when owner matches the event's tab owner", async () => {
+    const { register, handlers } = makeRegistrar();
+    const mgr = fakeMgr(
+      [
+        {
+          id: 50,
+          tabId: 9,
+          method: "GET",
+          url: "https://my-agent/x",
+          resourceType: "xhr",
+          status: 200,
+        },
+      ],
+      { 50: "owned-body" },
+      9,
+      { 9: "owner-B" },
+    );
+    registerNetwork(register, mgr, env);
+    const result = await handlers.get_network({
+      requestId: 50,
+      tabId: 9,
+      owner: "owner-B",
     });
     expect(result.isError).toBeUndefined();
     expect(result.content[0].text).toBe("owned-body");
