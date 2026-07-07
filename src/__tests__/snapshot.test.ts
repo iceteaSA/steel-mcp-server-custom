@@ -583,7 +583,7 @@ describe("applyIntent", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Snapshot handler: diff mode (A3) + intent filter (A4)
+// Snapshot handler: diff mode + intent filter
 // ---------------------------------------------------------------------------
 describe("snapshot handler (diff + intent)", () => {
   const SNAP_RAW = `- heading "Title" @e1
@@ -603,7 +603,7 @@ describe("snapshot handler (diff + intent)", () => {
     return { register, handlers };
   }
 
-  // ---- A3: diff mode ---------------------------------------------------------
+  // ---- diff mode ---------------------------------------------------------
   it("diff=true returns 'no baseline' message when no stored snapshot", async () => {
     const { register, handlers } = makeRegistrar();
     const mockPage = {
@@ -777,7 +777,7 @@ describe("snapshot handler (diff + intent)", () => {
 });
 
 // ---------------------------------------------------------------------------
-// page_state handler (A5)
+// page_state handler
 // ---------------------------------------------------------------------------
 describe("page_state handler", () => {
   const env: Env = { GLOBAL_WAIT_SECONDS: 0 } as Env;

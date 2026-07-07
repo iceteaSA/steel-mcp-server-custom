@@ -1242,7 +1242,7 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         .boolean()
         .optional()
         .describe(
-          "Return only elements changed since the last snapshot of this tab (delta), not the full tree.",
+          "Return only elements changed since the last snapshot of this tab (delta), not the full tree. Returns the raw delta of the full tree; filter and intent are not applied in diff mode.",
         ),
       intent: z
         .enum(["login", "search", "read_content", "fill_form", "navigate", "buy", "extract_data"])
@@ -1268,15 +1268,14 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         // Capture the full untruncated tree.
         const result = await captureSnapshot(ctx, resolvedTabId, { selector, noTruncate: true });
 
-        // ----- diff mode: return delta vs stored baseline (A3) -----
+        // ----- diff mode: return delta vs stored baseline -----
+        // Diff operates on the full raw tree so no change is missed.
+        // Filter and intent are not applied in diff mode.
         if (diff && frame === undefined) {
           const prev = getStoredSnapshot(resolvedTabId);
           storeSnapshot(resolvedTabId, result.text);
           if (prev === undefined) {
-            const shown = truncateForDisplay(
-              filterTree(result.text, filter ?? "interactive"),
-              maxChars ?? 8000,
-            );
+            const shown = truncateForDisplay(result.text, maxChars ?? 8000);
             return {
               content: [{ type: "text", text: `(no baseline — captured fresh)\n${shown}` }],
             };
@@ -1322,7 +1321,7 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
     },
   });
 
-  // page_state — lightweight page observation (A5) ---------------------------------
+  // page_state — lightweight page observation ---------------------------------
   register({
     name: "page_state",
     title: "Page State",
@@ -1350,7 +1349,6 @@ CONTEXT BUDGET — tiny fixed output.`,
     handler: async ({ tabId, owner }) => {
       try {
         const page = await mgr.getPage({ tabId, owner });
-        const resolvedTabId = mgr.resolveTab({ tabId, owner });
         const s = await page.evaluate(() => {
           const de = document.documentElement;
           const max = de.scrollHeight - de.clientHeight;
@@ -1366,9 +1364,10 @@ CONTEXT BUDGET — tiny fixed output.`,
           };
         });
 
-        // Check if tab has a recent dialog.
-        const lastDialog = mgr.getLastDialog(resolvedTabId);
-        const hasDialog = lastDialog !== null;
+        // Dialogs are auto-resolved immediately by the per-tab policy (see
+        // handle_dialog), so there is no meaningful "pending dialog" to report.
+        // Fixed false in v1.
+        const hasDialog = false;
 
         const out = { ...s, hasDialog };
         return {
