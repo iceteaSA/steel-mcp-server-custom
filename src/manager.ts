@@ -255,7 +255,7 @@ export class BrowserManager {
             type,
             message,
             action: "accepted",
-            autoDismissed: true,
+            autoDismissed: false,
             at: Date.now(),
           });
           return;
@@ -515,17 +515,10 @@ export class BrowserManager {
 
     this.initialized = true;
 
-    // Register popup/new-page detection after both paths have set up
-    // browserContext. Pages created by the site (target=_blank, window.open)
-    // bypass allocateTab — this listener catches them and wires them into the
-    // tab registry with full dialog/console capture.
-    // Guarded by allocatedPages so pages already through allocateTab
-    // (_openFreshPage, newTab, initialPage) are not double-registered.
-    this.browserContext!.on("page", (popup) => {
-      if (!this.allocatedPages.has(popup)) {
-        this.allocateTab(popup);
-      }
-    });
+    // Register popup/new-page detection. Pages created by the site
+    // (target=_blank, window.open) bypass allocateTab — this listener
+    // catches them and wires them into the tab registry.
+    this._wirePopupCapture(this.browserContext!);
 
     this.startIdleSweeper();
 
@@ -554,6 +547,19 @@ export class BrowserManager {
 
   /** Attach console log capture to a page (idempotent label via WeakSet). */
   private listenedPages = new WeakSet<Page>();
+
+  /**
+   * Wire popup/page capture on a BrowserContext so pages opened by the site
+   * (target=_blank, window.open) are registered in the tab bookkeeping
+   * with full dialog + console capture. Idempotent per context.
+   */
+  private _wirePopupCapture(context: BrowserContext): void {
+    context.on("page", (popup) => {
+      if (!this.allocatedPages.has(popup)) {
+        this.allocateTab(popup);
+      }
+    });
+  }
   private attachConsoleListener(page: Page) {
     if (this.listenedPages.has(page)) return;
     this.listenedPages.add(page);
@@ -1146,6 +1152,10 @@ export class BrowserManager {
     await this.injectStealthIntoContext(context);
     // Settle detection for profile pages
     await context.addInitScript(SETTLE_INIT_SCRIPT);
+
+    // Wire popup capture on profile contexts so target=_blank pages created
+    // inside profiles get dialog + console capture (same as the default context).
+    this._wirePopupCapture(context);
 
     const page = await context.newPage();
 
