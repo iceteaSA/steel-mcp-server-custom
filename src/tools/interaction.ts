@@ -98,7 +98,11 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         // Snapshot-diff feedback (best-effort — doesn't affect result on failure).
         const afterUrl = page.url();
         const navigated = afterUrl !== beforeUrl;
-        const feedback = await actionFeedback(page, mgr.resolveTab({ tabId, owner, force }), {
+        const resolved = mgr.resolveTab({ tabId, owner, force });
+        if (navigated) {
+          mgr.setTabLastUrl(resolved, afterUrl);
+        }
+        const feedback = await actionFeedback(page, resolved, {
           navigated,
         });
         const feedbackText = feedback ? `\n${feedback}` : "";
@@ -375,9 +379,12 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         await afterAction(page, env);
 
         const urlAfter = page.url();
-        const navigated = urlAfter !== urlBefore;
-        const feedback = await actionFeedback(page, mgr.resolveTab({ tabId, owner, force }), {
-          navigated,
+        const resolved = mgr.resolveTab({ tabId, owner, force });
+        if (urlAfter !== urlBefore) {
+          mgr.setTabLastUrl(resolved, urlAfter);
+        }
+        const feedback = await actionFeedback(page, resolved, {
+          navigated: urlAfter !== urlBefore,
         });
         const feedbackText = feedback ? `\n${feedback}` : "";
 
@@ -991,6 +998,7 @@ Errors: unknown key name, selector timeout.`,
       try {
         sel = selector || ref ? toSelector({ selector, ref }) : undefined;
         const page = await mgr.getPage({ tabId, owner, force });
+        const urlBefore = page.url();
 
         if (sel) {
           await page.locator(sel).focus({ timeout: 5000 });
@@ -999,8 +1007,12 @@ Errors: unknown key name, selector timeout.`,
         await page.keyboard.press(key);
         await afterAction(page, env);
 
+        const urlAfter = page.url();
         const target = sel ? ` on ${sel}` : "";
         const resolved = mgr.resolveTab({ tabId, owner, force });
+        if (urlAfter !== urlBefore) {
+          mgr.setTabLastUrl(resolved, urlAfter);
+        }
         const feedback = await actionFeedback(page, resolved);
         const feedbackText = feedback ? `\n${feedback}` : "";
         const dialogText = mgr.dialogNotice(resolved);

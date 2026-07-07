@@ -784,27 +784,22 @@ describe("network capture ring buffer", () => {
     expect(mgr.networkEvents.map((e: any) => e.id)).toEqual([2, 3]);
   });
 
-  it("clears response references when events are evicted", async () => {
+  it("clears response WeakRefs when events are evicted", async () => {
     const mgr = setupMgr();
     mgr.env.NETWORK_BUFFER_SIZE = 2;
     mgr.networkEvents = [];
     mgr.nextNetworkEventId = 1;
 
-    (mgr as any).pushNetworkEvent({
-      id: 1,
-      url: "https://a/1",
-      response: fakeNetworkResponse("old"),
-    });
-    (mgr as any).pushNetworkEvent({
-      id: 2,
-      url: "https://a/2",
-      response: fakeNetworkResponse("keep1"),
-    });
-    (mgr as any).pushNetworkEvent({
-      id: 3,
-      url: "https://a/3",
-      response: fakeNetworkResponse("keep2"),
-    });
+    const oldResponse = fakeNetworkResponse("old");
+    const keep1Response = fakeNetworkResponse("keep1");
+    const keep2Response = fakeNetworkResponse("keep2");
+
+    (mgr as any).pushNetworkEvent({ id: 1, url: "https://a/1" });
+    (mgr as any).responsesById.set(1, new WeakRef(oldResponse as any));
+    (mgr as any).pushNetworkEvent({ id: 2, url: "https://a/2" });
+    (mgr as any).responsesById.set(2, new WeakRef(keep1Response as any));
+    (mgr as any).pushNetworkEvent({ id: 3, url: "https://a/3" });
+    (mgr as any).responsesById.set(3, new WeakRef(keep2Response as any));
 
     await expect(mgr.getResponseBody(1)).rejects.toThrow("body no longer available");
     await expect(mgr.getResponseBody(2)).resolves.toBe("keep1");
@@ -817,18 +812,40 @@ describe("network capture ring buffer", () => {
     mgr.networkEvents = [];
     mgr.nextNetworkEventId = 1;
 
-    (mgr as any).pushNetworkEvent({
-      id: 1,
-      url: "https://a/1",
-      response: fakeNetworkResponse("body"),
-    });
-    (mgr as any).pushNetworkEvent({
-      id: 2,
-      url: "https://a/2",
-      response: fakeNetworkResponse("evict"),
-    });
+    const bodyResponse = fakeNetworkResponse("body");
+    const evictResponse = fakeNetworkResponse("evict");
+
+    (mgr as any).pushNetworkEvent({ id: 1, url: "https://a/1" });
+    (mgr as any).responsesById.set(1, new WeakRef(bodyResponse as any));
+    (mgr as any).pushNetworkEvent({ id: 2, url: "https://a/2" });
+    (mgr as any).responsesById.set(2, new WeakRef(evictResponse as any));
 
     await expect(mgr.getResponseBody(1)).rejects.toThrow("body no longer available");
+  });
+});
+
+describe("network buffer survives softReset", () => {
+  it("keeps events and ids across softReset, and clears only on stop()", async () => {
+    const mgr = setupMgr();
+    mgr.env.NETWORK_BUFFER_SIZE = 10;
+    mgr.networkEvents = [];
+    mgr.nextNetworkEventId = 1;
+
+    const response = fakeNetworkResponse("keep");
+    (mgr as any).pushNetworkEvent({ id: 1, url: "https://x/1" });
+    (mgr as any).responsesById.set(1, new WeakRef(response as any));
+
+    mgr.initialized = true;
+    await (mgr as any).softReset();
+
+    expect(mgr.networkEvents).toHaveLength(1);
+    expect(mgr.networkEvents[0].id).toBe(1);
+    expect((mgr as any).responsesById.has(1)).toBe(true);
+
+    // stop() clears everything.
+    await (mgr as any).stop();
+    expect(mgr.networkEvents).toHaveLength(0);
+    expect((mgr as any).responsesById.size).toBe(0);
   });
 });
 
@@ -872,17 +889,13 @@ describe("getPage crash recovery", () => {
     expect((freshPage as any)._url).toBe("https://recovered.test/");
   });
 
-  it("recovers an explicit tabId when url() throws", async () => {
+  it("recovers an explicit tabId when the page is closed", async () => {
     const mgr = setupMgr();
     mgr.initialized = true;
     mgr.primaryTabId = 999;
     mgr.tabs.set(999, fakePage());
 
-    const deadPage = fakePage({
-      url: () => {
-        throw new Error("crashed");
-      },
-    });
+    const deadPage = fakePage({ isClosed: () => true });
     const freshPage = fakePage({ url: () => "https://explicit.test/" });
     const context = fakeContext([freshPage]);
     mgr.browserContext = context as any;

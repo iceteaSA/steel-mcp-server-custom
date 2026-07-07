@@ -26,6 +26,7 @@ import {
   extractPageContent,
   validateCookies,
   validateExpression,
+  validateUrlPattern,
   type Link,
 } from "../helpers.js";
 
@@ -978,5 +979,27 @@ describe("filterNetworkEvents", () => {
       limit: 1,
     });
     expect(result.map((e) => e.id)).toEqual([2]);
+  });
+});
+
+describe("validateUrlPattern", () => {
+  it("returns undefined for valid substring patterns", () => {
+    expect(validateUrlPattern("/api/")).toBeUndefined();
+    expect(validateUrlPattern("example.com")).toBeUndefined();
+  });
+
+  it("returns undefined for valid regex patterns", () => {
+    expect(validateUrlPattern("/api/i")).toBeUndefined();
+    expect(validateUrlPattern("/^https://")).toBeUndefined();
+  });
+
+  it("returns an error for invalid regex patterns", () => {
+    const err = validateUrlPattern("/[");
+    expect(err).toMatch(/^Invalid regex:/);
+  });
+
+  it("returns undefined for empty/undefined patterns", () => {
+    expect(validateUrlPattern(undefined)).toBeUndefined();
+    expect(validateUrlPattern("")).toBeUndefined();
   });
 });

@@ -640,6 +640,35 @@ export interface NetworkEventLike {
 }
 
 /**
+ * Validate a URL pattern before filtering. Returns a descriptive error message
+ * for invalid /regex/ patterns; returns undefined for valid patterns and
+ * plain substrings.
+ */
+export function validateUrlPattern(pattern?: string): string | undefined {
+  if (!pattern || !pattern.startsWith("/")) return undefined;
+
+  const lastSlash = pattern.lastIndexOf("/");
+  if (lastSlash <= 0) {
+    // A leading slash with no closing slash cannot be a valid regex literal.
+    try {
+      new RegExp(pattern.slice(1));
+      return undefined;
+    } catch (err) {
+      return `Invalid regex: ${(err as Error).message}`;
+    }
+  }
+
+  const body = pattern.slice(1, lastSlash);
+  const flags = pattern.slice(lastSlash + 1);
+  try {
+    new RegExp(body, flags);
+    return undefined;
+  } catch (err) {
+    return `Invalid regex: ${(err as Error).message}`;
+  }
+}
+
+/**
  * Match a URL against a pattern. Patterns wrapped in /.../ are treated as a
  * RegExp (flags supported, e.g. /api/i); otherwise the pattern is a substring.
  */

@@ -9,6 +9,7 @@ import {
   matchesCookieHost,
   mimeToExt,
   validateCookies,
+  validateUrlPattern,
 } from "../helpers.js";
 import { withBackgroundTab, writeToFile } from "../utils.js";
 import type { ToolRegistrar } from "./shared.js";
@@ -361,7 +362,22 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
       owner?: string;
     }) => {
       try {
-        const resolved = mgr.resolveTab({ tabId, owner });
+        if (urlPattern) {
+          const validationError = validateUrlPattern(urlPattern);
+          if (validationError) {
+            return {
+              isError: true,
+              content: [{ type: "text", text: validationError }],
+              structuredContent: { events: [] },
+            };
+          }
+        }
+
+        // Only scope to a resolved tab when the caller explicitly asked for one.
+        // Untabbed events (tabId undefined) are visible only without a tab/owner
+        // filter, matching the requestId cross-tab isolation rule.
+        const resolved =
+          tabId !== undefined || owner ? mgr.resolveTab({ tabId, owner }) : undefined;
         const events = mgr.getNetworkEvents({
           urlPattern,
           resourceType,
@@ -372,18 +388,37 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
         });
 
         if (body || requestId !== undefined) {
-          const targetId = requestId ?? events[0]?.id;
-          if (requestId === undefined && events.length !== 1) {
-            return {
-              isError: true,
-              content: [
-                {
-                  type: "text",
-                  text: `${events.length} matches; pass requestId to fetch a specific body, or narrow the filter so exactly one request matches.`,
-                },
-              ],
-              structuredContent: { events },
-            };
+          let targetId: number | undefined;
+          if (requestId !== undefined) {
+            // Enforce scope: the requested id must be visible through the same
+            // tab/owner filter used for the list path.
+            if (!events.some((e) => e.id === requestId)) {
+              return {
+                isError: true,
+                content: [
+                  {
+                    type: "text",
+                    text: `requestId ${requestId} not found in your tabs`,
+                  },
+                ],
+                structuredContent: { events },
+              };
+            }
+            targetId = requestId;
+          } else {
+            if (events.length !== 1) {
+              return {
+                isError: true,
+                content: [
+                  {
+                    type: "text",
+                    text: `${events.length} matches; pass requestId to fetch a specific body, or narrow the filter so exactly one request matches.`,
+                  },
+                ],
+                structuredContent: { events },
+              };
+            }
+            targetId = events[0]?.id;
           }
           if (targetId === undefined) {
             return {

@@ -58,9 +58,6 @@ export interface NetworkEvent {
   durationMs?: number;
   at: number;
   failed?: boolean;
-  // Strong reference to the Playwright Response while the event lives in the
-  // ring buffer; cleared on eviction so the body is released promptly.
-  response?: Response;
 }
 
 // -----------------------------------------------------------------------------
@@ -168,11 +165,12 @@ export class BrowserManager {
   >();
 
   // Network capture — request/response ring buffer shared across contexts.
-  // Strong response refs live on the event until eviction; WeakSet prevents
-  // double-wiring listeners on the same BrowserContext.
+  // Response bodies are kept via WeakRef so busy pages cannot pin hundreds of
+  // full Response objects in memory; the map entry is deleted on eviction/stop.
   private networkEvents: NetworkEvent[] = [];
   private nextNetworkEventId = 1;
   private requestStartTimes = new WeakMap<Request, number>();
+  private responsesById = new Map<number, WeakRef<Response>>();
   private wiredNetworkContexts = new WeakSet<BrowserContext>();
 
   // Last known URL per tab, used by crash recovery to re-navigate after a
@@ -442,16 +440,9 @@ export class BrowserManager {
     }
   }
 
-  /** Return true if a page reference is unusable (closed or detached/crashed). */
-  private async isPageDead(page?: Page): Promise<boolean> {
-    if (!page || page.isClosed()) return true;
-    try {
-      page.url();
-      await page.evaluate(() => 1);
-      return false;
-    } catch {
-      return true;
-    }
+  /** Return true if a page reference is unusable (closed). Zero CDP round-trips. */
+  private isPageDead(page?: Page): boolean {
+    return !page || page.isClosed();
   }
 
   /** Start the idle sweeper. Idempotent; no-op if TAB_IDLE_TIMEOUT_MS=0. */
@@ -710,7 +701,7 @@ export class BrowserManager {
         const contentLength = headers["content-length"];
         const sizeBytes = contentLength ? parseInt(contentLength, 10) : undefined;
 
-        this.pushNetworkEvent({
+        const event = {
           id: this.nextNetworkEventId++,
           tabId,
           method: request.method(),
@@ -721,8 +712,9 @@ export class BrowserManager {
           sizeBytes,
           durationMs: start ? Date.now() - start : undefined,
           at: Date.now(),
-          response,
-        });
+        };
+        this.pushNetworkEvent(event);
+        this.responsesById.set(event.id, new WeakRef(response));
       } catch {
         // best-effort capture
       }
@@ -757,7 +749,7 @@ export class BrowserManager {
         this.networkEvents.length - this.env.NETWORK_BUFFER_SIZE,
       );
       for (const e of evicted) {
-        e.response = undefined;
+        this.responsesById.delete(e.id);
       }
     }
   }
@@ -796,14 +788,19 @@ export class BrowserManager {
 
   /**
    * Fetch the response body for a buffered network event. Throws if the event
-   * has been evicted or the response reference was collected.
+   * has been evicted or the WeakRef Response was collected.
    */
   async getResponseBody(id: number): Promise<string> {
     const event = this.networkEvents.find((e) => e.id === id);
-    if (!event?.response) {
+    if (!event) {
       throw new Error("body no longer available");
     }
-    const body = await event.response.body();
+    const ref = this.responsesById.get(id);
+    const response = ref?.deref();
+    if (!response) {
+      throw new Error("body no longer available");
+    }
+    const body = await response.body();
     return body.toString();
   }
 
@@ -1084,8 +1081,7 @@ export class BrowserManager {
     this.browserContext = undefined;
     this.browser = undefined;
     this.consoleLogs = [];
-    this.networkEvents = [];
-    this.nextNetworkEventId = 1;
+    // Network buffer intentionally survives softReset — it is session telemetry.
     this.initialized = false;
   }
 
@@ -1727,6 +1723,7 @@ export class BrowserManager {
     this.consoleLogs = [];
     this.networkEvents = [];
     this.nextNetworkEventId = 1;
+    this.responsesById.clear();
     this.debugUrl = undefined;
     this.sessionViewerUrl = undefined;
     clearAllSnapshots();
