@@ -647,38 +647,36 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
         let results: Array<Record<string, string | null>>;
 
         if (isRef) {
-          // waitFor before evaluateAll — .all() does not wait on its own,
-          // so a stale ref would silently return [].
-          await page.locator(sel).waitFor({ state: "attached", timeout: 5000 });
-          results = await page.locator(sel).evaluateAll(
-            (elements, { attrNames, maxChars }) => {
-              return elements.map((el) => {
-                const trunc = (s: string | null): string | null => {
-                  if (s === null) return null;
-                  if (maxChars <= 0 || s.length <= maxChars) return s;
-                  return s.slice(0, maxChars) + "…[truncated]";
-                };
-                const out: Record<string, string | null> = {};
-                for (const name of attrNames) {
-                  if (name === "text") {
-                    const raw = (el as HTMLElement).innerText ?? el.textContent ?? "";
-                    out[name] = trunc(
-                      raw
-                        .replace(/[^\S\n]+/g, " ")
-                        .replace(/\n{3,}/g, "\n\n")
-                        .trim(),
-                    );
-                  } else if (name === "html") {
-                    out[name] = trunc((el as HTMLElement).outerHTML ?? null);
-                  } else {
-                    out[name] = trunc((el as Element).getAttribute(name));
-                  }
+          // Ref addresses exactly one element.  locator.evaluate() auto-waits
+          // and throws on timeout (stale ref) — never silently return [].
+          const record = await page.locator(sel).evaluate(
+            (el, { attrNames, maxChars }) => {
+              const trunc = (s: string | null): string | null => {
+                if (s === null) return null;
+                if (maxChars <= 0 || s.length <= maxChars) return s;
+                return s.slice(0, maxChars) + "…[truncated]";
+              };
+              const out: Record<string, string | null> = {};
+              for (const name of attrNames) {
+                if (name === "text") {
+                  const raw = (el as HTMLElement).innerText ?? el.textContent ?? "";
+                  out[name] = trunc(
+                    raw
+                      .replace(/[^\S\n]+/g, " ")
+                      .replace(/\n{3,}/g, "\n\n")
+                      .trim(),
+                  );
+                } else if (name === "html") {
+                  out[name] = trunc((el as HTMLElement).outerHTML ?? null);
+                } else {
+                  out[name] = trunc((el as Element).getAttribute(name));
                 }
-                return out;
-              });
+              }
+              return out;
             },
             { attrNames: attrs, maxChars: maxCharsPerAttr },
           );
+          results = [record];
         } else {
           results = await page.evaluate(
             ({
@@ -930,40 +928,38 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
         let results: Array<Record<string, string | null>>;
 
         if (isRef) {
-          // waitFor before evaluateAll — .all() does not wait on its own,
-          // so a stale ref would silently return [].
-          await page.locator(sel).waitFor({ state: "attached", timeout: 5000 });
-          results = await page.locator(sel).evaluateAll(
-            (elements, { fieldMap, maxItems }) => {
-              return elements.slice(0, maxItems).map((root) => {
-                const rec: Record<string, string | null> = {};
-                for (const [name, spec] of Object.entries(fieldMap)) {
-                  const atIdx = spec.lastIndexOf("@");
-                  let subSel: string;
-                  let attr: string | null = null;
-                  if (atIdx > 0) {
-                    subSel = spec.slice(0, atIdx);
-                    attr = spec.slice(atIdx + 1);
-                  } else if (spec === ".") {
-                    rec[name] = root.textContent?.trim() ?? null;
-                    continue;
-                  } else {
-                    subSel = spec;
-                  }
-                  const el = root.querySelector(subSel);
-                  if (!el) {
-                    rec[name] = null;
-                  } else if (attr) {
-                    rec[name] = el.getAttribute(attr);
-                  } else {
-                    rec[name] = el.textContent?.trim() ?? null;
-                  }
+          // Ref addresses exactly one element.  locator.evaluate() auto-waits
+          // and throws on timeout (stale ref) — never silently return [].
+          const record = await page.locator(sel).evaluate(
+            (root, { fieldMap }) => {
+              const rec: Record<string, string | null> = {};
+              for (const [name, spec] of Object.entries(fieldMap)) {
+                const atIdx = spec.lastIndexOf("@");
+                let subSel: string;
+                let attr: string | null = null;
+                if (atIdx > 0) {
+                  subSel = spec.slice(0, atIdx);
+                  attr = spec.slice(atIdx + 1);
+                } else if (spec === ".") {
+                  rec[name] = root.textContent?.trim() ?? null;
+                  continue;
+                } else {
+                  subSel = spec;
                 }
-                return rec;
-              });
+                const el = root.querySelector(subSel);
+                if (!el) {
+                  rec[name] = null;
+                } else if (attr) {
+                  rec[name] = el.getAttribute(attr);
+                } else {
+                  rec[name] = el.textContent?.trim() ?? null;
+                }
+              }
+              return rec;
             },
-            { fieldMap: fields as Record<string, string>, maxItems: limit },
+            { fieldMap: fields as Record<string, string> },
           );
+          results = [record];
         } else {
           results = await page.evaluate(
             (args) => {
