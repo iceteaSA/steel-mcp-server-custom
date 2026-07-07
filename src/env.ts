@@ -76,7 +76,7 @@ export const EnvSchema = z
     // based and not TLS-wrapped at the HTTP layer).
     RELAY_BIND_ADDR: z.string().default("127.0.0.1"),
     // Comma-separated toolset names to activate (core is always active).
-    // Valid: core, tabs, extract, media, network, auth, debug.
+    // Valid: core, tabs, extract, media, network, auth, debug, ai.
     // Default (unset): all toolsets. Overridden by --toolsets CLI flag.
     // Use to reduce the tool surface for context-budget-constrained agents.
     TOOLSETS: z.string().optional(),

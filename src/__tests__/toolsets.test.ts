@@ -188,9 +188,18 @@ describe("makeRegistrar", () => {
 // ---------------------------------------------------------------------------
 
 describe("ALL_TOOLSETS", () => {
-  it("includes all 7 toolset values", () => {
-    expect(ALL_TOOLSETS.length).toBe(7);
-    const expected: Toolset[] = ["core", "tabs", "extract", "media", "network", "auth", "debug"];
+  it("includes all 8 toolset values", () => {
+    expect(ALL_TOOLSETS.length).toBe(8);
+    const expected: Toolset[] = [
+      "core",
+      "tabs",
+      "extract",
+      "media",
+      "network",
+      "auth",
+      "debug",
+      "ai",
+    ];
     for (const t of expected) {
       expect(ALL_TOOLSETS.includes(t)).toBe(true);
     }

@@ -4,7 +4,6 @@ import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
 import { afterAction, actionFeedback } from "../utils.js";
 import {
-  buildRadioSelector,
   cleanErrorMessage,
   detectFieldKind,
   detectFieldsInPage,
@@ -13,6 +12,10 @@ import {
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
 import {
+  execClick,
+  execFillField,
+  execPressKey,
+  execScroll,
   frameTarget,
   resolveFrame,
   tabTarget,
@@ -92,8 +95,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         const page = await mgr.getPage({ tabId, owner, force });
         const ctx = resolveFrame(page, frame);
         const beforeUrl = page.url();
-        await ctx.locator(sel).click({ timeout });
-        await afterAction(page, env);
+        await execClick(page, env, { selector: sel, frame, timeout });
 
         // Snapshot-diff feedback (best-effort — doesn't affect result on failure).
         const afterUrl = page.url();
@@ -323,39 +325,20 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
               skipped.push(f.selector);
               continue;
             }
-            if (kind === "select" || kind === "selectLabel" || kind === "selectIndex") {
-              if (kind === "selectLabel") {
-                await ctx.locator(f.selector).selectOption({ label: f.value }, { timeout });
-              } else if (kind === "selectIndex") {
-                const idx = parseInt(f.value, 10);
-                if (Number.isNaN(idx))
-                  throw new Error(`selectIndex expects numeric value, got "${f.value}"`);
-                await ctx.locator(f.selector).selectOption({ index: idx }, { timeout });
-              } else {
-                await ctx.locator(f.selector).selectOption(f.value, { timeout });
-              }
-              filled.push({ selector: f.selector, kind });
-            } else if (kind === "check") {
-              const intent = interpretCheckboxValue(f.value);
-              if (intent === "check") {
-                await ctx.locator(f.selector).check({ timeout });
-                filled.push({ selector: f.selector, kind });
-              } else if (intent === "uncheck") {
-                await ctx.locator(f.selector).uncheck({ timeout });
-                filled.push({ selector: f.selector, kind });
-              } else {
-                const fullSel = buildRadioSelector(f.selector, f.value);
-                await ctx.locator(fullSel).check({ timeout });
-                filled.push({ selector: fullSel, kind: "check-by-value" });
-              }
-            } else if (kind === "radio") {
-              const fullSel = buildRadioSelector(f.selector, f.value);
-              await ctx.locator(fullSel).click({ timeout });
-              filled.push({ selector: fullSel, kind });
-            } else {
-              await ctx.locator(f.selector).fill(f.value, { timeout });
-              filled.push({ selector: f.selector, kind });
-            }
+            await execFillField(page, env, {
+              selector: f.selector,
+              value: f.value,
+              kind,
+              frame,
+              timeout,
+            });
+            filled.push({
+              selector: f.selector,
+              kind:
+                kind === "check" && interpretCheckboxValue(f.value) === "selectByValue"
+                  ? "check-by-value"
+                  : kind,
+            });
             if (f.submit) await ctx.locator(f.selector).press("Enter");
           } catch (err) {
             if (skipMissing) {
@@ -470,81 +453,14 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         sel = selector || ref ? toSelector({ selector, ref }) : null;
         const page = await mgr.getPage({ tabId, owner, force });
         const ctx = resolveFrame(page, frame);
-        const dy = direction === "up" ? -pixels : pixels;
 
-        // aria-ref is a Playwright-internal selector engine — invisible to
-        // page.evaluate / querySelectorAll.  When a ref-based selector is
-        // given, scroll via locator.evaluate instead of the in-page path.
-        const useRef = sel && sel.startsWith("aria-ref=");
-        let result: {
-          before: number;
-          after: number;
-          pageHeight: number;
-          viewportHeight: number;
-          elementMissing?: boolean;
-        };
-        if (useRef) {
-          const loc = ctx.locator(sel!);
-          result = await loc.evaluate(
-            (el, { yDelta }) => {
-              const before = el.scrollTop;
-              el.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
-              const after = el.scrollTop;
-              return {
-                before,
-                after,
-                pageHeight: el.scrollHeight,
-                viewportHeight: el.clientHeight,
-              };
-            },
-            { yDelta: dy },
-          );
-        } else {
-          result = await ctx.evaluate(
-            ({ yDelta, scrollSelector }: { yDelta: number; scrollSelector: string | null }) => {
-              if (scrollSelector) {
-                const el = document.querySelector(scrollSelector);
-                if (!el)
-                  return {
-                    before: 0,
-                    after: 0,
-                    pageHeight: 0,
-                    viewportHeight: 0,
-                    elementMissing: true,
-                  };
-                const before = el.scrollTop;
-                el.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
-                const after = el.scrollTop;
-                return {
-                  before,
-                  after,
-                  pageHeight: el.scrollHeight,
-                  viewportHeight: el.clientHeight,
-                };
-              }
-              const before = window.scrollY;
-              window.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
-              const after = window.scrollY;
-              const pageHeight = Math.max(
-                document.documentElement.scrollHeight,
-                document.body.scrollHeight,
-              );
-              const viewportHeight = window.innerHeight;
-              return { before, after, pageHeight, viewportHeight };
-            },
-            { yDelta: dy, scrollSelector: sel },
-          );
-        }
+        const result = await execScroll(page, env, {
+          selector: sel ?? undefined,
+          direction,
+          pixels,
+          frame,
+        });
 
-        // If the targeted element wasn't found, report it.
-        if ((result as any).elementMissing) {
-          return {
-            isError: true,
-            content: [{ type: "text", text: `Scroll target "${sel}" not found.` }],
-          };
-        }
-
-        await afterAction(page, env);
         // Snapshot feedback: silent when readAfterScroll already reports page text.
         const scrollFeedback = await actionFeedback(page, mgr.resolveTab({ tabId, owner, force }), {
           silent: readAfterScroll,
@@ -1000,12 +916,7 @@ Errors: unknown key name, selector timeout.`,
         const page = await mgr.getPage({ tabId, owner, force });
         const urlBefore = page.url();
 
-        if (sel) {
-          await page.locator(sel).focus({ timeout: 5000 });
-        }
-
-        await page.keyboard.press(key);
-        await afterAction(page, env);
+        await execPressKey(page, env, { selector: sel, key });
 
         const urlAfter = page.url();
         const target = sel ? ` on ${sel}` : "";

@@ -1,5 +1,14 @@
-import { describe, it, expect } from "bun:test";
-import { toSelector, decorateRefError, resolveFrame } from "../tools/shared.js";
+import { describe, it, expect, mock } from "bun:test";
+import type { Page } from "patchright";
+import {
+  toSelector,
+  decorateRefError,
+  resolveFrame,
+  execClick,
+  execFillField,
+  execPressKey,
+  execScroll,
+} from "../tools/shared.js";
 
 // ---------------------------------------------------------------------------
 // toSelector
@@ -104,6 +113,131 @@ function makeFrame(name: string, url: string): any {
     url: () => url,
   };
 }
+
+// ---------------------------------------------------------------------------
+// Shared element executors
+// ---------------------------------------------------------------------------
+
+function makeFakePage(): Page {
+  return {
+    url: () => "https://example.com",
+    keyboard: { press: mock(() => Promise.resolve()) },
+    waitForFunction: mock(() => Promise.resolve()),
+    locator: mock(() => makeFakeLocator()),
+    frames: () => [],
+    evaluate: mock(() =>
+      Promise.resolve({ before: 0, after: 100, pageHeight: 1000, viewportHeight: 500 }),
+    ),
+  } as unknown as Page;
+}
+
+function makeFakeLocator() {
+  return {
+    click: mock(() => Promise.resolve()),
+    fill: mock(() => Promise.resolve()),
+    press: mock(() => Promise.resolve()),
+    selectOption: mock(() => Promise.resolve()),
+    check: mock(() => Promise.resolve()),
+    uncheck: mock(() => Promise.resolve()),
+    focus: mock(() => Promise.resolve()),
+    elementHandle: mock(() =>
+      Promise.resolve({
+        evaluate: mock(() => Promise.resolve({ tag: "input", type: "text" })),
+        dispose: mock(() => Promise.resolve()),
+      }),
+    ),
+    waitFor: mock(() => Promise.resolve()),
+    evaluate: mock(() =>
+      Promise.resolve({ before: 0, after: 100, pageHeight: 1000, viewportHeight: 500 }),
+    ),
+  };
+}
+
+const baseEnv = {
+  SETTLE_TIMEOUT_MS: 0,
+  GLOBAL_WAIT_SECONDS: 0,
+};
+
+describe("execClick", () => {
+  it("clicks a CSS selector and settles", async () => {
+    const page = makeFakePage();
+    await execClick(page, baseEnv as any, { selector: "#btn" });
+    const loc = (page.locator as any).mock.results[0].value;
+    expect(loc.click).toHaveBeenCalled();
+  });
+
+  it("clicks a ref and settles", async () => {
+    const page = makeFakePage();
+    await execClick(page, baseEnv as any, { ref: "e3" });
+    expect(page.locator).toHaveBeenCalledWith("aria-ref=e3");
+  });
+});
+
+describe("execFillField", () => {
+  it("fills a text input via CSS selector", async () => {
+    const page = makeFakePage();
+    (page.evaluate as any).mockImplementation((fn: any, selectors: string[]) => {
+      const out: Record<string, { tag: string; type: string }> = {};
+      for (const s of selectors) out[s] = { tag: "input", type: "text" };
+      return Promise.resolve(out);
+    });
+
+    await execFillField(page, baseEnv as any, { selector: "#email", value: "a@b.com" });
+    const loc = (page.locator as any).mock.results[0].value;
+    expect(loc.fill).toHaveBeenCalledWith("a@b.com", { timeout: 10000 });
+  });
+
+  it("checks a checkbox when value is truthy", async () => {
+    const page = makeFakePage();
+    (page.evaluate as any).mockImplementation((fn: any, selectors: string[]) => {
+      const out: Record<string, { tag: string; type: string }> = {};
+      for (const s of selectors) out[s] = { tag: "input", type: "checkbox" };
+      return Promise.resolve(out);
+    });
+
+    await execFillField(page, baseEnv as any, { selector: "#agree", value: "true" });
+    const loc = (page.locator as any).mock.results[0].value;
+    expect(loc.check).toHaveBeenCalled();
+  });
+
+  it("respects explicit kind over auto-detection", async () => {
+    const page = makeFakePage();
+    await execFillField(page, baseEnv as any, {
+      selector: "#x",
+      value: "hello",
+      kind: "text",
+    });
+    // evaluate should not be called for kind-override fills
+    expect(page.evaluate).not.toHaveBeenCalled();
+    const loc = (page.locator as any).mock.results[0].value;
+    expect(loc.fill).toHaveBeenCalledWith("hello", { timeout: 10000 });
+  });
+});
+
+describe("execPressKey", () => {
+  it("presses a key at page level", async () => {
+    const page = makeFakePage();
+    await execPressKey(page, baseEnv as any, { key: "Enter" });
+    expect(page.keyboard.press).toHaveBeenCalledWith("Enter");
+  });
+
+  it("focuses an element before pressing", async () => {
+    const page = makeFakePage();
+    await execPressKey(page, baseEnv as any, { selector: "#input", key: "Tab" });
+    const loc = (page.locator as any).mock.results[0].value;
+    expect(loc.focus).toHaveBeenCalledWith({ timeout: 5000 });
+    expect(page.keyboard.press).toHaveBeenCalledWith("Tab");
+  });
+});
+
+describe("execScroll", () => {
+  it("scrolls the page down and returns position", async () => {
+    const page = makeFakePage();
+    const result = await execScroll(page, baseEnv as any, { direction: "down", pixels: 250 });
+    expect(result.after).toBe(100);
+    expect(page.evaluate).toHaveBeenCalled();
+  });
+});
 
 describe("resolveFrame", () => {
   it("returns the page when frame is omitted", () => {

@@ -8,6 +8,14 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Frame, Page } from "patchright";
 import { z } from "zod";
+import type { Env } from "../manager.js";
+import {
+  buildRadioSelector,
+  detectFieldKind,
+  detectFieldsInPage,
+  interpretCheckboxValue,
+} from "../helpers.js";
+import { afterAction } from "../utils.js";
 
 // Re-exported because @modelcontextprotocol/sdk 1.29 doesn't re-export
 // ToolAnnotations from the server/mcp module.
@@ -23,7 +31,7 @@ export interface ToolAnnotations {
 // Toolsets
 // -----------------------------------------------------------------------------
 
-export type Toolset = "core" | "tabs" | "extract" | "media" | "network" | "auth" | "debug";
+export type Toolset = "core" | "tabs" | "extract" | "media" | "network" | "auth" | "debug" | "ai";
 
 export const ALL_TOOLSETS: readonly Toolset[] = [
   "core",
@@ -33,6 +41,7 @@ export const ALL_TOOLSETS: readonly Toolset[] = [
   "network",
   "auth",
   "debug",
+  "ai",
 ] as const;
 
 // -----------------------------------------------------------------------------
@@ -230,6 +239,190 @@ export function decorateRefError(err: unknown, usedSelector: string): string {
 // -----------------------------------------------------------------------------
 // resolveToolsets — CLI + env → validated Set<Toolset>
 // -----------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Shared element executors — used by interaction tools and the act agent.
+//
+// Each function resolves ref/selector, performs the Playwright action on the
+// resolved context, and calls afterAction() so the page is settled before the
+// next observation. Errors bubble up to callers, which should decorate them
+// for agent consumption.
+// ---------------------------------------------------------------------------
+
+export interface ExecContext {
+  page: Page;
+  frame?: string;
+  timeout?: number;
+}
+
+export async function execClick(
+  page: Page,
+  env: Env,
+  opts: { ref?: string; selector?: string; frame?: string; timeout?: number },
+): Promise<void> {
+  const sel = toSelector({ selector: opts.selector, ref: opts.ref });
+  const ctx = resolveFrame(page, opts.frame);
+  await ctx.locator(sel).click({ timeout: opts.timeout ?? 10000 });
+  await afterAction(page, env);
+}
+
+export async function execFillField(
+  page: Page,
+  env: Env,
+  opts: {
+    ref?: string;
+    selector?: string;
+    value: string;
+    frame?: string;
+    timeout?: number;
+    kind?: "text" | "check" | "radio" | "select" | "selectLabel" | "selectIndex";
+  },
+): Promise<void> {
+  const sel = toSelector({ selector: opts.selector, ref: opts.ref });
+  const ctx = resolveFrame(page, opts.frame);
+  const timeout = opts.timeout ?? 10000;
+
+  let kind = opts.kind;
+  if (!kind) {
+    // For CSS selectors, batch kind-detection via page.evaluate; aria-ref is
+    // an internal Playwright engine, so inspect the element handle instead.
+    let info: { tag: string; type: string } | null;
+    if (sel.startsWith("aria-ref=")) {
+      const handle = await ctx.locator(sel).elementHandle({ timeout });
+      try {
+        info = handle
+          ? await handle.evaluate((el: Element) => ({
+              tag: el.tagName.toLowerCase(),
+              type: (el as HTMLInputElement).type || "",
+            }))
+          : null;
+      } finally {
+        if (handle) await handle.dispose().catch(() => {});
+      }
+    } else {
+      const map = await ctx.evaluate(detectFieldsInPage, [sel]);
+      info = map[sel];
+    }
+
+    if (!info) {
+      throw new Error(`Element not found: ${sel}`);
+    }
+
+    kind = detectFieldKind(info.tag, info.type);
+  }
+
+  switch (kind) {
+    case "select":
+      await ctx.locator(sel).selectOption(opts.value, { timeout });
+      break;
+    case "check": {
+      const intent = interpretCheckboxValue(opts.value);
+      if (intent === "check") {
+        await ctx.locator(sel).check({ timeout });
+      } else if (intent === "uncheck") {
+        await ctx.locator(sel).uncheck({ timeout });
+      } else {
+        const fullSel = buildRadioSelector(sel, opts.value);
+        await ctx.locator(fullSel).check({ timeout });
+      }
+      break;
+    }
+    case "radio": {
+      const fullSel = buildRadioSelector(sel, opts.value);
+      await ctx.locator(fullSel).click({ timeout });
+      break;
+    }
+    default:
+      await ctx.locator(sel).fill(opts.value, { timeout });
+  }
+
+  await afterAction(page, env);
+}
+
+export async function execPressKey(
+  page: Page,
+  env: Env,
+  opts: { ref?: string; selector?: string; key: string; frame?: string },
+): Promise<void> {
+  const sel =
+    opts.selector || opts.ref ? toSelector({ selector: opts.selector, ref: opts.ref }) : undefined;
+  if (sel) {
+    const ctx = resolveFrame(page, opts.frame);
+    await ctx.locator(sel).focus({ timeout: 5000 });
+  }
+  await page.keyboard.press(opts.key);
+  await afterAction(page, env);
+}
+
+export interface ScrollResult {
+  before: number;
+  after: number;
+  pageHeight: number;
+  viewportHeight: number;
+}
+
+export async function execScroll(
+  page: Page,
+  env: Env,
+  opts: {
+    ref?: string;
+    selector?: string;
+    direction: "up" | "down";
+    pixels?: number;
+    frame?: string;
+  },
+): Promise<ScrollResult> {
+  const sel =
+    opts.selector || opts.ref ? toSelector({ selector: opts.selector, ref: opts.ref }) : null;
+  const ctx = resolveFrame(page, opts.frame);
+  const dy = opts.direction === "up" ? -(opts.pixels ?? 500) : (opts.pixels ?? 500);
+
+  let result: ScrollResult;
+  if (sel && sel.startsWith("aria-ref=")) {
+    result = await ctx.locator(sel).evaluate(
+      (el, { yDelta }) => {
+        const before = el.scrollTop;
+        el.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
+        return {
+          before,
+          after: el.scrollTop,
+          pageHeight: el.scrollHeight,
+          viewportHeight: el.clientHeight,
+        };
+      },
+      { yDelta: dy },
+    );
+  } else {
+    result = await ctx.evaluate(
+      ({ yDelta, scrollSelector }: { yDelta: number; scrollSelector: string | null }) => {
+        if (scrollSelector) {
+          const el = document.querySelector(scrollSelector);
+          if (!el) throw new Error(`Scroll target "${scrollSelector}" not found`);
+          const before = el.scrollTop;
+          el.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
+          return {
+            before,
+            after: el.scrollTop,
+            pageHeight: el.scrollHeight,
+            viewportHeight: el.clientHeight,
+          };
+        }
+        const before = window.scrollY;
+        window.scrollBy({ left: 0, top: yDelta, behavior: "instant" as ScrollBehavior });
+        return {
+          before,
+          after: window.scrollY,
+          pageHeight: Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),
+          viewportHeight: window.innerHeight,
+        };
+      },
+      { yDelta: dy, scrollSelector: sel },
+    );
+  }
+
+  await afterAction(page, env);
+  return result;
+}
 
 export function resolveToolsets(
   cliArg: string | undefined,

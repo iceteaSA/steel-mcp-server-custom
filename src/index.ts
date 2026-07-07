@@ -25,7 +25,9 @@ import {
   registerNetwork,
   registerCredentials,
   registerProfiles,
+  registerAct,
 } from "./tools/index.js";
+import { llmConfigured } from "./llm.js";
 
 // -----------------------------------------------------------------------------
 // Parse environment + CLI flags
@@ -62,6 +64,9 @@ registerSession(register, mgr, env);
 registerNetwork(register, mgr, env);
 registerCredentials(register, mgr, env);
 registerProfiles(register, mgr, env);
+if (llmConfigured(env)) {
+  registerAct(register, mgr, env);
+}
 
 // -----------------------------------------------------------------------------
 // Server lifecycle
