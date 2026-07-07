@@ -20,6 +20,19 @@ export const EnvSchema = z
     MAX_INLINE_BYTES: z.coerce.number().default(512000),
     // Directory for file-mode outputs (screenshots, page text, etc.).
     OUTPUT_DIR: z.string().default("/tmp/steel-mcp"),
+    // Root directory under which file-mode outputs are allowed to write.
+    // When set, outputPath supplied to tools (get_screenshot, evaluate, etc.)
+    // is realpath-resolved and must resolve under this directory; otherwise
+    // the call is rejected. Defaults to OUTPUT_DIR, so only files written
+    // inside the output area are permitted out of the box. Set to "" or "*"
+    // to disable the check (escape hatch — the MCP service account can then
+    // write anywhere it has permission).
+    OUTPUT_ROOT: z.string().default(""),
+    // Root directory under which upload_file source paths must resolve.
+    // Defaults to OUTPUT_DIR; realpath-resolves each upload path and rejects
+    // anything that escapes this root (defeats ../ traversal + symlinks).
+    // Set to "" or "*" to disable the check (escape hatch — trust the agent).
+    UPLOAD_ROOT: z.string().default(""),
     // Default JPEG quality for screenshots (1–100).
     DEFAULT_SCREENSHOT_QUALITY: z.coerce.number().min(1).max(100).default(80),
     // Default viewport dimensions.
@@ -96,6 +109,11 @@ export const EnvSchema = z
     // Derive persistent paths from OUTPUT_DIR if not explicitly set.
     PROFILES_DIR: env.PROFILES_DIR ?? `${env.OUTPUT_DIR}/profiles`,
     CREDENTIALS_FILE: env.CREDENTIALS_FILE ?? `${env.OUTPUT_DIR}/credentials.json`,
+    // Resolve containment roots: "*" disables the check (escape hatch);
+    // otherwise callers must realpath-resolve under this directory. Default
+    // to OUTPUT_DIR so the security guard is on out of the box.
+    OUTPUT_ROOT: env.OUTPUT_ROOT === "*" ? "*" : env.OUTPUT_ROOT || env.OUTPUT_DIR,
+    UPLOAD_ROOT: env.UPLOAD_ROOT === "*" ? "*" : env.UPLOAD_ROOT || env.OUTPUT_DIR,
   }))
   .refine(
     (env) => {

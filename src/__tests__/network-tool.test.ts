@@ -6,6 +6,7 @@ import type { ToolRegistrar } from "../tools/shared.js";
 const env: Env = {
   MAX_INLINE_BYTES: 1000,
   OUTPUT_DIR: "/tmp",
+  OUTPUT_ROOT: "/tmp",
 } as Env;
 
 function makeRegistrar() {
@@ -20,6 +21,7 @@ function fakeMgr(
   events: any[],
   bodies: Record<number, string> = {},
   resolvedTabId = 1,
+  ownerMap: Record<number, string> = {},
 ): BrowserManager {
   return {
     resolveTab: () => resolvedTabId,
@@ -50,6 +52,7 @@ function fakeMgr(
       if (!(id in bodies)) throw new Error("body no longer available");
       return bodies[id];
     },
+    getTabOwner: (tabId: number) => ownerMap[tabId],
     dialogNotice: () => "",
     setTabLastUrl: () => {},
   } as unknown as BrowserManager;
@@ -135,5 +138,61 @@ describe("get_network tool", () => {
     const denied = await handlers.get_network({ owner: "A", requestId: 7 });
     expect(denied.isError).toBe(true);
     expect(denied.content[0].text).toContain("requestId 7 not found in your tabs");
+  });
+
+  // SEC3 — requestId cross-tab body leak: an agent must NEVER be able to
+  // read another owner's response body via the unscoped event list, even
+  // when no owner/tabId filter is supplied. The earlier carve-out that
+  // allowed untabbed events through unscoped body fetches is closed here.
+  it("denies requestId body fetch when no scope given AND event belongs to another owner's tab", async () => {
+    const { register, handlers } = makeRegistrar();
+    const mgr = fakeMgr(
+      [
+        {
+          id: 42,
+          tabId: 9,
+          method: "GET",
+          url: "https://other-agent/x",
+          resourceType: "xhr",
+          status: 200,
+        },
+      ],
+      { 42: "AUTH-TOKEN-LEAK" },
+      1, // caller's resolved tab (irrelevant — caller passes no tabId/owner)
+      { 9: "owner-B" },
+    );
+    registerNetwork(register, mgr, env);
+    const result = await handlers.get_network({ requestId: 42 });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toMatch(/belongs to another owner/);
+    expect(result.content[0].text).not.toContain("AUTH-TOKEN-LEAK");
+  });
+
+  it("allows requestId body fetch when caller passes an explicit tabId", async () => {
+    const { register, handlers } = makeRegistrar();
+    const mgr = fakeMgr(
+      [
+        {
+          id: 50,
+          tabId: 9,
+          method: "GET",
+          url: "https://other-agent/x",
+          resourceType: "xhr",
+          status: 200,
+        },
+      ],
+      { 50: "owned-body" },
+      9,
+      { 9: "owner-A" },
+    );
+    registerNetwork(register, mgr, env);
+    // Explicit tabId scopes the body fetch to that tab's events; the
+    // other-owner gate is bypassed because the caller has scoped.
+    const result = await handlers.get_network({
+      requestId: 50,
+      tabId: 9,
+    });
+    expect(result.isError).toBeUndefined();
+    expect(result.content[0].text).toBe("owned-body");
   });
 });

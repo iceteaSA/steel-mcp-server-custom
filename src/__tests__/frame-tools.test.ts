@@ -11,6 +11,8 @@ const mockEnv: Env = {
   STEEL_BASE_URL: "http://localhost:3000",
   MAX_INLINE_BYTES: 512000,
   OUTPUT_DIR: "/tmp/steel-mcp-frame-test",
+  OUTPUT_ROOT: "/tmp/steel-mcp-frame-test",
+  UPLOAD_ROOT: "/tmp/steel-mcp-frame-test",
   DEFAULT_SCREENSHOT_QUALITY: 80,
   DEFAULT_VIEWPORT_WIDTH: 1280,
   DEFAULT_VIEWPORT_HEIGHT: 720,

@@ -1,8 +1,13 @@
-import { describe, it, expect } from "bun:test";
+import { describe, it, expect, beforeAll } from "bun:test";
+import fs from "fs/promises";
+import os from "os";
+import path from "path";
 import { parseHTML } from "linkedom";
 import {
+  assertInsideRoot,
   checkFingerprintConsistency,
   collapseWhitespace,
+  containmentDisabled,
   isBotWall,
   detectErrorPage,
   ErrorTracker,
@@ -1141,5 +1146,89 @@ describe("validateUrlPattern", () => {
   it("returns undefined for empty/undefined patterns", () => {
     expect(validateUrlPattern(undefined)).toBeUndefined();
     expect(validateUrlPattern("")).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Path containment — assertInsideRoot / containmentDisabled.
+//
+// Real-filesystem tests under a tmpdir; create root + a sibling dir, verify
+// allow/deny + the escape hatch ("*").
+// ---------------------------------------------------------------------------
+
+describe("containmentDisabled", () => {
+  it("is true for empty/null/undefined", () => {
+    expect(containmentDisabled("")).toBe(true);
+    expect(containmentDisabled(null)).toBe(true);
+    expect(containmentDisabled(undefined)).toBe(true);
+  });
+  it("is true for the literal '*'", () => {
+    expect(containmentDisabled("*")).toBe(true);
+  });
+  it("is false for a real path", () => {
+    expect(containmentDisabled("/tmp/anything")).toBe(false);
+  });
+});
+
+describe("assertInsideRoot", () => {
+  let root: string;
+  let outside: string;
+
+  beforeAll(async () => {
+    const base = await fs.mkdtemp(path.join(os.tmpdir(), "steel-assert-"));
+    root = path.join(base, "root");
+    outside = path.join(base, "outside");
+    await fs.mkdir(root, { recursive: true });
+    await fs.mkdir(outside, { recursive: true });
+    await fs.writeFile(path.join(root, "good.txt"), "ok");
+    await fs.writeFile(path.join(outside, "evil.txt"), "x");
+  });
+
+  it("returns the path when it lies inside the root", async () => {
+    const target = path.join(root, "good.txt");
+    const resolved = await assertInsideRoot(target, root, "upload path");
+    expect(resolved).toBe(await fs.realpath(target));
+  });
+
+  it("rejects a path that escapes via ../", async () => {
+    const traversal = path.join(root, "..", "outside", "evil.txt");
+    await expect(assertInsideRoot(traversal, root, "upload path")).rejects.toThrow(
+      /escapes the configured root/,
+    );
+  });
+
+  it("rejects a path in a completely separate directory", async () => {
+    await expect(
+      assertInsideRoot(path.join(outside, "evil.txt"), root, "upload path"),
+    ).rejects.toThrow(/escapes the configured root/);
+  });
+
+  it("rejects a path that is a sibling with a prefix-matching name", async () => {
+    // Create /tmp/.../root-evil — the rootWithSep check must reject this
+    // even though the directory name starts with the same prefix.
+    const prefixSibling = path.join(path.dirname(root), `${path.basename(root)}-evil`);
+    await fs.mkdir(prefixSibling, { recursive: true });
+    try {
+      await expect(
+        assertInsideRoot(path.join(prefixSibling, "x"), root, "upload path"),
+      ).rejects.toThrow(/escapes the configured root/);
+    } finally {
+      await fs.rm(prefixSibling, { recursive: true, force: true });
+    }
+  });
+
+  it("skips the check when root is '*' (escape hatch)", async () => {
+    const target = path.join(outside, "evil.txt");
+    // No throw — returns the path verbatim.
+    const resolved = await assertInsideRoot(target, "*", "upload path");
+    expect(resolved).toBe(target);
+  });
+
+  it("accepts a not-yet-existing path under the root (newly-written output)", async () => {
+    const newFile = path.join(root, "subdir", "fresh.txt");
+    const resolved = await assertInsideRoot(newFile, root, "outputPath");
+    // The parent dir exists; we don't create the leaf — the check should
+    // resolve against the parent realpath and rejoin the leaf.
+    expect(resolved.endsWith(path.join("subdir", "fresh.txt"))).toBe(true);
   });
 });

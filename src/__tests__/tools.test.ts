@@ -215,6 +215,35 @@ describe("non-browser tools", () => {
     expect(client.getText(r)).toContain("not found");
   });
 
+  // SEC4 — use_credential must mask secret-bearing `extra` fields (otp_secret,
+  // security answers, etc.) in the tool result. The fill path still uses the
+  // real values; they just don't leak to the agent-visible output.
+  it("use_credential masks secret-bearing `extra` values in the returned info", async () => {
+    // Store a credential with an OTP secret + security answer in `extra`.
+    const secretOtp = "JBSWY3DPEHPK3PXP";
+    const secretAnswer = "purple-elephant-42";
+    await client.tool(130, "credentials", {
+      name: "test-extra-mask",
+      url: "test.com",
+      username: "alice",
+      password: "supersecret123",
+      extra: JSON.stringify({ otp_secret: secretOtp, security_answer: secretAnswer }),
+    });
+
+    // Retrieve without selectors — the response should mask the password
+    // AND mask every extra value.
+    const r = await client.tool(131, "use_credential", { name: "test-extra-mask" });
+    expect(client.isError(r)).toBe(false);
+    const text = client.getText(r);
+    expect(text).not.toContain(secretOtp);
+    expect(text).not.toContain(secretAnswer);
+    // Password's last 3 chars are still visible (existing behavior).
+    expect(text).toContain("***123");
+
+    // Cleanup
+    await client.tool(132, "credentials", { name: "test-extra-mask", remove: true });
+  });
+
   it("captcha_status returns balance and status", async () => {
     const r = await client.tool(108, "captcha_status");
     const text = client.getText(r);
@@ -284,12 +313,32 @@ describe("non-browser tools", () => {
 
   // upload_file with non-existent file path returns isError before touching browser
   it("upload_file with non-existent file returns isError", async () => {
+    // Use a path INSIDE UPLOAD_ROOT (= /tmp/steel-mcp-vitest) so the
+    // containment check passes and we exercise the "file not found" branch
+    // specifically. (Paths outside UPLOAD_ROOT are rejected earlier —
+    // covered by the SEC1 containment test below.)
     const r = await client.tool(113, "upload_file", {
       selector: "#file",
-      files: ["/tmp/__steel_mcp_nonexistent_9x7y__.txt"],
+      files: ["/tmp/steel-mcp-vitest/__steel_mcp_nonexistent_9x7y__.txt"],
     });
     expect(client.isError(r)).toBe(true);
     expect(client.getText(r)).toContain("not found");
+  });
+
+  // SEC1 — upload_file containment. Files outside UPLOAD_ROOT (which defaults
+  // to OUTPUT_DIR) must be rejected with a clear error, even if the file
+  // exists and is readable. This blocks exfiltration of /etc/passwd or any
+  // other host-readable file through an attacker-controlled upload form.
+  it("upload_file rejects paths that escape UPLOAD_ROOT", async () => {
+    // /etc/passwd exists on Linux; if it doesn't exist the test fails for
+    // the right reason (missing file) — but the containment check runs
+    // BEFORE the existence check, so the rejection text is what we assert.
+    const r = await client.tool(113, "upload_file", {
+      selector: "#file",
+      files: ["/etc/passwd"],
+    });
+    expect(client.isError(r)).toBe(true);
+    expect(client.getText(r)).toMatch(/escapes the configured UPLOAD_ROOT|escape the configured/);
   });
 
   // upload_file with both selector+ref returns isError

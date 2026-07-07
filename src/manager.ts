@@ -205,6 +205,15 @@ export class BrowserManager {
   }
 
   /**
+   * Return the owner string for `tabId`, or undefined if the tab is unknown
+   * or unowned. Public surface so tool handlers (e.g. get_network's
+   * cross-tab body gate) can ask without reaching into private state.
+   */
+  getTabOwner(tabId: number): string | undefined {
+    return this.tabOwners.get(tabId);
+  }
+
+  /**
    * Resolve a tab ID from an optional explicit ID, owner context, and
    * force flag. This is the single ownership guard that all page-accessing
    * calls should route through.
@@ -364,13 +373,18 @@ export class BrowserManager {
         }
       } catch (err) {
         // Internal failure in the listener — dismiss best-effort so the
-        // dialog does not wedge the tab permanently. Log the error so
-        // operators can diagnose listener bugs.
-        console.error(`[steel-mcp] dialog handler error for tab ${id}:`, (err as Error).message);
+        // dialog does not wedge the tab permanently. Only log when the
+        // fallback dismiss ALSO fails (i.e. the dialog is truly stuck) —
+        // a known accept-throw under policy=accept is expected, the
+        // dismiss fallback handles it, and operators don't need a
+        // console.error for the expected path (which also keeps the gate
+        // output pristine).
         try {
           await dialog.dismiss();
-        } catch {
-          // nothing more we can do
+        } catch (fallbackErr) {
+          console.error(
+            `[steel-mcp] dialog handler error for tab ${id}: accept threw (${(err as Error).message}) AND dismiss fallback failed (${(fallbackErr as Error).message}); dialog may wedge the tab.`,
+          );
         }
       }
     });
@@ -379,25 +393,7 @@ export class BrowserManager {
       // Ignore close events from a page that was replaced by crash recovery
       // so the new page's registry entry isn't wiped out.
       if (this.tabs.get(id) !== page) return;
-      this.tabs.delete(id);
-      this.tabOwners.delete(id);
-      this.tabLastActivity.delete(id);
-      this.tabLastUrl.delete(id);
-      this.pageToTabId.delete(page);
-      clearSnapshot(id);
-      // Clean up ownerActiveTab if this was someone's active tab
-      for (const [o, activeId] of this.ownerActiveTab) {
-        if (activeId === id) this.ownerActiveTab.delete(o);
-      }
-      const profileName = this.tabToProfile.get(id);
-      if (profileName) {
-        this.tabToProfile.delete(id);
-        const profile = this.profiles.get(profileName);
-        if (profile) profile.tabIds.delete(id);
-      }
-      // Clear dialog state when page closes — dialogs are gone when the page is gone.
-      this.dialogPolicy.delete(id);
-      this.lastDialogs.delete(id);
+      this.clearTabState(id);
     });
   }
 
@@ -405,8 +401,18 @@ export class BrowserManager {
    * Recreate a tab in-place: open a fresh page, swap it into the registry
    * under the same tabId, re-wire listeners, and re-navigate to the last known
    * URL. Sets a one-shot recovery notice for the tab.
+   *
+   * Owner / per-owner-active / profile / dialog metadata is *preserved*
+   * across recovery — the recovery path is a page-replacement, not a
+   * tab-disposal. softReset() is destructive and DOES drop owner state
+   * (browser death means no surviving tabs to keep track of).
    */
   private async _recoverTab(tabId: number): Promise<Page> {
+    // Snapshot metadata BEFORE any allocation so the replacement page can
+    // inherit it even when the allocation path triggers a transient-id
+    // remap that overwrites the original tabId's owner.
+    const priorOwner = this.tabOwners.get(tabId);
+    const priorProfile = this.tabToProfile.get(tabId);
     const replacePage = async (page: Page): Promise<Page> => {
       const oldPage = this.tabs.get(tabId);
       if (oldPage) this.pageToTabId.delete(oldPage);
@@ -416,7 +422,7 @@ export class BrowserManager {
       // may have already registered this page under a transient tabId. Using
       // allocateTab merges that registration; we then remap to the original
       // tabId and drop any transient entry so the registry stays coherent.
-      const allocatedId = this.allocateTab(page);
+      const allocatedId = this.allocateTab(page, priorOwner);
       if (allocatedId !== tabId) {
         this.tabs.delete(allocatedId);
         this.tabOwners.delete(allocatedId);
@@ -426,6 +432,18 @@ export class BrowserManager {
       this.tabs.set(tabId, page);
       this.pageToTabId.set(page, tabId);
       this.tabLastActivity.set(tabId, Date.now());
+      // Restore owner / profile metadata — allocateTab may have set owner
+      // on the transient id; we copy it back onto the original tabId and
+      // repair ownerActiveTab if the cached pointer was dropped.
+      if (priorOwner !== undefined) this.tabOwners.set(tabId, priorOwner);
+      if (priorProfile !== undefined) {
+        this.tabToProfile.set(tabId, priorProfile);
+        const profile = this.profiles.get(priorProfile);
+        if (profile && !profile.tabIds.has(tabId)) profile.tabIds.add(tabId);
+      }
+      if (priorOwner !== undefined && this.ownerActiveTab.get(priorOwner) === undefined) {
+        this.ownerActiveTab.set(priorOwner, tabId);
+      }
       // allocateTab already wired console listeners; re-wire page-specific
       // listeners so they reference the original tabId (the transient-id
       // listeners will ignore events once the transient entry is gone).
@@ -447,11 +465,54 @@ export class BrowserManager {
       return await replacePage(newPage);
     } catch (err) {
       if (!isBrowserClosedError(err)) throw err;
+      // Browser death: every tab is dead too — softReset clears all owner
+      // state by design (no surviving tabs to keep track of). The caller
+      // will re-create the requested tab on the fresh context.
       await this.softReset();
       await sleep(2000);
       await this.initialize();
       const newPage = await this.browserContext!.newPage();
       return await replacePage(newPage);
+    }
+  }
+
+  /**
+   * Single-source per-tab cleanup. Drops every per-tab map entry that
+   * belongs to `id` — tabs, owners, activity, lastUrl, recoveryNotices,
+   * pageToTabId, dialogPolicy, lastDialogs, snapshot store, profile
+   * membership, and any ownerActiveTab pointer that pointed here.
+   *
+   * Called from:
+   *   - closeTab (manual close)
+   *   - the page.on("close") listener (Playwright-driven close)
+   *   - softReset / stop (full teardown — loops every id through this)
+   *
+   * Centralizing keeps the close-listener path and the manual-close path
+   * in lockstep so cleanup parity can't drift.
+   */
+  private clearTabState(id: number): void {
+    const page = this.tabs.get(id);
+
+    this.tabs.delete(id);
+    this.tabOwners.delete(id);
+    this.tabLastActivity.delete(id);
+    this.tabLastUrl.delete(id);
+    this.recoveryNotices.delete(id);
+    this.dialogPolicy.delete(id);
+    this.lastDialogs.delete(id);
+    if (page) this.pageToTabId.delete(page);
+
+    clearSnapshot(id);
+
+    for (const [o, activeId] of this.ownerActiveTab) {
+      if (activeId === id) this.ownerActiveTab.delete(o);
+    }
+
+    const profileName = this.tabToProfile.get(id);
+    if (profileName) {
+      this.tabToProfile.delete(id);
+      const profile = this.profiles.get(profileName);
+      if (profile) profile.tabIds.delete(id);
     }
   }
 
@@ -1088,17 +1149,18 @@ export class BrowserManager {
     for (const [, profile] of this.profiles) {
       await profile.context.close().catch(() => {});
     }
-    // Clear per-tab dialog state.
-    this.dialogPolicy.clear();
-    this.lastDialogs.clear();
+    // Loop every live tab through the same per-tab cleanup helper that
+    // closeTab + the close-listener use — guarantees cleanup parity
+    // across all teardown paths. Array.from snapshots the keys because
+    // clearTabState mutates the map mid-iteration.
+    for (const id of Array.from(this.tabs.keys())) {
+      this.clearTabState(id);
+    }
     this.profiles.clear();
     this.tabToProfile.clear();
-    this.tabs.clear();
-    this.tabOwners.clear();
-    this.tabLastActivity.clear();
-    this.tabLastUrl.clear();
+    this.dialogPolicy.clear();
+    this.lastDialogs.clear();
     this.ownerActiveTab.clear();
-    this.recoveryNotices.clear();
     clearAllSnapshots();
     this.primaryTabId = undefined;
     this.nextTabId = 1;
@@ -1121,50 +1183,40 @@ export class BrowserManager {
       );
     }
 
-    // Run bookkeeping BEFORE page.close() so the close-event listener
-    // (registered by allocateTab) doesn't race ahead and delete entries
-    // before the fallback logic can repair ownerActiveTab pointers.
-    this.tabs.delete(id);
-    this.tabOwners.delete(id);
-    this.tabLastActivity.delete(id);
-    clearSnapshot(id);
-
-    // Clean up ownerActiveTab entries pointing at the closed tab.
-    // For each owner whose active tab was this one, fall back to that
-    // owner's most-recently-touched surviving tab; delete the entry if
-    // no tabs remain.
+    // Snapshot the per-owner active-tab pointers that point at this tab
+    // BEFORE cleanup runs — we need them to repair each owner's active
+    // pointer to the most-recently-touched surviving tab.
+    const ownersToRepair: string[] = [];
     for (const [owner, activeId] of this.ownerActiveTab) {
-      if (activeId === id) {
-        let bestId: number | undefined;
-        let bestTime = 0;
-        for (const [tid, last] of this.tabLastActivity) {
-          if (this.tabOwners.get(tid) === owner && last > bestTime) {
-            const p = this.tabs.get(tid);
-            if (p && !p.isClosed()) {
-              bestId = tid;
-              bestTime = last;
-            }
+      if (activeId === id) ownersToRepair.push(owner);
+    }
+
+    // Centralized per-tab cleanup — wipes every per-tab map entry. Runs
+    // before page.close() so the close-listener (also routing through
+    // clearTabState) becomes a no-op safety net rather than a duplicate.
+    this.clearTabState(id);
+
+    // Repair ownerActiveTab pointers: for each owner whose active tab was
+    // this one, fall back to that owner's most-recently-touched surviving
+    // tab; delete the entry if no tabs remain.
+    for (const owner of ownersToRepair) {
+      let bestId: number | undefined;
+      let bestTime = 0;
+      for (const [tid, last] of this.tabLastActivity) {
+        if (this.tabOwners.get(tid) === owner && last > bestTime) {
+          const p = this.tabs.get(tid);
+          if (p && !p.isClosed()) {
+            bestId = tid;
+            bestTime = last;
           }
         }
-        if (bestId !== undefined) {
-          this.ownerActiveTab.set(owner, bestId);
-        } else {
-          this.ownerActiveTab.delete(owner);
-        }
+      }
+      if (bestId !== undefined) {
+        this.ownerActiveTab.set(owner, bestId);
+      } else {
+        this.ownerActiveTab.delete(owner);
       }
     }
-
-    // Clean up profile membership
-    const profileName = this.tabToProfile.get(id);
-    if (profileName) {
-      this.tabToProfile.delete(id);
-      const profile = this.profiles.get(profileName);
-      if (profile) profile.tabIds.delete(id);
-    }
-
-    // Clear per-tab dialog policy and last dialog record.
-    this.dialogPolicy.delete(id);
-    this.lastDialogs.delete(id);
 
     // Fire the actual page close — the allocateTab listener will run its
     // own cleanup as a safety net (no-op since entries already deleted).
@@ -1734,10 +1786,12 @@ export class BrowserManager {
       this.idleSweeperHandle = undefined;
     }
     this.browserContext = undefined;
-    this.tabs.clear();
-    this.tabOwners.clear();
-    this.tabLastActivity.clear();
-    this.tabLastUrl.clear();
+    // Centralized per-tab cleanup — covers every live tab.
+    // Array.from snapshots the keys because clearTabState mutates the
+    // map mid-iteration.
+    for (const id of Array.from(this.tabs.keys())) {
+      this.clearTabState(id);
+    }
     this.ownerActiveTab.clear();
     this.dialogPolicy.clear();
     this.lastDialogs.clear();

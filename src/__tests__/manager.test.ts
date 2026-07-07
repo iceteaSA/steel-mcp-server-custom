@@ -20,6 +20,8 @@ const mockEnv: Env = {
   STEEL_BASE_URL: "http://localhost:3000",
   MAX_INLINE_BYTES: 512000,
   OUTPUT_DIR: "/tmp/steel-mcp-test",
+  OUTPUT_ROOT: "/tmp/steel-mcp-test",
+  UPLOAD_ROOT: "/tmp/steel-mcp-test",
   DEFAULT_SCREENSHOT_QUALITY: 80,
   DEFAULT_VIEWPORT_WIDTH: 1280,
   DEFAULT_VIEWPORT_HEIGHT: 720,
@@ -993,5 +995,110 @@ describe("idempotent tab allocation", () => {
     // One entry in the tabs map, not two.
     expect(mgr.tabs.size).toBe(1);
     expect(mgr.nextTabId).toBe(11); // only advanced once
+  });
+});
+
+// ---------------------------------------------------------------------------
+// COR1 — _recoverTab preserves owner / per-owner active tab.
+// COR2 — clearTabState is the single cleanup helper for every teardown path.
+// ---------------------------------------------------------------------------
+
+describe("_recoverTab preserves owner metadata across recovery", () => {
+  it("owner survives the page-swap when allocateTab assigns a transient id", async () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-A");
+    mgr.ownerActiveTab.set("agent-A", id);
+    mgr.tabLastUrl.set(id, "https://recover.test/");
+    // Simulate the transient-id remap: pretend the new page allocated as id 99
+    // and the recovery path will move it to the original `id`.
+    // We do this by patching allocateTab to return a different id once.
+    const realAllocate = mgr.allocateTab.bind(mgr);
+    let calls = 0;
+    mgr.allocateTab = (page: any, owner?: string) => {
+      calls++;
+      if (calls === 1) return realAllocate(page, owner);
+      // Second call (the recovery remap) — pretend it assigned 99
+      // which the recovery code then collapses back onto `id`.
+      return 99;
+    };
+    const replacement = fakePage();
+    // Call the inner replacePage logic indirectly by invoking _recoverTab,
+    // but since _recoverTab requires a real browserContext.newPage, we
+    // exercise just the metadata-preservation sub-step:
+    const priorOwner = mgr.tabOwners.get(id);
+    const priorProfile = mgr.tabToProfile.get(id);
+    // Patch tabs.get(tabId) to return the old page so the "old page" path runs,
+    // and patch browserContext.newPage to return the replacement.
+    mgr.tabs.set(99, replacement);
+    // Replace the browserContext stub to satisfy newPage()
+    mgr.browserContext = {
+      newPage: async () => replacement,
+    };
+    try {
+      await mgr._recoverTab(id);
+    } catch {
+      // The recovery path may navigate — best-effort, ignore failures
+    }
+    // After recovery: owner metadata must survive, and the transient
+    // id 99 should have been cleaned up.
+    expect(mgr.tabOwners.get(id)).toBe(priorOwner);
+    expect(mgr.tabOwners.get(99)).toBeUndefined();
+    expect(mgr.tabToProfile.get(id)).toBe(priorProfile); // undefined is OK
+    expect(mgr.ownerActiveTab.get("agent-A")).toBe(id);
+  });
+});
+
+describe("clearTabState — single-source per-tab cleanup parity", () => {
+  it("wipes every per-tab map entry for the given id", () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-A");
+    mgr.tabLastUrl.set(id, "https://x.test/");
+    mgr.recoveryNotices.set(id, "⚠ crashed");
+    mgr.dialogPolicy.set(id, { action: "accept" });
+    mgr.lastDialogs.set(id, {
+      type: "alert",
+      message: "x",
+      defaultValue: "",
+      action: "accepted",
+      autoHandled: true,
+      reported: false,
+      at: Date.now(),
+    });
+    mgr.ownerActiveTab.set("agent-A", id);
+
+    mgr.clearTabState(id);
+
+    expect(mgr.tabs.has(id)).toBe(false);
+    expect(mgr.tabOwners.has(id)).toBe(false);
+    expect(mgr.tabLastActivity.has(id)).toBe(false);
+    expect(mgr.tabLastUrl.has(id)).toBe(false);
+    expect(mgr.recoveryNotices.has(id)).toBe(false);
+    expect(mgr.dialogPolicy.has(id)).toBe(false);
+    expect(mgr.lastDialogs.has(id)).toBe(false);
+    // ownerActiveTab must have been repaired/cleared for the owner that
+    // pointed here.
+    expect(mgr.ownerActiveTab.has("agent-A")).toBe(false);
+  });
+
+  it("softReset loops every live tab through clearTabState", async () => {
+    const mgr = setupMgr();
+    addTab(mgr, "agent-A");
+    addTab(mgr, "agent-B");
+    // No browser/handle to close — softReset tolerates absent context.
+    mgr.browser = undefined;
+    mgr.browserContext = undefined;
+    mgr.idleSweeperHandle = undefined;
+    await mgr.softReset();
+
+    // Every per-tab map is empty.
+    expect(mgr.tabs.size).toBe(0);
+    expect(mgr.tabOwners.size).toBe(0);
+    expect(mgr.tabLastActivity.size).toBe(0);
+    expect(mgr.tabLastUrl.size).toBe(0);
+    expect(mgr.recoveryNotices.size).toBe(0);
+    expect(mgr.dialogPolicy.size).toBe(0);
+    expect(mgr.lastDialogs.size).toBe(0);
+    expect(mgr.ownerActiveTab.size).toBe(0);
+    expect(mgr.tabToProfile.size).toBe(0);
   });
 });

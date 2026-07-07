@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { BrowserContext } from "patchright";
 import type { BrowserManager, Env } from "../manager.js";
 import {
+  assertInsideRoot,
   cleanErrorMessage,
   deriveDownloadFilename,
   matchesCookieHost,
@@ -210,6 +211,13 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
     // tabId is kept in the schema for backward compatibility — downloads now
     // use a temporary tab so the caller's active tab is never navigated away.
     handler: async ({ url, outputPath, timeout = 30000, forceFetch = false, tabId: _tabId }) => {
+      // Validate outputPath up-front so we fail fast (before the browser does
+      // the download) when the destination escapes OUTPUT_ROOT.
+      const resolveSavePath = async (suggested: string): Promise<string> =>
+        outputPath === undefined
+          ? path.join(env.OUTPUT_DIR, suggested)
+          : await assertInsideRoot(outputPath, env.OUTPUT_ROOT, "outputPath");
+
       const saveViaFetch = async (via: string): Promise<string> => {
         const ctx = mgr.context!;
         const resp = await ctx.request.fetch(url, { timeout: timeout + 5000 });
@@ -222,7 +230,7 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
           const ext = mimeToExt(resp.headers()["content-type"] ?? null);
           if (ext) suggested += ext;
         }
-        const savePath = outputPath ?? path.join(env.OUTPUT_DIR, suggested);
+        const savePath = await resolveSavePath(suggested);
         await fs.mkdir(path.dirname(savePath), { recursive: true });
         await fs.writeFile(savePath, body);
         const stat = await fs.stat(savePath);
@@ -254,7 +262,7 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
               }),
             ]);
             const suggested = download.suggestedFilename() || deriveDownloadFilename(url);
-            const savePath = outputPath ?? path.join(env.OUTPUT_DIR, suggested);
+            const savePath = await resolveSavePath(suggested);
             await fs.mkdir(path.dirname(savePath), { recursive: true });
             try {
               await download.saveAs(savePath);
@@ -389,10 +397,15 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
 
         if (body || requestId !== undefined) {
           let targetId: number | undefined;
+          let targetEvent: any;
           if (requestId !== undefined) {
             // Enforce scope: the requested id must be visible through the same
-            // tab/owner filter used for the list path.
-            if (!events.some((e) => e.id === requestId)) {
+            // tab/owner filter used for the list path. This is the strict
+            // cross-tab isolation gate — a body fetch must never return
+            // another owner's tab body just because the requestId appears
+            // in the unscoped event list.
+            targetEvent = events.find((e) => e.id === requestId);
+            if (!targetEvent) {
               return {
                 isError: true,
                 content: [
@@ -403,6 +416,25 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
                 ],
                 structuredContent: { events },
               };
+            }
+            // Defense in depth: when the caller did NOT pass owner or tabId
+            // and the event belongs to a different owner's tab, deny. The
+            // unscoped list path returns these for context, but bodies are
+            // never readable cross-owner without an explicit scope.
+            if (!owner && tabId === undefined && targetEvent.tabId !== undefined) {
+              const tabOwner = mgr.getTabOwner(targetEvent.tabId);
+              if (tabOwner !== undefined) {
+                return {
+                  isError: true,
+                  content: [
+                    {
+                      type: "text",
+                      text: `requestId ${requestId} belongs to another owner's tab — pass owner or tabId to scope the body fetch.`,
+                    },
+                  ],
+                  structuredContent: { events },
+                };
+              }
             }
             targetId = requestId;
           } else {
@@ -418,7 +450,8 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
                 structuredContent: { events },
               };
             }
-            targetId = events[0]?.id;
+            targetEvent = events[0];
+            targetId = targetEvent?.id;
           }
           if (targetId === undefined) {
             return {

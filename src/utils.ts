@@ -16,6 +16,7 @@ import {
   diffSnapshots,
   truncateAtLine,
 } from "./snapshot.js";
+import { assertInsideRoot } from "./helpers.js";
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -58,13 +59,27 @@ export async function withBackgroundTab<T>(
   }
 }
 
+/**
+ * Write data to disk and return the resolved file path. When the caller
+ * supplies `outputPath`, it must realpath-resolve under `env.OUTPUT_ROOT`
+ * (defaults to OUTPUT_DIR); symlinks and "../" traversal are rejected.
+ * Setting OUTPUT_ROOT to "*" disables the check (escape hatch).
+ *
+ * When no `outputPath` is supplied, the file lands under OUTPUT_DIR by
+ * construction (no containment check needed).
+ */
 export async function writeToFile(
   data: Buffer | string,
   defaultName: string,
-  env: Pick<Env, "OUTPUT_DIR">,
+  env: Pick<Env, "OUTPUT_DIR" | "OUTPUT_ROOT">,
   outputPath?: string,
 ): Promise<string> {
-  const filePath = outputPath ?? path.join(env.OUTPUT_DIR, defaultName);
+  // Default path is inside OUTPUT_DIR by construction — skip the realpath
+  // dance when the caller passed nothing and just ensure the directory exists.
+  const filePath =
+    outputPath === undefined
+      ? path.join(env.OUTPUT_DIR, defaultName)
+      : await assertInsideRoot(outputPath, env.OUTPUT_ROOT, "outputPath");
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, data);
   return filePath;

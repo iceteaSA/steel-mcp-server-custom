@@ -141,7 +141,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "use_credential",
     title: "Use Credential",
-    description: `Retrieve a stored credential by name and optionally auto-fill a login form on the current page. Without selectors: returns the credential info (username + masked password + extra fields). With selectors: fills the form fields and optionally clicks submit — use for logging into sites where you've stored credentials via the credentials tool. Do NOT use for sites where you don't have saved credentials — use fill with manual values instead.`,
+    description: `Retrieve a stored credential by name and optionally auto-fill a login form on the current page. Without selectors: returns the credential info (username + masked password + masked extra field names/values). With selectors: fills the form fields and optionally clicks submit — use for logging into sites where you've stored credentials via the credentials tool. Do NOT use for sites where you don't have saved credentials — use fill with manual values instead. Secret-bearing \`extra\` values (otp_secret, security answers, etc.) are masked in tool results the same way the password is — the fill path still uses them; they just don't appear in the agent-visible output.`,
     toolset: "auth",
     inputSchema: {
       name: z.string().describe("Name of the stored credential to use."),
@@ -183,7 +183,10 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           };
         }
 
-        // If no selectors, just return the credential info
+        // If no selectors, just return the credential info. Password and
+        // every secret-bearing `extra` value are masked — the fill path
+        // below still uses them, they just don't leak to the agent
+        // context/logs.
         if (!usernameSelector && !passwordSelector) {
           const info: Record<string, string> = {
             name: cred.name,
@@ -191,11 +194,15 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
             username: cred.username,
             password: "***" + cred.password.slice(-3),
           };
-          if (cred.extra) Object.assign(info, cred.extra);
+          if (cred.extra) {
+            for (const [k, v] of Object.entries(cred.extra)) {
+              info[k] = `***${String(v).slice(-3)} (+${String(v).length} chars)`;
+            }
+          }
           return { content: [{ type: "text", text: JSON.stringify(info, null, 2) }] };
         }
 
-        // Fill the form
+        // Fill the form — uses the real (unmasked) values internally.
         const page = await mgr.getPage(tabId);
         const filled: string[] = [];
 

@@ -2,6 +2,7 @@
 // without a browser.
 
 import path from "path";
+import fs from "fs/promises";
 
 import mime from "mime-types";
 
@@ -744,6 +745,79 @@ export function assertSafeProfilePath(name: string, profilesDir: string): string
     throw new Error(`Profile path "${resolvedPath}" escapes profiles directory "${resolvedDir}".`);
   }
   return resolvedPath;
+}
+
+// ---------------------------------------------------------------------------
+// Path containment — upload/output source-vs-root realpath guard.
+//
+// Used by upload_file (source paths must resolve under UPLOAD_ROOT) and by
+// writeToFile + download_file (outputPath must resolve under OUTPUT_ROOT).
+// Defeats "../" traversal and symlink escape. The escape hatch is a root
+// value of "*" (resolved from "" or "*" at env.ts transform time).
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolve `p` to its real path (following symlinks). If the path does not
+ * exist yet (e.g. outputPath for a brand-new file), walk up the path
+ * ancestors until one exists, realpath that, then rejoin the missing
+ * tail — that lets us validate a write destination whose parent dir
+ * doesn't exist yet either (mkdir -p later).
+ */
+export async function safeRealpath(p: string): Promise<string> {
+  let cur = p;
+  const missing: string[] = [];
+  for (;;) {
+    try {
+      const resolved = await fs.realpath(cur);
+      return missing.length === 0 ? resolved : path.join(resolved, ...missing.reverse());
+    } catch {
+      const parent = path.dirname(cur);
+      if (parent === cur) {
+        // Reached filesystem root without finding an existing ancestor —
+        // give up (caller will surface a clearer error).
+        throw new Error(`Cannot resolve path "${p}": no existing ancestor found.`);
+      }
+      missing.push(path.basename(cur));
+      cur = parent;
+    }
+  }
+}
+
+/**
+ * Return true when `p` is null, undefined, empty, or the literal "*" —
+ * i.e. when containment checking has been intentionally disabled by the
+ * operator (escape hatch).
+ */
+export function containmentDisabled(root: string | undefined | null): boolean {
+  return !root || root === "*";
+}
+
+/**
+ * Resolve `p` to its real path and verify it lies inside `root`. When root
+ * is "*" (or empty), the check is skipped and the real path is returned
+ * verbatim (escape hatch — operator trust mode).
+ *
+ * Throws with a descriptive error on:
+ *   - path resolution failure (parent doesn't exist, etc.)
+ *   - resolved path escaping `root` (including trailing-sep boundary bugs)
+ */
+export async function assertInsideRoot(
+  p: string,
+  root: string | undefined | null,
+  label: string,
+): Promise<string> {
+  if (containmentDisabled(root)) return p;
+  const resolvedRoot = await fs.realpath(root!);
+  const resolved = await safeRealpath(p);
+  // Append path.sep to root so /foo doesn't match /foobar.
+  const rootWithSep = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
+  if (resolved !== resolvedRoot && !resolved.startsWith(rootWithSep)) {
+    throw new Error(
+      `${label} "${p}" (resolved to "${resolved}") escapes the configured root "${resolvedRoot}". ` +
+        `Set the root env var to "*" to disable containment (escape hatch).`,
+    );
+  }
+  return resolved;
 }
 
 // ---------------------------------------------------------------------------

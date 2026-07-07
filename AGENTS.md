@@ -39,7 +39,7 @@ bun run format:check   # or `bun run format` to write
 bun run test
 ```
 
-**Tests:** `bun test` runs over `src/__tests__/*.test.ts` only (18 files; 437 passed
+**Tests:** `bun test` runs over `src/__tests__/*.test.ts` only (18 files; 453 passed
 + 12 skipped). The root `test/` directory has been deleted (stale leftover from an
 earlier version). Full browser flows are still validated manually via mcporter or
 the MCP inspector.
@@ -92,6 +92,8 @@ Invalid values cause the process to exit with a descriptive error.
 | `STEEL_BASE_URL` | Steel Cloud | Override for self-hosted Steel (e.g. `http://your-steel-host:3000`). When set, `STEEL_API_KEY` is optional. |
 | `MAX_INLINE_BYTES` | `512000` (500 KB) | Threshold above which inline output auto-downgrades to file mode |
 | `OUTPUT_DIR` | `/tmp/steel-mcp` | Directory for file-mode outputs (screenshots, page text) |
+| `OUTPUT_ROOT` | `$OUTPUT_DIR` | Containment root for `outputPath` args (get_screenshot, evaluate, get_network, download_file, get_page_text file mode). Realpath-resolved; paths outside this root are rejected. Set to `*` to disable the check (escape hatch — service account can write anywhere). |
+| `UPLOAD_ROOT` | `$OUTPUT_DIR` | Containment root for `upload_file` source paths. Realpath-resolved; paths outside this root are rejected (defeats `/etc/passwd` exfiltration through any upload form on the open web). Set to `*` to disable. |
 | `DEFAULT_SCREENSHOT_QUALITY` | `80` | Default JPEG quality (1–100); PNG ignores this |
 | `DEFAULT_VIEWPORT_WIDTH` | `1280` | Default viewport width in px |
 | `DEFAULT_VIEWPORT_HEIGHT` | `720` | Default viewport height in px |

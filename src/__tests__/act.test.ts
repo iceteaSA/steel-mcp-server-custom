@@ -54,6 +54,8 @@ function makeFakeMgr(page: Page): BrowserManager {
 const baseEnv = {
   BROWSER_MODE: "local",
   OUTPUT_DIR: "/tmp/steel-mcp",
+  OUTPUT_ROOT: "/tmp/steel-mcp",
+  UPLOAD_ROOT: "/tmp/steel-mcp",
   MAX_INLINE_BYTES: 512000,
   DEFAULT_SCREENSHOT_QUALITY: 80,
   DEFAULT_VIEWPORT_WIDTH: 1280,

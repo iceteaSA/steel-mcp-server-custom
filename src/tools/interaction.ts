@@ -4,6 +4,7 @@ import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
 import { afterAction, actionFeedback } from "../utils.js";
 import {
+  assertInsideRoot,
   cleanErrorMessage,
   detectFieldKind,
   detectFieldsInPage,
@@ -738,9 +739,9 @@ Call without an action to view the current policy and last dialog.`,
   register({
     name: "upload_file",
     title: "Upload File",
-    description: `Upload one or more files through a file input element. Supports direct file-input selection and "file chooser" mode for custom upload buttons that open a native file picker. All file paths must be absolute paths on the MCP server host.
+    description: `Upload one or more files through a file input element. Supports direct file-input selection and "file chooser" mode for custom upload buttons that open a native file picker. All file paths must be absolute paths on the MCP server host AND resolve under UPLOAD_ROOT (defaults to OUTPUT_DIR). "../" and symlink escapes are rejected.
 
-Errors: missing file paths, selector timeout, element not found.`,
+Errors: missing file paths, path escapes UPLOAD_ROOT, selector timeout, element not found.`,
     toolset: "core",
     inputSchema: {
       ...tabTargetForce,
@@ -781,6 +782,33 @@ Errors: missing file paths, selector timeout, element not found.`,
               {
                 type: "text",
                 text: `File paths must be absolute (start with /). Rejected: ${nonAbsolute.join(", ")}`,
+              },
+            ],
+          };
+        }
+
+        // Containment: every path must realpath-resolve under UPLOAD_ROOT
+        // (defaults to OUTPUT_DIR). Defeats "../" traversal and symlink
+        // escape — without this, an agent could exfiltrate /etc/passwd
+        // through any upload form on the open web. Set UPLOAD_ROOT="*" to
+        // disable (escape hatch for trusted operators).
+        const escape: string[] = [];
+        for (const f of files as string[]) {
+          try {
+            await assertInsideRoot(f, env.UPLOAD_ROOT, "upload path");
+          } catch {
+            escape.push(f);
+          }
+        }
+        if (escape.length > 0) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text:
+                  `Upload path(s) escape the configured UPLOAD_ROOT (${env.UPLOAD_ROOT}): ${escape.join(", ")}. ` +
+                  `Place files under UPLOAD_ROOT or set UPLOAD_ROOT="*" to disable containment.`,
               },
             ],
           };
@@ -920,12 +948,13 @@ Errors: unknown key name, selector timeout.`,
         await execPressKey(page, env, { selector: sel, key });
 
         const urlAfter = page.url();
+        const navigated = urlAfter !== urlBefore;
         const target = sel ? ` on ${sel}` : "";
         const resolved = mgr.resolveTab({ tabId, owner, force });
-        if (urlAfter !== urlBefore) {
+        if (navigated) {
           mgr.setTabLastUrl(resolved, urlAfter);
         }
-        const feedback = await actionFeedback(page, resolved);
+        const feedback = await actionFeedback(page, resolved, { navigated });
         const feedbackText = feedback ? `\n${feedback}` : "";
         const dialogText = mgr.dialogNotice(resolved);
 
