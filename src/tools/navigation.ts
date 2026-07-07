@@ -12,6 +12,7 @@ import {
   isBotWall,
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
+import { tabTargetForce } from "./shared.js";
 
 // Module-level ErrorTracker instance — persists across tool calls.
 const errorTracker = new ErrorTracker();
@@ -62,12 +63,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         .describe(
           "Block images, fonts, stylesheets, and media during navigation. Faster for text-only scraping. Default: false.",
         ),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTargetForce,
     },
     annotations: {
       readOnlyHint: false,
@@ -83,13 +79,15 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
       waitTimeout = 10000,
       disableMedia = false,
       tabId,
+      owner,
+      force,
     }) => {
       try {
         // Check error history before navigating — prepend warning if URL has
         // previously returned 404 or triggered a bot wall.
         const priorWarning = errorTracker.check(url);
 
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner, force });
 
         // Block heavy resources if requested (images, fonts, CSS, media).
         // Tracks per-page state so repeated calls don't stack routes and so
@@ -247,12 +245,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         .describe(
           "History action: 'back' (previous page), 'forward' (next page), 'reload' (refresh current page).",
         ),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTargetForce,
     },
     annotations: {
       readOnlyHint: false,
@@ -260,9 +253,9 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
       idempotentHint: false,
       openWorldHint: true,
     },
-    handler: async ({ action, tabId }) => {
+    handler: async ({ action, tabId, owner, force }) => {
       try {
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner, force });
         const beforeUrl = page.url();
         let navResult: Awaited<ReturnType<typeof page.goBack>> | null = null;
         if (action === "back") {

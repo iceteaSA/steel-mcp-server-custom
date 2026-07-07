@@ -6,7 +6,7 @@
 // -----------------------------------------------------------------------------
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { z } from "zod";
+import { z } from "zod";
 
 // Re-exported because @modelcontextprotocol/sdk 1.29 doesn't re-export
 // ToolAnnotations from the server/mcp module.
@@ -101,6 +101,36 @@ export function makeRegistrar(
 
   return { register, toolCount: () => count };
 }
+
+// -----------------------------------------------------------------------------
+// Shared tab-targeting zod fragments
+//
+// Read-only tools spread `tabTarget`; action tools spread `tabTargetForce`
+// (which adds the `force` ownership-override flag). Each page-interacting
+// tool passes these through to mgr.getPage({tabId, owner, force}).
+// -----------------------------------------------------------------------------
+
+export const tabTarget = {
+  tabId: z
+    .number()
+    .int()
+    .min(1)
+    .optional()
+    .describe(
+      "Target tab id. Omit to use your owner's last-used tab (or the global active tab if no owner given).",
+    ),
+  owner: z
+    .string()
+    .optional()
+    .describe(
+      "Your agent identity (same string you passed to new_tab). Scopes tab resolution and ownership checks.",
+    ),
+};
+
+export const tabTargetForce = {
+  ...tabTarget,
+  force: z.boolean().optional().describe("Override the tab-ownership guard."),
+};
 
 // -----------------------------------------------------------------------------
 // resolveToolsets — CLI + env → validated Set<Toolset>

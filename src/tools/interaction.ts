@@ -10,6 +10,7 @@ import {
   interpretCheckboxValue,
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
+import { tabTarget, tabTargetForce } from "./shared.js";
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // click ---------------------------------------------------------------------
@@ -50,12 +51,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         .default(10000)
         .optional()
         .describe("Max time in ms to wait for the element to be clickable. Default: 10000."),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTargetForce,
     },
     annotations: {
       readOnlyHint: false,
@@ -70,9 +66,11 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
       waitTimeout = 10000,
       timeout = 10000,
       tabId,
+      owner,
+      force,
     }) => {
       try {
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner, force });
         const beforeUrl = page.url();
         await page.click(selector, { timeout });
         await globalWait(env);
@@ -162,12 +160,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         .default(10000)
         .optional()
         .describe("Per-field wait timeout in ms. Default: 10000."),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTargetForce,
     },
     annotations: {
       readOnlyHint: false,
@@ -175,7 +168,15 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
       idempotentHint: false,
       openWorldHint: true,
     },
-    handler: async ({ fields, submitSelector, skipMissing = false, timeout = 10000, tabId }) => {
+    handler: async ({
+      fields,
+      submitSelector,
+      skipMissing = false,
+      timeout = 10000,
+      tabId,
+      owner,
+      force,
+    }) => {
       // Batched kind-detection: one evaluate call checks existence for ALL
       // fields and auto-detects kinds for fields lacking an explicit `kind`.
       // This avoids N per-field round-trips, eliminates TOCTOU, and means
@@ -184,7 +185,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
       type FieldKind = "text" | "check" | "radio" | "select";
 
       try {
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner, force });
 
         // One batch existence check for every selector (explicit + implicit).
         const allSelectors = fields.map((f: { selector: string }) => f.selector);
@@ -333,12 +334,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         .default(3000)
         .optional()
         .describe("When readAfterScroll=true, max chars of text to return. Default: 3000."),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTargetForce,
     },
     annotations: {
       readOnlyHint: false,
@@ -352,9 +348,11 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
       readAfterScroll = false,
       maxChars = 3000,
       tabId,
+      owner,
+      force,
     }) => {
       try {
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner, force });
         const dy = direction === "up" ? -pixels : pixels;
         const result = await page.evaluate(
           ({ yDelta }: { yDelta: number }) => {
@@ -448,12 +446,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         .default(10000)
         .optional()
         .describe("Maximum time to wait in milliseconds. Default: 10000 (10s). Max: 60000 (60s)."),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTarget,
     },
     annotations: {
       readOnlyHint: true,
@@ -461,9 +454,9 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, text, textGone, timeout = 10000, tabId }) => {
+    handler: async ({ selector, text, textGone, timeout = 10000, tabId, owner, force }) => {
       try {
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner, force });
 
         if (!selector && !text && !textGone) {
           return {
@@ -522,7 +515,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         const error = err as Error;
         let context = "";
         try {
-          const page = await mgr.getPage(tabId);
+          const page = await mgr.getPage({ tabId, owner });
           const url = page.url();
           const title = await page.title().catch(() => "");
           context = `\nCurrent page: ${url}${title ? ` — ${title}` : ""}`;

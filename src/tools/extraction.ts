@@ -16,6 +16,7 @@ import {
   type Link,
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
+import { tabTarget } from "./shared.js";
 
 // Singleton — configured once, reused across calls.
 const turndown = new TurndownService({
@@ -98,12 +99,7 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
         .describe(
           "When matchAll=true, pretty-print the inline JSON (2-space indent). Default: false (compact — one entry per line).",
         ),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTarget,
     },
     annotations: {
       readOnlyHint: true,
@@ -123,9 +119,10 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
       maxEntries = 20,
       pretty = false,
       tabId,
+      owner,
     }) => {
       try {
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner });
 
         // --- extractContent: Readability-based article extraction ----------
         if (extractContent && !matchAll) {
@@ -506,12 +503,7 @@ CONTEXT BUDGET — output capped at limit (default 50).`,
         .default(50)
         .optional()
         .describe("Max results. Default: 50. Set 0 for no cap."),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTarget,
     },
     outputSchema: {
       links: z.array(
@@ -527,7 +519,7 @@ CONTEXT BUDGET — output capped at limit (default 50).`,
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, urlPattern, limit = 50, tabId }) => {
+    handler: async ({ selector, urlPattern, limit = 50, tabId, owner }) => {
       try {
         if (urlPattern) {
           try {
@@ -544,7 +536,7 @@ CONTEXT BUDGET — output capped at limit (default 50).`,
             };
           }
         }
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner });
         const rawLinks = await page.evaluate(
           ({ sel, pat }: { sel: string | null; pat: string | null }) => {
             const roots: Element[] = sel
@@ -625,12 +617,7 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
         .describe(
           "Max characters per attribute value before truncation with '…[truncated]'. Default: 2000. Applies to all attrs including 'html' (outerHTML).",
         ),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTarget,
     },
     outputSchema: {
       results: z.array(z.record(z.string(), z.string().nullable())),
@@ -641,9 +628,9 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, attrs, limit = 50, maxCharsPerAttr = 2000, tabId }) => {
+    handler: async ({ selector, attrs, limit = 50, maxCharsPerAttr = 2000, tabId, owner }) => {
       try {
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner });
         const results = await page.evaluate(
           ({
             sel,
@@ -754,12 +741,7 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
         .describe(
           "Call the global wait after evaluation (useful if the expression triggers async side effects). Default: false.",
         ),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTarget,
     },
     annotations: {
       readOnlyHint: false,
@@ -775,6 +757,7 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
       outputPath,
       waitAfter = false,
       tabId,
+      owner,
     }) => {
       try {
         // Syntax-check the expression before sending to the browser.
@@ -786,7 +769,7 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
           };
         }
 
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner });
         let result: unknown;
         if (selector) {
           const wrapped = `(function(){ const el = document.querySelector(${JSON.stringify(
@@ -864,7 +847,7 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
         .default(20)
         .optional()
         .describe("Max items to return. Default: 20."),
-      tabId: z.number().int().min(1).optional().describe("Optional tab ID."),
+      ...tabTarget,
     },
     outputSchema: {
       results: z.array(z.record(z.string(), z.string().nullable())),
@@ -875,9 +858,9 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, fields, limit = 20, tabId }) => {
+    handler: async ({ selector, fields, limit = 20, tabId, owner }) => {
       try {
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner });
 
         const evalArg = {
           sel: selector,

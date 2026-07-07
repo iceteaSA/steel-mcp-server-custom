@@ -32,6 +32,7 @@ CONTEXT BUDGET — tab list grows with session activity. Filter with owner or pr
           active: z.boolean(),
           profile: z.string().nullable(),
           owner: z.string().nullable(),
+          idleSeconds: z.number(),
         }),
       ),
     },
@@ -55,6 +56,7 @@ CONTEXT BUDGET — tab list grows with session activity. Filter with owner or pr
             active: t.active,
             profile: t.profile ?? null,
             owner: t.owner ?? null,
+            idleSeconds: t.idleSeconds,
           };
           return {
             content: [
@@ -85,6 +87,7 @@ CONTEXT BUDGET — tab list grows with session activity. Filter with owner or pr
           active: t.active,
           profile: t.profile ?? null,
           owner: t.owner ?? null,
+          idleSeconds: t.idleSeconds,
         }));
         return {
           content: [{ type: "text", text: lines.join("\n") }],

@@ -4,6 +4,7 @@ import type { BrowserManager, Env } from "../manager.js";
 import { writeToFile } from "../utils.js";
 import { cleanErrorMessage } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
+import { tabTarget } from "./shared.js";
 
 /**
  * Post-process a screenshot buffer: resize to fit within maxWidth/maxHeight
@@ -176,12 +177,7 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
         .describe(
           "Max bytes before auto-switching to file mode. Default: MAX_INLINE_BYTES env var (512000). Set lower to protect context budget.",
         ),
-      tabId: z
-        .number()
-        .int()
-        .min(1)
-        .optional()
-        .describe("Optional tab ID. Omit to use the current active tab."),
+      ...tabTarget,
     },
     annotations: {
       readOnlyHint: true,
@@ -203,6 +199,7 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
       maxFileBytes,
       maxInlineBytes,
       tabId,
+      owner,
     }) => {
       try {
         if (clip && selector) {
@@ -230,7 +227,7 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
             };
           }
         }
-        const page = await mgr.getPage(tabId);
+        const page = await mgr.getPage({ tabId, owner });
         const effectiveQuality = quality ?? env.DEFAULT_SCREENSHOT_QUALITY;
         const effectiveMaxInlineBytes = maxInlineBytes ?? env.MAX_INLINE_BYTES;
 

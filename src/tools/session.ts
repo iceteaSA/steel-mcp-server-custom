@@ -45,15 +45,48 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
     title: "Stop Browser",
     description: `Stop the browser and release all resources (Steel session, tabs, profiles). Destroys the entire session — use close_tabs for per-agent cleanup instead. Do NOT call this unless you want to end the entire browser session for all agents.`,
     toolset: "core",
-    inputSchema: {},
+    inputSchema: {
+      owner: z
+        .string()
+        .optional()
+        .describe(
+          "Your agent identity. When provided, checks whether other agents still have live tabs before stopping.",
+        ),
+      force: z
+        .boolean()
+        .optional()
+        .describe(
+          "Override the safety check and kill everything even when other agents have live tabs.",
+        ),
+    },
     annotations: {
       readOnlyHint: false,
       destructiveHint: true,
       idempotentHint: false,
       openWorldHint: false,
     },
-    handler: async () => {
+    handler: async ({ owner, force }) => {
       try {
+        // Safety check: if the caller has an owner tag but other agents
+        // still have live tabs, block unless force:true.
+        if (owner && !force) {
+          const others = mgr.ownersWithLiveTabs(owner);
+          if (others.length > 0) {
+            const totalTabs = others.reduce((sum, o) => sum + o.tabIds.length, 0);
+            const ownerList = others
+              .map((o) => `"${o.owner}" (tabs ${o.tabIds.join(",")})`)
+              .join(", ");
+            return {
+              isError: true,
+              content: [
+                {
+                  type: "text",
+                  text: `stop_browser blocked: ${totalTabs} tabs owned by ${ownerList}. Use close_tabs({owner}) for your own cleanup, or force:true to kill everything.`,
+                },
+              ],
+            };
+          }
+        }
         await mgr.stop();
         return { content: [{ type: "text", text: "Browser stopped." }] };
       } catch (err) {
@@ -221,11 +254,11 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "get_console",
     title: "Get Console Logs",
-    description: `Get browser console messages captured since the session started. Filter by severity level (error/warning/info/log) and optionally clear the buffer after reading. Use to debug JavaScript errors or verify page behavior. Do NOT use to check if a page loaded — use wait_for or go_to_url with waitFor instead.
+    description: `Get browser console messages captured since the session started. Filter by severity level (error/warning/info/log), owner, or tabId, and optionally clear the buffer after reading. Use to debug JavaScript errors or verify page behavior. Do NOT use to check if a page loaded — use wait_for or go_to_url with waitFor instead.
 
 CONTEXT BUDGET — output capped at maxEntries (default 50). The buffer holds up to 500 messages total.
 
-NOTE: when clear=true with a level filter, ALL entries captured up to read time are removed (not just the filtered level). Messages arriving during the read survive.`,
+NOTE: when clear=true with a filter, ALL entries captured up to read time are removed (not just the filtered level/tab). Messages arriving during the read survive.`,
     toolset: "debug",
     inputSchema: {
       level: z
@@ -245,6 +278,15 @@ NOTE: when clear=true with a level filter, ALL entries captured up to read time 
         .default(false)
         .optional()
         .describe("Clear the captured log buffer after returning results. Default: false."),
+      tabId: z
+        .number()
+        .int()
+        .optional()
+        .describe("Filter to messages from a specific tab. Omit for all tabs."),
+      owner: z
+        .string()
+        .optional()
+        .describe("Filter to messages from tabs owned by this agent. Omit for all owners."),
     },
     annotations: {
       readOnlyHint: true,
@@ -252,9 +294,16 @@ NOTE: when clear=true with a level filter, ALL entries captured up to read time 
       idempotentHint: true,
       openWorldHint: false,
     },
-    handler: async ({ level = "all", maxEntries = 50, clear = false }) => {
+    handler: async ({ level = "all", maxEntries = 50, clear = false, tabId, owner }) => {
       try {
         await mgr.initialize();
+
+        // Build the set of tabIds owned by the given owner for filtering.
+        let ownerTabIds: Set<number> | undefined;
+        if (owner) {
+          const tabs = await mgr.listTabs();
+          ownerTabIds = new Set(tabs.filter((t) => t.owner === owner).map((t) => t.tabId));
+        }
 
         // Snapshot the array length at read start so splice removes only
         // entries that existed at that moment. Messages arriving between
@@ -262,6 +311,9 @@ NOTE: when clear=true with a level filter, ALL entries captured up to read time 
         const snapshotLength = mgr.consoleLogs.length;
         let logs = mgr.consoleLogs;
         if (level !== "all") logs = logs.filter((m) => m.level === level);
+        if (tabId !== undefined) logs = logs.filter((m) => m.tabId === tabId);
+        if (ownerTabIds)
+          logs = logs.filter((m) => m.tabId === undefined || ownerTabIds.has(m.tabId));
         const slice = logs.slice(-maxEntries);
 
         if (clear) {
@@ -270,11 +322,16 @@ NOTE: when clear=true with a level filter, ALL entries captured up to read time 
         }
 
         if (slice.length === 0) {
+          const filterParts: string[] = [];
+          if (level !== "all") filterParts.push(`level '${level}'`);
+          if (tabId !== undefined) filterParts.push(`tab ${tabId}`);
+          if (owner) filterParts.push(`owner "${owner}"`);
+          const filterNote = filterParts.length > 0 ? ` (filter: ${filterParts.join(", ")})` : "";
           return {
             content: [
               {
                 type: "text",
-                text: `No console messages captured${level !== "all" ? ` at level '${level}'` : ""}.`,
+                text: `No console messages captured${filterNote}.`,
               },
             ],
           };
@@ -282,7 +339,8 @@ NOTE: when clear=true with a level filter, ALL entries captured up to read time 
 
         const formatted = slice
           .map((m) => {
-            const base = `[${new Date(m.timestamp).toISOString()}] [${m.level.toUpperCase()}] ${m.text}`;
+            const tag = m.tabId !== undefined ? `[tab ${m.tabId}] ` : "";
+            const base = `[${new Date(m.timestamp).toISOString()}] ${tag}[${m.level.toUpperCase()}] ${m.text}`;
             if (!m.location || !m.location.url) return base;
             const { url, lineNumber, columnNumber } = m.location;
             const locStr =
@@ -291,11 +349,13 @@ NOTE: when clear=true with a level filter, ALL entries captured up to read time 
           })
           .join("\n");
 
+        const filterNote = level !== "all" ? ` (level: ${level})` : "";
+
         return {
           content: [
             {
               type: "text",
-              text: `${slice.length} console message(s)${level !== "all" ? ` (level: ${level})` : ""}:\n\n${formatted}`,
+              text: `${slice.length} console message(s)${filterNote}:\n\n${formatted}`,
             },
           ],
         };

@@ -31,6 +31,7 @@ export type ConsoleMessage = {
   level: string;
   text: string;
   timestamp: number;
+  tabId?: number;
   location?: { url: string; lineNumber: number; columnNumber: number };
 };
 
@@ -434,12 +435,24 @@ export class BrowserManager {
   private attachConsoleListener(page: Page) {
     if (this.listenedPages.has(page)) return;
     this.listenedPages.add(page);
+
+    // Resolve page → tabId once per entry so messages are taggable.
+    // The page may have been recreated after a crash — if not in the
+    // registry, tabId stays undefined (harmless, messages still land).
+    const resolveTabId = () => {
+      for (const [id, p] of this.tabs) {
+        if (p === page) return id;
+      }
+      return undefined;
+    };
+
     page.on("console", (msg) => {
       const loc = msg.location();
       this.consoleLogs.push({
         level: msg.type(),
         text: msg.text(),
         timestamp: Date.now(),
+        tabId: resolveTabId(),
         location:
           loc && loc.url
             ? { url: loc.url, lineNumber: loc.lineNumber, columnNumber: loc.columnNumber }
@@ -458,6 +471,7 @@ export class BrowserManager {
         level: "error",
         text: `[pageerror] ${err.name}: ${err.message}`,
         timestamp: Date.now(),
+        tabId: resolveTabId(),
       });
       if (this.consoleLogs.length > 500) {
         this.consoleLogs.splice(0, this.consoleLogs.length - 500);
@@ -719,7 +733,7 @@ export class BrowserManager {
     }
   }
 
-  /** Return a snapshot of all open tabs, including owner tags. */
+  /** Return a snapshot of all open tabs, including owner tags and idle age. */
   async listTabs(): Promise<
     {
       tabId: number;
@@ -728,9 +742,11 @@ export class BrowserManager {
       active: boolean;
       owner?: string;
       profile?: string;
+      idleSeconds: number;
     }[]
   > {
     await this.initialize();
+    const now = Date.now();
     const openTabs = Array.from(this.tabs).filter(([, page]) => !page.isClosed());
 
     // Fetch all titles in parallel — each wrapped to handle closed pages.
@@ -744,9 +760,12 @@ export class BrowserManager {
       active: boolean;
       owner?: string;
       profile?: string;
+      idleSeconds: number;
     }[] = [];
     for (let i = 0; i < openTabs.length; i++) {
       const [id, page] = openTabs[i];
+      const lastActivity = this.tabLastActivity.get(id);
+      const idleSeconds = lastActivity ? Math.round((now - lastActivity) / 1000) : 0;
       const row: {
         tabId: number;
         url: string;
@@ -754,11 +773,13 @@ export class BrowserManager {
         active: boolean;
         owner?: string;
         profile?: string;
+        idleSeconds: number;
       } = {
         tabId: id,
         url: page.url(),
         title: titles[i],
         active: id === this.currentTabId,
+        idleSeconds,
       };
       const o = this.tabOwners.get(id);
       if (o) row.owner = o;
