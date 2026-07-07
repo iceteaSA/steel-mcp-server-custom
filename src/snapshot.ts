@@ -132,7 +132,7 @@ function normalizeLine(line: string): string {
 }
 
 // Extract the "role+name" prefix for best-effort change-pairing.
-// ariaSnapshot lines look like: `- textbox "Search": value [ref=e1]`
+// ariaSnapshot output is captured as: `- textbox "Search": value @e1`
 // The prefix is everything before the colon (the element identity), or
 // the whole line if there's no colon.
 function rolePrefix(normalized: string): string {
@@ -145,7 +145,7 @@ function rolePrefix(normalized: string): string {
  * ref-invariant change summary.
  *
  * Rules:
- * - [ref=eN] markers are stripped before comparison so ref regeneration
+ * - @eN markers are stripped before comparison so ref regeneration
  *   does not count as a change.
  * - Identical (after normalization) → "(no visible change)".
  * - Removed + added lines whose normalized role+name prefix matches are

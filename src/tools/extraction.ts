@@ -1243,31 +1243,34 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         const page = await mgr.getPage({ tabId, owner });
         const ctx = resolveFrame(page, frame);
 
-        // Capture the full untruncated tree — the stored baseline must be
-        // complete (filter:"all") so actionFeedback diff and future filter:"all"
-        // calls see the entire page, not a pre-filtered slice.
+        // Capture the full untruncated tree.
         const result = await captureSnapshot(ctx, resolvedTabId, { selector, noTruncate: true });
 
+        // Store the raw tree (no frames block) — baseline must not include
+        // the frames metadata or actionFeedback diffs will phantom-diff it
+        // every time child frame URLs change.
+        if (frame === undefined) {
+          storeSnapshot(resolvedTabId, result.text);
+        }
+
+        // Filter + truncate for display only; stored baseline stays full + raw.
+        const displayText = truncateForDisplay(
+          filterTree(result.text, filter ?? "interactive"),
+          maxChars ?? 8000,
+        );
+
+        // Append frames metadata AFTER filtering so it always survives — frame
+        // names/indices are not interactive roles and would be stripped otherwise.
         const childFrames = page.frames().slice(1);
-        let fullText = result.text;
+        let output = displayText;
         if (childFrames.length > 0) {
           const list = childFrames
             .map((f, i) => `[${i}] name="${f.name()}" url=${f.url()}`)
             .join("\n");
-          fullText += `\n--- frames ---\n${list}`;
+          output += `\n--- frames ---\n${list}`;
         }
 
-        // Only store main-page snapshots; frame-scoped snapshots would corrupt
-        // the per-tab baseline that actionFeedback diffs against.
-        if (frame === undefined) {
-          storeSnapshot(resolvedTabId, fullText);
-        }
-
-        // Filter THEN truncate for display only — the stored baseline stays full.
-        const filtered = filterTree(fullText, filter ?? "interactive");
-        const displayText = truncateForDisplay(filtered, maxChars ?? 8000);
-
-        return { content: [{ type: "text", text: displayText }] };
+        return { content: [{ type: "text", text: output }] };
       } catch (err) {
         const error = err as Error;
         return {

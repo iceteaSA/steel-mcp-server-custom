@@ -161,6 +161,19 @@ describe("snapshot frame isolation", () => {
     expect(text).toContain("url=https://example.com/child");
   });
 
+  it("includes frames section under default interactive filter", async () => {
+    const { find } = buildRegistry();
+    const snapshot = find("snapshot");
+    // No filter arg — defaults to "interactive", which strips non-interactive
+    // nodes. The frames block is appended AFTER filtering so it always survives.
+    const result = await snapshot.handler({});
+
+    const text = result.content[0].text;
+    expect(text).toContain("--- frames ---");
+    expect(text).toContain('[0] name="child-frame"');
+    expect(text).toContain("url=https://example.com/child");
+  });
+
   it("returns isError when an invalid frame is requested", async () => {
     const { find } = buildRegistry();
     const snapshot = find("snapshot");

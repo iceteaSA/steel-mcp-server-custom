@@ -398,7 +398,7 @@ describe("captureSnapshot", () => {
 });
 
 // ---------------------------------------------------------------------------
-// A1: captureSnapshot compact refs — ariaSnapshot returns [ref=eN], we show @eN
+// CaptureSnapshot compact refs — ariaSnapshot returns [ref=eN], we show @eN
 // ---------------------------------------------------------------------------
 describe("captureSnapshot compact refs", () => {
   it("transforms [ref=eN] to @eN in snapshot output", async () => {
@@ -432,7 +432,7 @@ describe("captureSnapshot compact refs", () => {
 });
 
 // ---------------------------------------------------------------------------
-// A2: filterTree — interactive / all / visible modes
+// FilterTree — interactive / all / visible modes
 // ---------------------------------------------------------------------------
 describe("filterTree", () => {
   const TREE = [
@@ -485,7 +485,7 @@ describe("filterTree", () => {
 });
 
 // ---------------------------------------------------------------------------
-// A2: truncateForDisplay
+// TruncateForDisplay
 // ---------------------------------------------------------------------------
 describe("truncateForDisplay", () => {
   it("returns full text when under maxChars", () => {

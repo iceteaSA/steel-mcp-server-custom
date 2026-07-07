@@ -53,7 +53,7 @@ describe("toSelector", () => {
     expect(() => toSelector({ ref: "" })).toThrow("Pass selector or ref");
   });
 
-  // A1: compact @eN ref format — @e5 and bare e5 both resolve to aria-ref=e5
+  // Compact @eN ref format — @e5 and bare e5 both resolve to aria-ref=e5
   it("accepts @eN ref format (compact output from snapshot)", () => {
     expect(toSelector({ ref: "@e5" })).toBe("aria-ref=e5");
     expect(toSelector({ ref: "@e42" })).toBe("aria-ref=e42");
