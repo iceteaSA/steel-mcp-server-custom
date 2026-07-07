@@ -83,6 +83,16 @@ export class TabOwnershipError extends Error {
 }
 
 /**
+ * Tab route — a pattern+owner pair tracked in the per-tab route registry.
+ * Closed over by addRoute for tear-down on tab close or removeRoutes.
+ */
+export interface TabRoute {
+  pattern: string;
+  owner: string;
+  unroute: () => Promise<void>;
+}
+
+/**
  * Thrown when an owner-based lookup finds no open tab for the given owner.
  */
 export class NoTabError extends Error {
@@ -139,6 +149,11 @@ export class BrowserManager {
   // calls — if allocateTab didn't deduplicate, every newTab/createProfile
   // page would be registered twice.
   private pageToTabId = new WeakMap<Page, number>();
+
+  // Request interception — per-tab route registry, tab-scoped and
+  // owner-tagged. Routes are registered via page.route() (never
+  // context.route, which would poison every owner's tabs).
+  private tabRoutes = new Map<number, TabRoute[]>();
 
   // Dialog management — per-tab policy + last dialog record.
   // Playwright dialogs block page operations until handled, so we resolve them
@@ -211,6 +226,57 @@ export class BrowserManager {
    */
   getTabOwner(tabId: number): string | undefined {
     return this.tabOwners.get(tabId);
+  }
+
+  /**
+   * Register a page-scoped route handler for a tab. Routes are scoped to
+   * the individual page (never context.route — that would poison every
+   * owner's tabs) and tagged with the owning agent so clearTabState
+   * teardown and closeTabsByOwner can clean them up.
+   */
+  async addRoute(
+    tabId: number,
+    owner: string,
+    pattern: string,
+    handler: (route: import("patchright").Route) => Promise<void>,
+  ): Promise<void> {
+    const page = this.tabs.get(tabId);
+    if (!page) throw new Error(`No tab ${tabId}`);
+    await page.route(pattern, handler);
+    const list = this.tabRoutes.get(tabId) ?? [];
+    list.push({ pattern, owner, unroute: () => page.unroute(pattern, handler) });
+    this.tabRoutes.set(tabId, list);
+  }
+
+  /**
+   * List active routes for a tab — used by the intercept tool's `list` action.
+   */
+  listRoutes(tabId: number): { pattern: string; owner: string }[] {
+    return (this.tabRoutes.get(tabId) ?? []).map(({ pattern, owner }) => ({
+      pattern,
+      owner,
+    }));
+  }
+
+  /**
+   * Remove routes for a tab. When `pattern` is given, only routes matching
+   * that pattern are removed; otherwise all routes for the tab are dropped.
+   * Returns the number of routes removed.
+   */
+  async removeRoutes(tabId: number, pattern?: string): Promise<number> {
+    const list = this.tabRoutes.get(tabId) ?? [];
+    const drop = list.filter((r) => !pattern || r.pattern === pattern);
+    const keep = pattern ? list.filter((r) => r.pattern !== pattern) : [];
+    for (const r of drop) {
+      try {
+        await r.unroute();
+      } catch {
+        /* page may be gone */
+      }
+    }
+    if (keep.length) this.tabRoutes.set(tabId, keep);
+    else this.tabRoutes.delete(tabId);
+    return drop.length;
   }
 
   /**
@@ -500,6 +566,7 @@ export class BrowserManager {
     this.recoveryNotices.delete(id);
     this.dialogPolicy.delete(id);
     this.lastDialogs.delete(id);
+    this.tabRoutes.delete(id);
     if (page) this.pageToTabId.delete(page);
 
     clearSnapshot(id);

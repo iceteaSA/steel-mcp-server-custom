@@ -1227,3 +1227,140 @@ describe("_recoverTab preserves owner through the full softReset→initialize pa
     expect(mgr.ownerActiveTab.get("agent-A")).toBe(id);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Tab route registry — addRoute, listRoutes, removeRoutes, clearTabState
+// ---------------------------------------------------------------------------
+
+describe("tab route registry", () => {
+  it("addRoute registers a route; listRoutes shows it", () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-A");
+    const tabRoutes = (mgr as any).tabRoutes;
+    // Simulate a registered route entry directly (addRoute needs a real Page
+    // with .route() — we test the full handler path in the intercept tool
+    // tests). Here we push entries manually to test the registry bookkeeping.
+    tabRoutes.set(id, [
+      { pattern: "**/api/*", owner: "agent-A", unroute: async () => {} },
+      { pattern: "**/cdn/*", owner: "agent-A", unroute: async () => {} },
+    ]);
+
+    const routes = mgr.listRoutes(id);
+    expect(routes).toHaveLength(2);
+    expect(routes[0].pattern).toBe("**/api/*");
+    expect(routes[0].owner).toBe("agent-A");
+    expect(routes[1].pattern).toBe("**/cdn/*");
+  });
+
+  it("listRoutes returns empty array for unknown tab", () => {
+    const mgr = setupMgr();
+    expect(mgr.listRoutes(999)).toEqual([]);
+  });
+
+  it("removeRoutes(tabId) drops every route and returns count", async () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-B");
+    let unrouteCalls = 0;
+    const tabRoutes = (mgr as any).tabRoutes;
+    tabRoutes.set(id, [
+      {
+        pattern: "**/a/*",
+        owner: "agent-B",
+        unroute: async () => {
+          unrouteCalls++;
+        },
+      },
+      {
+        pattern: "**/b/*",
+        owner: "agent-B",
+        unroute: async () => {
+          unrouteCalls++;
+        },
+      },
+    ]);
+
+    const n = await mgr.removeRoutes(id);
+    expect(n).toBe(2);
+    expect(unrouteCalls).toBe(2);
+    // Registry should be cleaned up.
+    expect((mgr as any).tabRoutes.has(id)).toBe(false);
+    expect(mgr.listRoutes(id)).toEqual([]);
+  });
+
+  it("removeRoutes(tabId, pattern) unroutes only matching pattern", async () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-C");
+    let aUnrouted = false;
+    let bUnrouted = false;
+    const tabRoutes = (mgr as any).tabRoutes;
+    tabRoutes.set(id, [
+      {
+        pattern: "**/a/*",
+        owner: "agent-C",
+        unroute: async () => {
+          aUnrouted = true;
+        },
+      },
+      {
+        pattern: "**/b/*",
+        owner: "agent-C",
+        unroute: async () => {
+          bUnrouted = true;
+        },
+      },
+    ]);
+
+    const n = await mgr.removeRoutes(id, "**/a/*");
+    expect(n).toBe(1);
+    expect(aUnrouted).toBe(true);
+    expect(bUnrouted).toBe(false);
+
+    const remaining = mgr.listRoutes(id);
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].pattern).toBe("**/b/*");
+  });
+
+  it("clearTabState clears tabRoutes for that tab", () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-D");
+    const tabRoutes = (mgr as any).tabRoutes;
+    tabRoutes.set(id, [{ pattern: "**/x/*", owner: "agent-D", unroute: async () => {} }]);
+
+    // clearTabState is called by closeTab — it must wipe tabRoutes.
+    mgr.clearTabState(id);
+    expect((mgr as any).tabRoutes.has(id)).toBe(false);
+  });
+
+  it("closeTab clears tabRoutes via clearTabState", async () => {
+    const mgr = setupMgr();
+    mgr.primaryTabId = 999;
+    mgr.tabs.set(999, fakePage());
+
+    const id = addTab(mgr, "agent-E");
+    const tabRoutes = (mgr as any).tabRoutes;
+    tabRoutes.set(id, [{ pattern: "**/y/*", owner: "agent-E", unroute: async () => {} }]);
+
+    await mgr.closeTab(id);
+    expect((mgr as any).tabRoutes.has(id)).toBe(false);
+  });
+
+  it("removeRoutes swallows unroute errors (page may be gone)", async () => {
+    const mgr = setupMgr();
+    const id = addTab(mgr, "agent-F");
+    const tabRoutes = (mgr as any).tabRoutes;
+    tabRoutes.set(id, [
+      {
+        pattern: "**/boom/*",
+        owner: "agent-F",
+        unroute: async () => {
+          throw new Error("page closed");
+        },
+      },
+    ]);
+
+    // Should not throw — the try/catch in removeRoutes catches it.
+    const n = await mgr.removeRoutes(id);
+    expect(n).toBe(1);
+    expect((mgr as any).tabRoutes.has(id)).toBe(false);
+  });
+});

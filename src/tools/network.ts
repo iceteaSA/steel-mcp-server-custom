@@ -2,7 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { z } from "zod";
 import type { BrowserContext } from "patchright";
-import type { BrowserManager, Env } from "../manager.js";
+import type { BrowserManager, Env, NetworkEvent } from "../manager.js";
 import {
   assertInsideRoot,
   cleanErrorMessage,
@@ -41,6 +41,49 @@ export function authorizeBodyFetch(
   return {
     ok: false,
     error: `Response body for request #${event.id} belongs to owner "${tabOwner}"'s tab — pass owner:"${tabOwner}" to read it.`,
+  };
+}
+
+/**
+ * Serialize a list of NetworkEvents to HAR 1.2 format.
+ * Pure function — callers supply the events; no manager dependency.
+ */
+export function buildHar(events: NetworkEvent[]): object {
+  return {
+    log: {
+      version: "1.2",
+      creator: { name: "steel-mcp", version: "0.8.0" },
+      entries: events.map((e) => ({
+        startedDateTime: new Date(e.at).toISOString(),
+        time: e.durationMs ?? 0,
+        request: {
+          method: e.method,
+          url: e.url,
+          httpVersion: "HTTP/1.1",
+          headers: [],
+          queryString: [],
+          cookies: [],
+          headersSize: -1,
+          bodySize: -1,
+        },
+        response: {
+          status: e.status ?? 0,
+          statusText: "",
+          httpVersion: "HTTP/1.1",
+          headers: [],
+          cookies: [],
+          content: {
+            size: e.sizeBytes ?? 0,
+            mimeType: e.contentType ?? "",
+          },
+          redirectURL: "",
+          headersSize: -1,
+          bodySize: e.sizeBytes ?? -1,
+        },
+        cache: {},
+        timings: { send: 0, wait: e.durationMs ?? 0, receive: 0 },
+      })),
+    },
   };
 }
 
@@ -525,6 +568,71 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
           content: [{ type: "text", text: cleanErrorMessage(error) }],
           structuredContent: { events: [] },
         };
+      }
+    },
+  });
+
+  // export_har -----------------------------------------------------------------
+  register({
+    name: "export_har",
+    title: "Export HAR",
+    description: `Export captured network events as a HAR 1.2 file. Owner-scoped: when owner is given, only events from that owner's tabs are included. 
+
+CONTEXT BUDGET — HAR is always written to disk (no inline option).`,
+    toolset: "network",
+    inputSchema: {
+      ...tabTarget,
+      outputPath: z
+        .string()
+        .optional()
+        .describe("Absolute path to save the HAR. Defaults to OUTPUT_DIR/network.har."),
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async ({
+      tabId,
+      owner,
+      outputPath,
+    }: {
+      tabId?: number;
+      owner?: string;
+      outputPath?: string;
+    }) => {
+      try {
+        const resolved =
+          tabId !== undefined || owner ? mgr.resolveTab({ tabId, owner }) : undefined;
+
+        // Owner-scoped events: if an owner is given, only include events
+        // from that owner's tabs. The resolved tabId narrows further.
+        const events = mgr.getNetworkEvents({
+          tabId: resolved,
+          owner,
+          limit: 0, // no cap — export everything
+        });
+
+        const har = buildHar(events);
+        const filePath = await writeToFile(
+          JSON.stringify(har, null, 2),
+          "network.har",
+          env,
+          outputPath,
+        );
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `HAR exported: ${filePath} (${events.length} entries)`,
+            },
+          ],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return { isError: true, content: [{ type: "text", text: error.message }] };
       }
     },
   });

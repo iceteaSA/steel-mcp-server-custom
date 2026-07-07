@@ -25,6 +25,7 @@ import { register as registerSession } from "../tools/session.js";
 import { register as registerNetwork } from "../tools/network.js";
 import { register as registerCredentials } from "../tools/credentials.js";
 import { register as registerProfiles } from "../tools/profiles.js";
+import { register as registerIntercept } from "../tools/intercept.js";
 import { register as registerAct } from "../tools/act.js";
 import { llmConfigured } from "../llm.js";
 
@@ -40,6 +41,7 @@ const JSON_TOOLS = new Set([
   "credentials",
   "captcha_status",
   "page_state",
+  "intercept",
 ]);
 
 // Stub BrowserManager — tools that call mgr methods will throw, but
@@ -191,8 +193,8 @@ describe("makeRegistrar", () => {
 // ---------------------------------------------------------------------------
 
 describe("ALL_TOOLSETS", () => {
-  it("includes all 8 toolset values", () => {
-    expect(ALL_TOOLSETS.length).toBe(8);
+  it("includes all 9 toolset values", () => {
+    expect(ALL_TOOLSETS.length).toBe(9);
     const expected: Toolset[] = [
       "core",
       "tabs",
@@ -202,6 +204,7 @@ describe("ALL_TOOLSETS", () => {
       "auth",
       "debug",
       "ai",
+      "intercept",
     ];
     for (const t of expected) {
       expect(ALL_TOOLSETS.includes(t)).toBe(true);
@@ -215,7 +218,7 @@ describe("ALL_TOOLSETS", () => {
 // ---------------------------------------------------------------------------
 
 describe("tools/list wire-level completeness", () => {
-  it("all 35 tools have title, description, annotations; 10 have outputSchema", async () => {
+  it("all 37 tools have title, description, annotations; 11 have outputSchema", async () => {
     const server = new McpServer(
       { name: "test", version: "0.0.0" },
       { capabilities: { tools: {} } },
@@ -235,9 +238,10 @@ describe("tools/list wire-level completeness", () => {
     registerNetwork(register, stubMgr, stubEnv);
     registerCredentials(register, stubMgr, stubEnv);
     registerProfiles(register, stubMgr, stubEnv);
+    registerIntercept(register, stubMgr, stubEnv);
 
-    // 35 tools total (without act/extract_ai since ACT_LLM env not set)
-    expect(toolCount()).toBe(35);
+    // 37 tools total (without act/extract_ai since ACT_LLM env not set)
+    expect(toolCount()).toBe(37);
 
     // Create client-server pair
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -250,7 +254,7 @@ describe("tools/list wire-level completeness", () => {
     const tools = result.tools;
 
     // Exact tool count on the wire
-    expect(tools.length).toBe(35);
+    expect(tools.length).toBe(37);
 
     for (const tool of tools) {
       const name = tool.name;
@@ -317,6 +321,7 @@ describe("ai toolset gating", () => {
     registerNetwork(register, stubMgr, env);
     registerCredentials(register, stubMgr, env);
     registerProfiles(register, stubMgr, env);
+    registerIntercept(register, stubMgr, env);
     if (llmConfigured(env)) {
       registerAct(register, stubMgr, env);
     }

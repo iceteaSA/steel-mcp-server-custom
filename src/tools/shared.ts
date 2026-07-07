@@ -31,7 +31,16 @@ export interface ToolAnnotations {
 // Toolsets
 // -----------------------------------------------------------------------------
 
-export type Toolset = "core" | "tabs" | "extract" | "media" | "network" | "auth" | "debug" | "ai";
+export type Toolset =
+  | "core"
+  | "tabs"
+  | "extract"
+  | "media"
+  | "network"
+  | "auth"
+  | "debug"
+  | "ai"
+  | "intercept";
 
 export const ALL_TOOLSETS: readonly Toolset[] = [
   "core",
@@ -42,6 +51,7 @@ export const ALL_TOOLSETS: readonly Toolset[] = [
   "auth",
   "debug",
   "ai",
+  "intercept",
 ] as const;
 
 // -----------------------------------------------------------------------------
