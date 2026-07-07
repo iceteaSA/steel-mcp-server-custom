@@ -746,6 +746,9 @@ function fakeContext(newPages: Page[] = []) {
     },
     newPage: async () => {
       const p = newPages[pageIdx++] ?? fakePage();
+      for (const fn of handlers["page"] ?? []) {
+        fn(p);
+      }
       return p;
     },
     handlers,
@@ -876,6 +879,7 @@ describe("getPage crash recovery", () => {
     const freshPage = fakePage({ url: () => "https://recovered.test/" });
     const context = fakeContext([freshPage]);
     mgr.browserContext = context as any;
+    (mgr as any)._wirePopupCapture(context);
 
     mgr.tabs.set(1, deadPage);
     (mgr as any).pageToTabId.set(deadPage, 1);
@@ -887,6 +891,8 @@ describe("getPage crash recovery", () => {
     expect((mgr as any).tabs.get(1)).toBe(freshPage);
     expect((mgr as any).pageToTabId.get(freshPage)).toBe(1);
     expect((freshPage as any)._url).toBe("https://recovered.test/");
+    // No duplicate allocation from the popup listener.
+    expect(Array.from((mgr as any).tabs.keys())).toEqual([999, 1]);
   });
 
   it("recovers an explicit tabId when url() throws on a detached/crashed page", async () => {
@@ -903,6 +909,7 @@ describe("getPage crash recovery", () => {
     const freshPage = fakePage({ url: () => "https://explicit.test/" });
     const context = fakeContext([freshPage]);
     mgr.browserContext = context as any;
+    (mgr as any)._wirePopupCapture(context);
 
     mgr.tabs.set(5, deadPage);
     (mgr as any).pageToTabId.set(deadPage, 5);
@@ -913,6 +920,8 @@ describe("getPage crash recovery", () => {
     expect(page).toBe(freshPage);
     expect((mgr as any).tabs.get(5)).toBe(freshPage);
     expect((mgr as any).pageToTabId.get(freshPage)).toBe(5);
+    // Popup listener must not create a transient duplicate tab.
+    expect(Array.from((mgr as any).tabs.keys())).toEqual([999, 5]);
   });
 
   it("sets and consumes the recovery notice once", async () => {

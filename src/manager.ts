@@ -410,10 +410,25 @@ export class BrowserManager {
     const replacePage = async (page: Page): Promise<Page> => {
       const oldPage = this.tabs.get(tabId);
       if (oldPage) this.pageToTabId.delete(oldPage);
+
+      // Route the replacement page through the idempotent allocation path.
+      // The context "page" listener fires for context.newPage() too, so it
+      // may have already registered this page under a transient tabId. Using
+      // allocateTab merges that registration; we then remap to the original
+      // tabId and drop any transient entry so the registry stays coherent.
+      const allocatedId = this.allocateTab(page);
+      if (allocatedId !== tabId) {
+        this.tabs.delete(allocatedId);
+        this.tabOwners.delete(allocatedId);
+        this.tabLastActivity.delete(allocatedId);
+      }
+
       this.tabs.set(tabId, page);
       this.pageToTabId.set(page, tabId);
       this.tabLastActivity.set(tabId, Date.now());
-      this.attachConsoleListener(page);
+      // allocateTab already wired console listeners; re-wire page-specific
+      // listeners so they reference the original tabId (the transient-id
+      // listeners will ignore events once the transient entry is gone).
       this.attachPageListeners(page, tabId);
       const lastUrl = this.tabLastUrl.get(tabId) ?? "about:blank";
       try {
