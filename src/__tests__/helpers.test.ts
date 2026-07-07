@@ -764,6 +764,23 @@ describe("contentAreaExtract", () => {
     expect(result.text).toBe(goldenWalkOutput);
   });
 
+  it("walk mode emits `Text []` for an anchor WITHOUT href (regression: c7724f5 byte-identical output)", async () => {
+    // Pre-cleanup extractPageContent unconditionally appended ` [${href}]` when
+    // includeLinks was true, so an hrefless anchor emitted `Text []`. A drift
+    // cleanup introduced a `&& href` guard that broke byte-identical output
+    // for hrefless anchors. This test locks the original behavior.
+    const { parseHTML } = await import("linkedom");
+    const { document } = parseHTML(
+      `<html><body><main><p>Hello <a>Text</a> world</p></main></body></html>`,
+    );
+    const result = extractPageContent(
+      { selector: null, includeLinks: true, mode: "walk" },
+      document,
+    );
+    expect(result.text).toBe("Hello Text [] world");
+    expect(result.links).toEqual([]);
+  });
+
   it("innerText mode matches pre-refactor no-link output", async () => {
     const { parseHTML } = await import("linkedom");
     const { document } = parseHTML(fixtureHTML);

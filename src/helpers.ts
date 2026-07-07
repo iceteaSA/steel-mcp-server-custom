@@ -605,7 +605,7 @@ export function walkContentBlock(
       const txtRaw = node.textContent ?? "";
       const txt = collapseWs ? txtRaw.replace(/\s+/g, " ").trim() : txtRaw.trim();
       if (includeLinks && href) rawLinks.push({ text: txt, href });
-      return markHrefs && includeLinks && href ? `${txt} [${href}]` : txt;
+      return markHrefs && includeLinks ? `${txt} [${href}]` : txt;
     }
     const inner = Array.from(node.childNodes)
       .map((n) => (n.nodeType === 3 ? (n.textContent ?? "") : walk(n as Element)))
@@ -683,9 +683,9 @@ export const FIND_CONTENT_ROOT_AND_STRIP_HTML_SRC = new Function(
  */
 export const extractPageContent = new Function(
   `
-${WALK_CONTENT_BLOCK_SRC}
-
 return function extractPageContent(opts, doc) {
+  ${WALK_CONTENT_BLOCK_SRC}
+
   const CONTENT_AREA_SELECTORS = ["main", "article", '[role="main"]', "body"];
   const d = doc || document;
   const sel = (opts && opts.selector) != null ? opts.selector : null;

@@ -347,9 +347,11 @@ describe("fetch_urls runtime routing", () => {
 
   it("mode:'auto' on a shell: escalates to browser path, labels [browser], escalated:true", async () => {
     // fetchHttp signals escalation; the browser branch then runs against the
-    // fake mgr. Since fakeMgr returns an empty pageStub from newTab, the
-    // browser path's extractFromHtml won't produce real content — we only
-    // assert the routing decisions (prefix, escalated flag, browserCall count).
+    // fake mgr. fakeMgr with shouldFail=false returns a page stub whose
+    // content() yields an article body, so the browser path's extractFromHtml
+    // produces real text. We assert both the routing decisions (prefix,
+    // escalated flag, browserCall count) and that the browser-served content
+    // made it through.
     const { mgr, getBrowserCalls } = fakeMgr(false);
     const result: any = await runFetchUrls(
       {
@@ -371,6 +373,8 @@ describe("fetch_urls runtime routing", () => {
     expect(r.text.startsWith("[browser]")).toBe(true);
     // Spec: escalated:true whenever auto chose to switch paths.
     expect(r.escalated).toBe(true);
+    // Browser branch ran and produced content (via the fakeMgr pageStub).
+    expect(r.text).toContain("real content");
     expect(getBrowserCalls()).toBe(1);
   });
 

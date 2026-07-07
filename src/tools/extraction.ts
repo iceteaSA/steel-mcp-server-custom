@@ -37,48 +37,6 @@ const turndown = new TurndownService({
 });
 
 /**
- * Build one record from a single root element + a field map.
- *
- * Field-map spec grammar:
- *   "selector"               → root.querySelector(selector).textContent.trim()
- *   "selector@attr"          → root.querySelector(selector).getAttribute(attr)
- *   "."                      → root.textContent.trim() (root element's own text)
- *
- * Browser-serializable: passed to ctx.evaluate (multi-root path) and
- * ctx.locator(sel).evaluate (ref path). Pure: same input → same output,
- * no module-scope references.
- */
-function extractRecord(
-  root: Element,
-  opts: { fieldMap: Record<string, string> },
-): Record<string, string | null> {
-  const record: Record<string, string | null> = {};
-  for (const [name, spec] of Object.entries(opts.fieldMap)) {
-    const atIdx = spec.lastIndexOf("@");
-    let subSel: string;
-    let attr: string | null = null;
-    if (atIdx > 0) {
-      subSel = spec.slice(0, atIdx);
-      attr = spec.slice(atIdx + 1);
-    } else if (spec === ".") {
-      record[name] = root.textContent?.trim() ?? null;
-      continue;
-    } else {
-      subSel = spec;
-    }
-    const el = root.querySelector(subSel);
-    if (!el) {
-      record[name] = null;
-    } else if (attr) {
-      record[name] = el.getAttribute(attr);
-    } else {
-      record[name] = el.textContent?.trim() ?? null;
-    }
-  }
-  return record;
-}
-
-/**
  * Pure extraction pipeline shared by the HTTP fast-path and the browser
  * path. Runs Readability on the parsed linkedom document, then falls back
  * to extractPageContent if Readability returned nothing.
@@ -1152,15 +1110,72 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
         if (isRef) {
           // Ref addresses exactly one element.  locator.evaluate() auto-waits
           // and throws on timeout (stale ref) — never silently return [].
-          const record = await ctx.locator(sel).evaluate(extractRecord, {
-            fieldMap: fields as Record<string, string>,
-          });
+          // Field-map parser is inlined so the evaluated function stays
+          // self-contained: Playwright serializes it to the browser, where
+          // module-scope references are not available.
+          const record = await ctx.locator(sel).evaluate(
+            (root, { fieldMap }) => {
+              const rec: Record<string, string | null> = {};
+              for (const [name, spec] of Object.entries(fieldMap)) {
+                const atIdx = spec.lastIndexOf("@");
+                let subSel: string;
+                let attr: string | null = null;
+                if (atIdx > 0) {
+                  subSel = spec.slice(0, atIdx);
+                  attr = spec.slice(atIdx + 1);
+                } else if (spec === ".") {
+                  rec[name] = root.textContent?.trim() ?? null;
+                  continue;
+                } else {
+                  subSel = spec;
+                }
+                const el = root.querySelector(subSel);
+                if (!el) {
+                  rec[name] = null;
+                } else if (attr) {
+                  rec[name] = el.getAttribute(attr);
+                } else {
+                  rec[name] = el.textContent?.trim() ?? null;
+                }
+              }
+              return rec;
+            },
+            { fieldMap: fields as Record<string, string> },
+          );
           results = [record];
         } else {
+          // Same parser inlined for the multi-root path — passing a Node
+          // module-scope function into ctx.evaluate produces
+          // ReferenceError in the browser isolate.
           results = await ctx.evaluate(
             (args) => {
               const roots = Array.from(document.querySelectorAll(args.sel)).slice(0, args.maxItems);
-              return roots.map((root) => extractRecord(root, { fieldMap: args.fieldMap }));
+              return roots.map((root) => {
+                const record: Record<string, string | null> = {};
+                for (const [name, spec] of Object.entries(args.fieldMap)) {
+                  const atIdx = spec.lastIndexOf("@");
+                  let subSel: string;
+                  let attr: string | null = null;
+                  if (atIdx > 0) {
+                    subSel = spec.slice(0, atIdx);
+                    attr = spec.slice(atIdx + 1);
+                  } else if (spec === ".") {
+                    record[name] = root.textContent?.trim() ?? null;
+                    continue;
+                  } else {
+                    subSel = spec;
+                  }
+                  const el = root.querySelector(subSel);
+                  if (!el) {
+                    record[name] = null;
+                  } else if (attr) {
+                    record[name] = el.getAttribute(attr);
+                  } else {
+                    record[name] = el.textContent?.trim() ?? null;
+                  }
+                }
+                return record;
+              });
             },
             { sel, fieldMap: fields as Record<string, string>, maxItems: limit },
           );
