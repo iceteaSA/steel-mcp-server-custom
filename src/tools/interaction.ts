@@ -12,14 +12,21 @@ import {
   interpretCheckboxValue,
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
-import { tabTarget, tabTargetForce, toSelector, decorateRefError } from "./shared.js";
+import {
+  frameTarget,
+  resolveFrame,
+  tabTarget,
+  tabTargetForce,
+  toSelector,
+  decorateRefError,
+} from "./shared.js";
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // click ---------------------------------------------------------------------
   register({
     name: "click",
     title: "Click Element",
-    description: `Click a page element identified by CSS selector or snapshot ref. Reports navigation if the URL changes. Optionally wait for a selector or text to appear after clicking (saves a separate wait_for call). Use for buttons, links, and interactive elements — do NOT use for form inputs (use fill instead). Refs come from the snapshot tool; refresh after navigation or page mutation.`,
+    description: `Click a page element identified by CSS selector or snapshot ref. Reports navigation if the URL changes. Optionally wait for a selector or text to appear after clicking (saves a separate wait_for call). Use for buttons, links, and interactive elements — do NOT use for form inputs (use fill instead). Refs come from the snapshot tool; refresh after navigation or page mutation. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main). Use snapshot to list available frames.`,
     toolset: "core",
     inputSchema: {
       selector: z
@@ -59,6 +66,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         .optional()
         .describe("Max time in ms to wait for the element to be clickable. Default: 10000."),
       ...tabTargetForce,
+      ...frameTarget,
     },
     annotations: {
       readOnlyHint: false,
@@ -76,13 +84,15 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
       tabId,
       owner,
       force,
+      frame,
     }) => {
       let sel = "";
       try {
         sel = toSelector({ selector, ref });
         const page = await mgr.getPage({ tabId, owner, force });
+        const ctx = resolveFrame(page, frame);
         const beforeUrl = page.url();
-        await page.click(sel, { timeout });
+        await ctx.locator(sel).click({ timeout });
         await afterAction(page, env);
 
         // Snapshot-diff feedback (best-effort — doesn't affect result on failure).
@@ -96,7 +106,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         let waitMsg = "";
         if (waitFor) {
           try {
-            await page.waitForSelector(waitFor, { timeout: waitTimeout });
+            await ctx.waitForSelector(waitFor, { timeout: waitTimeout });
             waitMsg = `\nwaitFor "${waitFor}" matched.`;
           } catch {
             waitMsg = `\nwaitFor "${waitFor}" TIMED OUT after ${waitTimeout}ms.`;
@@ -104,7 +114,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         }
         if (waitForText) {
           try {
-            await page.waitForFunction(
+            await ctx.waitForFunction(
               (t: string) => document.body?.innerText?.includes(t),
               waitForText,
               { timeout: waitTimeout },
@@ -139,7 +149,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "fill",
     title: "Fill Form",
-    description: `Fill one or more form fields on the page. Auto-detects field types (text, select, checkbox, radio). Pass submitSelector to click a submit button after filling. Each field accepts selector or snapshot ref. Use for any form interaction (login, search, registration, checkout) — do NOT use click on form elements; fill handles all input types correctly.`,
+    description: `Fill one or more form fields on the page. Auto-detects field types (text, select, checkbox, radio). Pass submitSelector to click a submit button after filling. Each field accepts selector or snapshot ref. Use for any form interaction (login, search, registration, checkout) — do NOT use click on form elements; fill handles all input types correctly. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main). Use snapshot to list available frames.`,
     toolset: "core",
     inputSchema: {
       fields: z
@@ -193,6 +203,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         .optional()
         .describe("Per-field wait timeout in ms. Default: 10000."),
       ...tabTargetForce,
+      ...frameTarget,
     },
     annotations: {
       readOnlyHint: false,
@@ -208,6 +219,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
       tabId,
       owner,
       force,
+      frame,
     }) => {
       // Batched kind-detection: one evaluate call checks existence for ALL
       // CSS-selector fields and auto-detects kinds for fields lacking an
@@ -223,6 +235,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         }
 
         const page = await mgr.getPage({ tabId, owner, force });
+        const ctx = resolveFrame(page, frame);
 
         // Split selectors: CSS pass through evaluate; refs through locator.
         const allSelectors = fields.map((f: { selector: string }) => f.selector);
@@ -231,15 +244,15 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
 
         // Batch existence check for CSS selectors.
         const cssInfoMap: Record<string, { tag: string; type: string } | null> =
-          cssSelectors.length > 0 ? await page.evaluate(detectFieldsInPage, cssSelectors) : {};
+          cssSelectors.length > 0 ? await ctx.evaluate(detectFieldsInPage, cssSelectors) : {};
 
         // Individual existence check for ref selectors via locator.
         const refInfoMap: Record<string, { tag: string; type: string } | null> = {};
         for (const sel of refSelectors) {
           let handle: any = null;
           try {
-            await page.locator(sel).waitFor({ state: "attached", timeout });
-            handle = await page.locator(sel).elementHandle({ timeout });
+            await ctx.locator(sel).waitFor({ state: "attached", timeout });
+            handle = await ctx.locator(sel).elementHandle({ timeout });
             if (handle) {
               refInfoMap[sel] = await handle.evaluate((el: Element) => ({
                 tag: el.tagName.toLowerCase(),
@@ -308,38 +321,38 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
             }
             if (kind === "select" || kind === "selectLabel" || kind === "selectIndex") {
               if (kind === "selectLabel") {
-                await page.selectOption(f.selector, { label: f.value }, { timeout });
+                await ctx.locator(f.selector).selectOption({ label: f.value }, { timeout });
               } else if (kind === "selectIndex") {
                 const idx = parseInt(f.value, 10);
                 if (Number.isNaN(idx))
                   throw new Error(`selectIndex expects numeric value, got "${f.value}"`);
-                await page.selectOption(f.selector, { index: idx }, { timeout });
+                await ctx.locator(f.selector).selectOption({ index: idx }, { timeout });
               } else {
-                await page.selectOption(f.selector, f.value, { timeout });
+                await ctx.locator(f.selector).selectOption(f.value, { timeout });
               }
               filled.push({ selector: f.selector, kind });
             } else if (kind === "check") {
               const intent = interpretCheckboxValue(f.value);
               if (intent === "check") {
-                await page.check(f.selector, { timeout });
+                await ctx.locator(f.selector).check({ timeout });
                 filled.push({ selector: f.selector, kind });
               } else if (intent === "uncheck") {
-                await page.uncheck(f.selector, { timeout });
+                await ctx.locator(f.selector).uncheck({ timeout });
                 filled.push({ selector: f.selector, kind });
               } else {
                 const fullSel = buildRadioSelector(f.selector, f.value);
-                await page.check(fullSel, { timeout });
+                await ctx.locator(fullSel).check({ timeout });
                 filled.push({ selector: fullSel, kind: "check-by-value" });
               }
             } else if (kind === "radio") {
               const fullSel = buildRadioSelector(f.selector, f.value);
-              await page.click(fullSel, { timeout });
+              await ctx.locator(fullSel).click({ timeout });
               filled.push({ selector: fullSel, kind });
             } else {
-              await page.fill(f.selector, f.value, { timeout });
+              await ctx.locator(f.selector).fill(f.value, { timeout });
               filled.push({ selector: f.selector, kind });
             }
-            if (f.submit) await page.press(f.selector, "Enter");
+            if (f.submit) await ctx.locator(f.selector).press("Enter");
           } catch (err) {
             if (skipMissing) {
               skipped.push(f.selector);
@@ -357,7 +370,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           }
         }
         if (submitSelector) {
-          await page.click(submitSelector, { timeout });
+          await ctx.locator(submitSelector).click({ timeout });
         }
         await afterAction(page, env);
 
@@ -393,7 +406,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "scroll",
     title: "Scroll Page",
-    description: `Scroll the page (or a specific scrollable element) up or down by a pixel amount. Optionally extract visible text after scrolling with readAfterScroll (saves a follow-up get_page_text call). Pass selector or snapshot ref to target a scrollable container instead of the window. Use to reveal lazy-loaded content or read long pages in segments. Do NOT use as a substitute for navigation — use go_to_url to load a new page.
+    description: `Scroll the page (or a specific scrollable element) up or down by a pixel amount. Optionally extract visible text after scrolling with readAfterScroll (saves a follow-up get_page_text call). Pass selector or snapshot ref to target a scrollable container instead of the window. Use to reveal lazy-loaded content or read long pages in segments. Do NOT use as a substitute for navigation — use go_to_url to load a new page. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main). Use snapshot to list available frames.
 
 CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars (default 3K).`,
     toolset: "core",
@@ -425,6 +438,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         .optional()
         .describe("When readAfterScroll=true, max chars of text to return. Default: 3000."),
       ...tabTargetForce,
+      ...frameTarget,
     },
     annotations: {
       readOnlyHint: false,
@@ -442,11 +456,13 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
       tabId,
       owner,
       force,
+      frame,
     }) => {
       let sel: string | null = null;
       try {
         sel = selector || ref ? toSelector({ selector, ref }) : null;
         const page = await mgr.getPage({ tabId, owner, force });
+        const ctx = resolveFrame(page, frame);
         const dy = direction === "up" ? -pixels : pixels;
 
         // aria-ref is a Playwright-internal selector engine — invisible to
@@ -461,7 +477,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
           elementMissing?: boolean;
         };
         if (useRef) {
-          const loc = page.locator(sel!);
+          const loc = ctx.locator(sel!);
           result = await loc.evaluate(
             (el, { yDelta }) => {
               const before = el.scrollTop;
@@ -477,7 +493,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
             { yDelta: dy },
           );
         } else {
-          result = await page.evaluate(
+          result = await ctx.evaluate(
             ({ yDelta, scrollSelector }: { yDelta: number; scrollSelector: string | null }) => {
               if (scrollSelector) {
                 const el = document.querySelector(scrollSelector);
@@ -544,7 +560,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
           try {
             const rawText: string =
               (
-                await page.evaluate(extractPageContent, {
+                await ctx.evaluate(extractPageContent, {
                   selector: null,
                   includeLinks: false,
                   mode: "innerText" as const,
@@ -591,7 +607,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
   register({
     name: "wait_for",
     title: "Wait for Condition",
-    description: `Wait for a condition before proceeding: a CSS selector (or snapshot ref) to appear, text to appear on the page, or text to disappear. On timeout, reports the current page URL and title for diagnosis. Use after navigation or clicks to wait for dynamic content to load. Do NOT use as a sleep substitute — the timeout is a should-not-happen guard, not a pacing mechanism.`,
+    description: `Wait for a condition before proceeding: a CSS selector (or snapshot ref) to appear, text to appear on the page, or text to disappear. On timeout, reports the current page URL and title for diagnosis. Use after navigation or clicks to wait for dynamic content to load. Do NOT use as a sleep substitute — the timeout is a should-not-happen guard, not a pacing mechanism. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main). Use snapshot to list available frames.`,
     toolset: "core",
     inputSchema: {
       selector: z
@@ -615,6 +631,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         .optional()
         .describe("Maximum time to wait in milliseconds. Default: 10000 (10s). Max: 60000 (60s)."),
       ...tabTarget,
+      ...frameTarget,
     },
     annotations: {
       readOnlyHint: true,
@@ -622,11 +639,22 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, ref, text, textGone, timeout = 10000, tabId, owner, force }) => {
+    handler: async ({
+      selector,
+      ref,
+      text,
+      textGone,
+      timeout = 10000,
+      tabId,
+      owner,
+      force,
+      frame,
+    }) => {
       let sel: string | undefined;
       try {
         sel = selector || ref ? toSelector({ selector, ref }) : undefined;
         const page = await mgr.getPage({ tabId, owner, force });
+        const ctx = resolveFrame(page, frame);
 
         if (!sel && !text && !textGone) {
           return {
@@ -644,11 +672,11 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         const conditions: Promise<void>[] = [];
 
         if (sel) {
-          conditions.push(page.waitForSelector(sel, { timeout }).then(() => undefined));
+          conditions.push(ctx.waitForSelector(sel, { timeout }).then(() => undefined));
         }
         if (text) {
           conditions.push(
-            page
+            ctx
               .waitForFunction((t: string) => document.body?.innerText?.includes(t), text, {
                 timeout,
               })
@@ -657,7 +685,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         }
         if (textGone) {
           conditions.push(
-            page
+            ctx
               .waitForFunction((t: string) => !document.body?.innerText?.includes(t), textGone, {
                 timeout,
               })

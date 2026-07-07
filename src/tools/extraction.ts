@@ -16,7 +16,14 @@ import {
   type Link,
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
-import { tabTarget, tabTargetForce, toSelector, decorateRefError } from "./shared.js";
+import {
+  frameTarget,
+  resolveFrame,
+  tabTarget,
+  tabTargetForce,
+  toSelector,
+  decorateRefError,
+} from "./shared.js";
 import { captureSnapshot, storeSnapshot } from "../snapshot.js";
 
 // Singleton — configured once, reused across calls.
@@ -31,7 +38,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "get_page_text",
     title: "Get Page Text",
-    description: `Extract text from the current page, auto-detecting the main content area. Use extractContent for Readability-based article extraction (strips nav/ads/footer), or matchAll for structured list scraping. Use as the primary content-reading tool after navigation. Do NOT use to read URLs or links — use get_links for structured link extraction.
+    description: `Extract text from the current page, auto-detecting the main content area. Use extractContent for Readability-based article extraction (strips nav/ads/footer), or matchAll for structured list scraping. Use as the primary content-reading tool after navigation. Do NOT use to read URLs or links — use get_links for structured link extraction. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main). Use snapshot to list available frames.
 
 CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file" for large pages.`,
     toolset: "core",
@@ -101,6 +108,7 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
           "When matchAll=true, pretty-print the inline JSON (2-space indent). Default: false (compact — one entry per line).",
         ),
       ...tabTarget,
+      ...frameTarget,
     },
     annotations: {
       readOnlyHint: true,
@@ -121,13 +129,15 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
       pretty = false,
       tabId,
       owner,
+      frame,
     }) => {
       try {
         const page = await mgr.getPage({ tabId, owner });
+        const ctx = resolveFrame(page, frame);
 
         // --- extractContent: Readability-based article extraction ----------
         if (extractContent && !matchAll) {
-          const html = await page.content();
+          const html = await ctx.content();
           const { document: dom } = parseHTML(html);
           const reader = new Readability(dom as any);
           const article = reader.parse();
@@ -182,7 +192,7 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
 
         // --- matchAll: per-element structured output -----------------------
         if (matchAll) {
-          const rawEntries = await page.evaluate(
+          const rawEntries = await ctx.evaluate(
             ({ sel, withLinks }: { sel: string | null; withLinks: boolean }) => {
               const roots = sel ? Array.from(document.querySelectorAll(sel)) : [document.body];
               const collect = (root: Element) => {
@@ -304,7 +314,7 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
         // --- single-match path (original behavior) ------------------------
         const effectiveSelector: string | null = selector ?? null;
         type SingleResult = { __noMatch?: boolean; text?: string; usedSelector?: string };
-        const rawResult: SingleResult = await page.evaluate(extractPageContent, {
+        const rawResult: SingleResult = await ctx.evaluate(extractPageContent, {
           selector: effectiveSelector,
           includeLinks,
           mode: includeLinks ? ("walk" as const) : ("innerText" as const),
@@ -593,7 +603,7 @@ CONTEXT BUDGET — output capped at limit (default 50).`,
   register({
     name: "get_attrs",
     title: "Get Attributes",
-    description: `Extract specific attributes from elements matching a CSS selector or snapshot ref. Special attrs: "text" = innerText, "html" = outerHTML. Use for data-*, aria-*, src, alt, href, or structured data extraction — returns a JSON array of objects. Pass a ref from snapshot instead of a selector to target elements directly. Do NOT use for simple link lists — get_links is faster and deduplicates.
+    description: `Extract specific attributes from elements matching a CSS selector or snapshot ref. Special attrs: "text" = innerText, "html" = outerHTML. Use for data-*, aria-*, src, alt, href, or structured data extraction — returns a JSON array of objects. Pass a ref from snapshot instead of a selector to target elements directly. Do NOT use for simple link lists — get_links is faster and deduplicates. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main). Use snapshot to list available frames.
 
 CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPerAttr to bound long values.`,
     toolset: "extract",
@@ -624,6 +634,7 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
           "Max characters per attribute value before truncation with '…[truncated]'. Default: 2000. Applies to all attrs including 'html' (outerHTML).",
         ),
       ...tabTarget,
+      ...frameTarget,
     },
     outputSchema: {
       results: z.array(z.record(z.string(), z.string().nullable())),
@@ -634,14 +645,24 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, ref, attrs, limit = 50, maxCharsPerAttr = 2000, tabId, owner }) => {
+    handler: async ({
+      selector,
+      ref,
+      attrs,
+      limit = 50,
+      maxCharsPerAttr = 2000,
+      tabId,
+      owner,
+      frame,
+    }) => {
       let sel = "";
       try {
         sel = toSelector({ selector, ref });
         const page = await mgr.getPage({ tabId, owner });
+        const ctx = resolveFrame(page, frame);
 
         // aria-ref is a Playwright-internal selector engine — it is not
-        // visible to page.evaluate / querySelectorAll.  When a ref-based
+        // visible to ctx.evaluate / querySelectorAll.  When a ref-based
         // selector is given, resolve element handles via locator first.
         const isRef = sel.startsWith("aria-ref=");
         let results: Array<Record<string, string | null>>;
@@ -649,7 +670,7 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
         if (isRef) {
           // Ref addresses exactly one element.  locator.evaluate() auto-waits
           // and throws on timeout (stale ref) — never silently return [].
-          const record = await page.locator(sel).evaluate(
+          const record = await ctx.locator(sel).evaluate(
             (el, { attrNames, maxChars }) => {
               const trunc = (s: string | null): string | null => {
                 if (s === null) return null;
@@ -678,7 +699,7 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
           );
           results = [record];
         } else {
-          results = await page.evaluate(
+          results = await ctx.evaluate(
             ({
               sel: cssSel,
               attrNames,
@@ -751,7 +772,7 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
   register({
     name: "evaluate",
     title: "Evaluate JavaScript",
-    description: `Run arbitrary JavaScript in the page context and return the result as JSON — an escape hatch when other tools don't cover a use case. Must be an expression; wrap multi-line logic in an IIFE: (() => { ... })(). With selector, the expression gets \`el\` bound to the first match. Do NOT use for routine scraping — use get_page_text, get_links, get_attrs, or extract instead.
+    description: `Run arbitrary JavaScript in the page context and return the result as JSON — an escape hatch when other tools don't cover a use case. Must be an expression; wrap multi-line logic in an IIFE: (() => { ... })(). With selector, the expression gets \`el\` bound to the first match. Do NOT use for routine scraping — use get_page_text, get_links, get_attrs, or extract instead. Pass frame to run inside an iframe by name, URL substring, or child-frame index (0-based, excludes main). Use snapshot to list available frames.
 
 CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "file" for large results.`,
     toolset: "extract",
@@ -793,6 +814,7 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
           "Call the global wait after evaluation (useful if the expression triggers async side effects). Default: false.",
         ),
       ...tabTargetForce,
+      ...frameTarget,
     },
     annotations: {
       readOnlyHint: false,
@@ -810,6 +832,7 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
       tabId,
       owner,
       force,
+      frame,
     }) => {
       try {
         // Syntax-check the expression before sending to the browser.
@@ -822,14 +845,15 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
         }
 
         const page = await mgr.getPage({ tabId, owner, force });
+        const ctx = resolveFrame(page, frame);
         let result: unknown;
         if (selector) {
           const wrapped = `(function(){ const el = document.querySelector(${JSON.stringify(
             selector,
           )}); if (!el) return null; return (${expression}); })()`;
-          result = await page.evaluate(wrapped);
+          result = await ctx.evaluate(wrapped);
         } else {
-          result = await page.evaluate(expression);
+          result = await ctx.evaluate(expression);
         }
         if (waitAfter) await globalWait(env);
         const text = result === undefined ? "undefined" : JSON.stringify(result, null, 2);
@@ -876,7 +900,7 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
   register({
     name: "extract",
     title: "Declarative Extract",
-    description: `Declarative structured extraction from repeating elements. Pass a CSS selector (or snapshot ref) and a field map (field name → sub-selector or sub-selector@attribute) to produce a JSON array of records. Use "." as the field spec to extract the root element's own text. When using a ref from snapshot, nested field-map selectors remain CSS-relative (scoped to the ref's subtree). Replaces fragile evaluate() for scraping lists, tables, or repeating DOM structures — do NOT use for single-element extraction (use get_attrs or get_page_text).
+    description: `Declarative structured extraction from repeating elements. Pass a CSS selector (or snapshot ref) and a field map (field name → sub-selector or sub-selector@attribute) to produce a JSON array of records. Use "." as the field spec to extract the root element's own text. When using a ref from snapshot, nested field-map selectors remain CSS-relative (scoped to the ref's subtree). Replaces fragile evaluate() for scraping lists, tables, or repeating DOM structures — do NOT use for single-element extraction (use get_attrs or get_page_text). Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main). Use snapshot to list available frames.
 
 CONTEXT BUDGET — output capped at limit (default 20 items).`,
     toolset: "extract",
@@ -905,6 +929,7 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
         .optional()
         .describe("Max items to return. Default: 20."),
       ...tabTarget,
+      ...frameTarget,
     },
     outputSchema: {
       results: z.array(z.record(z.string(), z.string().nullable())),
@@ -915,14 +940,15 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, ref, fields, limit = 20, tabId, owner }) => {
+    handler: async ({ selector, ref, fields, limit = 20, tabId, owner, frame }) => {
       let sel = "";
       try {
         sel = toSelector({ selector, ref });
         const page = await mgr.getPage({ tabId, owner });
+        const ctx = resolveFrame(page, frame);
 
         // aria-ref is a Playwright-internal selector engine — invisible to
-        // page.evaluate / querySelectorAll.  Resolve element handles via
+        // ctx.evaluate / querySelectorAll.  Resolve element handles via
         // locator when a ref-based selector is given.
         const isRef = sel.startsWith("aria-ref=");
         let results: Array<Record<string, string | null>>;
@@ -930,7 +956,7 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
         if (isRef) {
           // Ref addresses exactly one element.  locator.evaluate() auto-waits
           // and throws on timeout (stale ref) — never silently return [].
-          const record = await page.locator(sel).evaluate(
+          const record = await ctx.locator(sel).evaluate(
             (root, { fieldMap }) => {
               const rec: Record<string, string | null> = {};
               for (const [name, spec] of Object.entries(fieldMap)) {
@@ -961,7 +987,7 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
           );
           results = [record];
         } else {
-          results = await page.evaluate(
+          results = await ctx.evaluate(
             (args) => {
               const roots = Array.from(document.querySelectorAll(args.sel)).slice(0, args.maxItems);
               return roots.map((root) => {
@@ -1020,7 +1046,7 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
   register({
     name: "snapshot",
     title: "Page Snapshot",
-    description: `See the page as an accessibility tree with stable element refs ([ref=eN]). THE preferred first look at any page: ~10x cheaper than get_page_text for understanding structure, and refs feed click/fill/get_attrs/extract directly (pass ref instead of selector). Refs expire on navigation or page mutation — take a fresh snapshot after either.
+    description: `See the page as an accessibility tree with stable element refs ([ref=eN]). THE preferred first look at any page: ~10x cheaper than get_page_text for understanding structure, and refs feed click/fill/get_attrs/extract directly (pass ref instead of selector). Refs expire on navigation or page mutation — take a fresh snapshot after either. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main); the output appends a frames section listing child frames when present.
 
 CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
     toolset: "core",
@@ -1036,6 +1062,7 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
           "Cap output (default 8000). Over-budget output is truncated at a line boundary — scope with selector instead of raising this.",
         ),
       ...tabTarget,
+      ...frameTarget,
     },
     annotations: {
       readOnlyHint: true,
@@ -1043,11 +1070,21 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, maxChars, tabId, owner }) => {
+    handler: async ({ selector, maxChars, tabId, owner, frame }) => {
       try {
         const resolvedTabId = mgr.resolveTab({ tabId, owner });
         const page = await mgr.getPage({ tabId, owner });
-        const result = await captureSnapshot(page, resolvedTabId, { selector, maxChars });
+        const ctx = resolveFrame(page, frame);
+        const result = await captureSnapshot(ctx, resolvedTabId, { selector, maxChars });
+
+        const childFrames = page.frames().slice(1);
+        if (childFrames.length > 0) {
+          const list = childFrames
+            .map((f, i) => `[${i}] name="${f.name()}" url=${f.url()}`)
+            .join("\n");
+          result.text += `\n--- frames ---\n${list}`;
+        }
+
         storeSnapshot(resolvedTabId, result.text);
         return { content: [{ type: "text", text: result.text }] };
       } catch (err) {

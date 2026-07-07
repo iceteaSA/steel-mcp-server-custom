@@ -6,6 +6,7 @@
 // -----------------------------------------------------------------------------
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import type { Frame, Page } from "playwright";
 import { z } from "zod";
 
 // Re-exported because @modelcontextprotocol/sdk 1.29 doesn't re-export
@@ -146,6 +147,43 @@ export const tabTargetForce = {
 // Exactly one of selector or ref must be provided.  ref format: e<digits>
 // (e.g. "e5").  Returns aria-ref=${ref} or the raw selector unchanged.
 // -----------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// resolveFrame — pick a frame by name, URL substring, or child-frame index
+// ---------------------------------------------------------------------------
+
+export function resolveFrame(page: Page, frame?: string): Frame | Page {
+  if (frame === undefined) return page;
+
+  const frames = page.frames().slice(1);
+
+  // (a) exact name match
+  const byName = frames.find((f) => f.name() === frame);
+  if (byName) return byName;
+
+  // (b) URL substring match
+  const byUrl = frames.find((f) => f.url().includes(frame));
+  if (byUrl) return byUrl;
+
+  // (c) child-frame index (0-based, excludes main frame)
+  if (/^\d+$/.test(frame)) {
+    const idx = parseInt(frame, 10);
+    if (idx >= 0 && idx < frames.length) return frames[idx];
+  }
+
+  const list = frames.map((f, i) => `[${i}] name="${f.name()}" url=${f.url()}`).join("\n");
+  throw new Error(`No frame matches "${frame}". Available frames:\n${list || "(none)"}`);
+}
+
+// Shared zod fragment for the frame param used by page-interacting tools.
+export const frameTarget = {
+  frame: z
+    .string()
+    .optional()
+    .describe(
+      "Target an iframe by name, URL substring, or child-frame index (0-based, excludes the main frame). Omit for the main page.",
+    ),
+};
 
 export function toSelector(args: { selector?: string; ref?: string }): string {
   const hasSelector = args.selector !== undefined && args.selector !== "";

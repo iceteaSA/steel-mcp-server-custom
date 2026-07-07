@@ -3,7 +3,7 @@
 // per-tab snapshot store for agent-side change feedback.
 // -----------------------------------------------------------------------------
 
-import type { Page } from "playwright";
+import type { Frame, Page } from "playwright";
 
 // -----------------------------------------------------------------------------
 // Types
@@ -26,20 +26,20 @@ const snapshotStore = new Map<number, string>();
 // -----------------------------------------------------------------------------
 
 /**
- * Capture an accessibility snapshot of the page (or a selector's subtree)
- * via `page.locator(…).ariaSnapshot({ mode: "ai" })`.
+ * Capture an accessibility snapshot of the page or frame (or a selector's
+ * subtree) via `ctx.locator(…).ariaSnapshot({ mode: "ai" })`.
  *
  * Returns the YAML snapshot text and an incrementing per-tab generation
  * counter (starts at 1 on first capture of each tab).
  *
- * @param page  Playwright Page
+ * @param ctx   Playwright Page or Frame
  * @param tabId Numeric tab identifier (used for generation counter + store)
  * @param opts  Optional selector (default: "body"), maxChars (default: 8000),
  *              and noTruncate (default: false — when true, returns the raw
  *              untruncated text for use as an internal store baseline).
  */
 export async function captureSnapshot(
-  page: Page,
+  ctx: Page | Frame,
   tabId: number,
   opts?: { selector?: string; maxChars?: number; noTruncate?: boolean },
 ): Promise<SnapshotResult> {
@@ -48,7 +48,7 @@ export async function captureSnapshot(
 
   // ariaSnapshot({ mode: "ai" }) is an internal option not yet in the
   // Playwright TS types — cast to any to satisfy the compiler.
-  const raw = await page.locator(selector).ariaSnapshot({ mode: "ai" } as any);
+  const raw = await ctx.locator(selector).ariaSnapshot({ mode: "ai" } as any);
 
   const generation = (genCounter.get(tabId) ?? 0) + 1;
   genCounter.set(tabId, generation);
