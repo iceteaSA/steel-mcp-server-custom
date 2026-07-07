@@ -41,7 +41,6 @@ const JSON_TOOLS = new Set([
   "credentials",
   "captcha_status",
   "page_state",
-  "intercept",
 ]);
 
 // Stub BrowserManager — tools that call mgr methods will throw, but
@@ -218,7 +217,7 @@ describe("ALL_TOOLSETS", () => {
 // ---------------------------------------------------------------------------
 
 describe("tools/list wire-level completeness", () => {
-  it("all 37 tools have title, description, annotations; 11 have outputSchema", async () => {
+  it("all 37 tools have title, description, annotations; 10 have outputSchema", async () => {
     const server = new McpServer(
       { name: "test", version: "0.0.0" },
       { capabilities: { tools: {} } },

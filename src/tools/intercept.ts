@@ -14,7 +14,12 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
 CONTEXT BUDGET — small confirmation output.`,
     inputSchema: {
       ...tabTargetForce,
-      pattern: z.string().describe("URL glob, e.g. **/api/* (Playwright glob)."),
+      pattern: z
+        .string()
+        .optional()
+        .describe(
+          "URL glob, e.g. **/api/* (Playwright glob). Required for fulfill/abort/continue; for unroute omit to remove ALL routes on the tab; unused for list.",
+        ),
       action: z
         .enum(["fulfill", "abort", "continue", "unroute", "list"])
         .describe("What to do with matching requests."),
@@ -26,9 +31,6 @@ CONTEXT BUDGET — small confirmation output.`,
         .optional()
         .describe("fulfill/continue: response/request headers."),
       errorCode: z.string().optional().describe("abort: Playwright error code (default 'failed')."),
-    },
-    outputSchema: {
-      routes: z.array(z.object({ pattern: z.string(), owner: z.string() })).optional(),
     },
     annotations: {
       readOnlyHint: false,
@@ -51,7 +53,7 @@ CONTEXT BUDGET — small confirmation output.`,
       tabId?: number;
       owner?: string;
       force?: boolean;
-      pattern: string;
+      pattern?: string;
       action: string;
       status?: number;
       body?: string;
@@ -62,23 +64,38 @@ CONTEXT BUDGET — small confirmation output.`,
       try {
         // Ownership chokepoint — throws TabOwnershipError on cross-owner
         // access so no agent can touch another owner's tab routes.
+        // MUST run before the pattern guard so cross-owner denial fires
+        // regardless of whether the caller passed a pattern.
         const resolved = mgr.resolveTab({ tabId, owner, force });
+
+        // Actions that require a pattern — guard AFTER ownership check.
+        if ((action === "fulfill" || action === "abort" || action === "continue") && !pattern) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `pattern is required for action "${action}".`,
+              },
+            ],
+          };
+        }
 
         if (action === "list") {
           const routes = mgr.listRoutes(resolved);
           return {
             content: [{ type: "text", text: JSON.stringify(routes) }],
-            structuredContent: { routes },
           };
         }
 
         if (action === "unroute") {
           const n = await mgr.removeRoutes(resolved, pattern);
+          const label = pattern ? `for ${pattern}` : "on this tab";
           return {
             content: [
               {
                 type: "text",
-                text: `Removed ${n} route(s) for ${pattern}.`,
+                text: `Removed ${n} route(s) ${label}.`,
               },
             ],
           };
@@ -86,7 +103,7 @@ CONTEXT BUDGET — small confirmation output.`,
 
         // Arm the route — tab-scoped page.route() only (never context.route).
         const ownerTag = owner ?? mgr.getTabOwner(resolved) ?? "";
-        await mgr.addRoute(resolved, ownerTag, pattern, async (route) => {
+        await mgr.addRoute(resolved, ownerTag, pattern!, async (route) => {
           if (action === "fulfill") {
             await route.fulfill({
               status: status ?? 200,

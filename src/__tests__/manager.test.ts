@@ -1364,3 +1364,124 @@ describe("tab route registry", () => {
     expect((mgr as any).tabRoutes.has(id)).toBe(false);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Intercept tool guard tests — schema-level (pattern optional) +
+// ownership denial (resolveTab throws BEFORE pattern guard) +
+// pattern-required guard for fulfill/abort/continue.
+// ---------------------------------------------------------------------------
+
+import { register as registerIntercept } from "../tools/intercept.js";
+import type { ToolRegistrar } from "../tools/shared.js";
+
+function makeHandlerCapturer(): {
+  handlers: Record<string, (args: any) => any>;
+  register: ToolRegistrar;
+} {
+  const handlers: Record<string, (args: any) => any> = {};
+  const register = ((opts: any) => {
+    handlers[opts.name] = opts.handler;
+  }) as ToolRegistrar;
+  return { handlers, register };
+}
+
+describe("intercept tool guards", () => {
+  it("pattern is optional — handler receives undefined when omitted (MCP schema guard)", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    // fake mgr: resolveTab succeeds so we can reach the pattern-required guard
+    const mgr = {
+      resolveTab: () => 1,
+      getTabOwner: () => "agent-A",
+      listRoutes: () => [],
+      addRoute: async () => {},
+      removeRoutes: async () => 0,
+    } as any as BrowserManager;
+    const env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+    registerIntercept(register, mgr, env);
+    // list with no pattern — should NOT throw input validation error
+    const result = await handlers.intercept({ action: "list" });
+    // Ownership passes, list should return routes (empty array)
+    expect(result.content[0].text).toBe("[]");
+  });
+
+  it("ownership denial fires BEFORE pattern guard for list (no pattern passed)", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    const mgr = {
+      resolveTab: () => {
+        const err = new Error(
+          'Tab 5 belongs to owner "agent-B" — you are "agent-A". Pass force:true to override, or target your own tab.',
+        );
+        err.name = "TabOwnershipError";
+        throw err;
+      },
+    } as any as BrowserManager;
+    const env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+    registerIntercept(register, mgr, env);
+
+    const result = await handlers.intercept({ action: "list", tabId: 5, owner: "agent-A" });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("belongs to owner");
+    // Ownership error, NOT a missing-pattern error
+    expect(result.content[0].text).not.toContain("pattern is required");
+  });
+
+  it("ownership denial fires BEFORE pattern guard for fulfill (with pattern passed)", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    const mgr = {
+      resolveTab: () => {
+        const err = new Error(
+          'Tab 5 belongs to owner "agent-B" — you are "agent-A". Pass force:true to override, or target your own tab.',
+        );
+        err.name = "TabOwnershipError";
+        throw err;
+      },
+    } as any as BrowserManager;
+    const env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+    registerIntercept(register, mgr, env);
+
+    const result = await handlers.intercept({
+      action: "fulfill",
+      pattern: "**/api/*",
+      tabId: 5,
+      owner: "agent-A",
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("belongs to owner");
+  });
+
+  it("pattern-required guard returns isError when fulfill has no pattern but ownership passes", async () => {
+    const { handlers, register } = makeHandlerCapturer();
+    const mgr = {
+      resolveTab: () => 1,
+      getTabOwner: () => "self",
+      listRoutes: () => [],
+      addRoute: async () => {},
+      removeRoutes: async () => 0,
+    } as any as BrowserManager;
+    const env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+    registerIntercept(register, mgr, env);
+
+    const result = await handlers.intercept({
+      action: "fulfill",
+      owner: "self",
+      // pattern intentionally omitted
+    });
+    expect(result.isError).toBe(true);
+    expect(result.content[0].text).toContain("pattern is required");
+    expect(result.content[0].text).toContain('"fulfill"');
+  });
+
+  it("intercept handler does NOT include outputSchema (removed — strict MCP path)", () => {
+    const captured: any[] = [];
+    const register = ((opts: any) => {
+      captured.push(opts);
+    }) as ToolRegistrar;
+    const mgr = {} as BrowserManager;
+    const env = {} as Env;
+    registerIntercept(register, mgr, env);
+
+    const spec = captured.find((s) => s.name === "intercept");
+    expect(spec).toBeTruthy();
+    expect(spec.outputSchema).toBeUndefined();
+  });
+});
