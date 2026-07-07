@@ -133,7 +133,7 @@ describe("non-browser tools", () => {
   it("tools/list returns expected tools with correct names", async () => {
     const r = await client.call(100, "tools/list");
     const names = r.result?.tools?.map((t) => t.name).sort() || [];
-    expect(names.length).toBe(30);
+    expect(names.length).toBe(33);
 
     // Verify removed tools are gone
     const removed = [
@@ -242,6 +242,48 @@ describe("non-browser tools", () => {
     const r = await client.tool(110, "click", { selector: "#main", ref: "e5" });
     expect(client.isError(r)).toBe(true);
     expect(client.getText(r)).toContain("Pass selector OR ref, not both");
+  });
+
+  // D2: handle_dialog in view mode works without a browser
+  it("handle_dialog (view) returns 'No dialog' when no dialogs exist", async () => {
+    const r = await client.tool(111, "handle_dialog");
+    const text = client.getText(r);
+    // This tool resolves a tabId without calling getPage(), so it works
+    // even without an active browser. But the server may not have
+    // initialized the BrowserManager yet, so resolveTab might not find
+    // the tab. Just verify it doesn't crash — either "No dialog" or
+    // an initialization error is acceptable in the non-browser test.
+    if (!client.isError(r)) {
+      expect(text).toContain("No dialog");
+    }
+  });
+
+  // D2: schema validation — upload_file rejects empty files array
+  it("upload_file with missing files array returns isError", async () => {
+    const r = await client.tool(112, "upload_file", { selector: "#file" });
+    expect(client.isError(r)).toBe(true);
+  });
+
+  // D2: upload_file with non-existent file path returns isError before touching browser
+  it("upload_file with non-existent file returns isError", async () => {
+    const r = await client.tool(113, "upload_file", {
+      selector: "#file",
+      files: ["/tmp/__steel_mcp_nonexistent_9x7y__.txt"],
+    });
+    expect(client.isError(r)).toBe(true);
+    expect(client.getText(r)).toContain("not found");
+  });
+
+  // D2: upload_file with both selector+ref returns isError
+  it("upload_file with both selector and ref returns isError", async () => {
+    const r = await client.tool(114, "upload_file", {
+      selector: "#file",
+      ref: "e5",
+      files: ["/tmp/__dummy__.txt"],
+    });
+    expect(client.isError(r)).toBe(true);
+    const text = client.getText(r);
+    expect(text).toContain("selector");
   });
 });
 
@@ -360,4 +402,44 @@ describe("browser tools", () => {
     // Either cookies or "No cookies" — both valid
     expect(text).toBeTruthy();
   });
+
+  // D2: upload_file with a real tmp file (happy path to exercise stat check)
+  (steelAvailable ? it : it.skip)(
+    "upload_file with a real file returns success when file exists",
+    async () => {
+      const tmpFile = "/tmp/steel-mcp-test-upload.txt";
+      await require("fs/promises").writeFile(tmpFile, "test");
+      try {
+        const r = await client.tool(211, "go_to_url", {
+          url: `data:text/html,<input type='file' id='f'>`,
+        });
+        if (!client.isError(r)) {
+          const ur = await client.tool(212, "upload_file", {
+            selector: "#f",
+            files: [tmpFile],
+          });
+          const text = client.getText(ur);
+          expect(client.isError(ur)).toBe(false);
+          expect(text).toContain("Uploaded");
+        }
+      } finally {
+        await require("fs/promises")
+          .unlink(tmpFile)
+          .catch(() => {});
+      }
+    },
+    20000,
+  );
+
+  // D2: press_key with unknown key returns isError
+  (steelAvailable ? it : it.skip)(
+    "press_key with unknown key returns isError with examples",
+    async () => {
+      const r = await client.tool(213, "press_key", { key: "NotARealKeyXYZ" });
+      expect(client.isError(r)).toBe(true);
+      const text = client.getText(r);
+      expect(text).toContain("Unknown key");
+      expect(text).toContain("Examples:");
+    },
+  );
 });

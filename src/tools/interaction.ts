@@ -1,3 +1,5 @@
+import fs from "fs/promises";
+
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
 import { afterAction, actionFeedback } from "../utils.js";
@@ -114,8 +116,14 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         }
 
         const navMsg = navigated ? `\nNavigated to: ${afterUrl}` : "";
+        const dialogText = mgr.dialogNotice(mgr.resolveTab({ tabId, owner, force }));
         return {
-          content: [{ type: "text", text: `Clicked: ${sel}${navMsg}${waitMsg}${feedbackText}` }],
+          content: [
+            {
+              type: "text",
+              text: `Clicked: ${sel}${navMsg}${waitMsg}${feedbackText}${dialogText}`,
+            },
+          ],
         };
       } catch (err) {
         const error = err as Error;
@@ -371,6 +379,8 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           if (urlAfter !== urlBefore) lines.push(`Navigated to: ${urlAfter}`);
         }
         if (feedbackText) lines.push(feedbackText.trimStart());
+        const dialogText = mgr.dialogNotice(mgr.resolveTab({ tabId, owner, force }));
+        if (dialogText) lines.push(dialogText.trimStart());
         return { content: [{ type: "text", text: lines.join("\n") }] };
       } catch (err) {
         const error = err as Error;
@@ -556,11 +566,12 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         }
 
         const feedbackSuffix = scrollFeedback ? `\n${scrollFeedback}` : "";
+        const dialogText = mgr.dialogNotice(mgr.resolveTab({ tabId, owner, force }));
         return {
           content: [
             {
               type: "text",
-              text: `Scrolled ${direction} by ${pixels} pixels${suffix}.${posInfo}${pageText}${feedbackSuffix}`,
+              text: `Scrolled ${direction} by ${pixels} pixels${suffix}.${posInfo}${pageText}${feedbackSuffix}${dialogText}`,
             },
           ],
         };
@@ -688,6 +699,269 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
             {
               type: "text",
               text: `wait_for timed out or failed: ${msg}${context}`,
+            },
+          ],
+        };
+      }
+    },
+  });
+
+  // handle_dialog -------------------------------------------------------------
+  register({
+    name: "handle_dialog",
+    title: "Handle Dialog",
+    description: `Accept or dismiss a browser dialog (alert, confirm, prompt) on a tab. Call without an action to inspect the pending or last dialog. Playwright dialogs block all page operations until handled — use this tool to unblock the page. An unhandled dialog auto-dismisses after 10 seconds.
+
+Errors: no pending dialog (when action is given).`,
+    toolset: "core",
+    inputSchema: {
+      action: z
+        .enum(["accept", "dismiss"])
+        .optional()
+        .describe("Omit to view the pending/last dialog without changing state."),
+      promptText: z
+        .string()
+        .optional()
+        .describe("Text to provide for prompt() dialogs. Ignored for non-prompt types."),
+      ...tabTarget,
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ action, promptText, tabId, owner, force }) => {
+      try {
+        const resolved = mgr.resolveTab({ tabId, owner, force });
+
+        // No action — view mode: report pending or last dialog.
+        if (!action) {
+          const pending = mgr.getPendingDialog(resolved);
+          if (pending) {
+            const age = Math.round((Date.now() - pending.at) / 1000);
+            const dv = pending.defaultValue ? ` default="${pending.defaultValue}"` : "";
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Pending dialog: ${pending.type} "${pending.message}"${dv} — ${age}s ago. Use action:"accept" or action:"dismiss" to resolve.`,
+                },
+              ],
+            };
+          }
+          const last = mgr.getLastDialog(resolved);
+          if (last) {
+            const age = Math.round((Date.now() - last.at) / 1000);
+            const pt = last.promptText ? `promptText="${last.promptText}" ` : "";
+            const auto = last.autoDismissed ? " (auto)" : "";
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Last dialog (${age}s ago): ${last.type} "${last.message}" — ${last.action}${auto} ${pt}`,
+                },
+              ],
+            };
+          }
+          return { content: [{ type: "text", text: "No dialog." }] };
+        }
+
+        // Action mode — resolve the pending dialog.
+        const result = await mgr.handleDialog(resolved, action, promptText);
+        const pt = result.promptText ? ` with promptText="${result.promptText}"` : "";
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Dialog ${result.action}: ${result.type} "${result.message}"${pt}.`,
+            },
+          ],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return { isError: true, content: [{ type: "text", text: error.message }] };
+      }
+    },
+  });
+
+  // upload_file ---------------------------------------------------------------
+  register({
+    name: "upload_file",
+    title: "Upload File",
+    description: `Upload one or more files through a file input element. Supports direct file-input selection and "file chooser" mode for custom upload buttons that open a native file picker. All file paths must be absolute paths on the MCP server host.
+
+Errors: missing file paths, selector timeout, element not found.`,
+    toolset: "core",
+    inputSchema: {
+      ...tabTargetForce,
+      selector: z
+        .string()
+        .optional()
+        .describe("CSS selector of the file input (input[type=file]) or upload trigger button."),
+      ref: z
+        .string()
+        .optional()
+        .describe("Accessibility ref from snapshot (e.g. 'e5'). Use instead of selector."),
+      files: z.array(z.string()).min(1).describe("Absolute paths on the MCP server host."),
+      viaChooser: z
+        .boolean()
+        .optional()
+        .describe(
+          "Click the target and catch the file chooser instead of setting input files directly. For custom upload buttons that open a picker.",
+        ),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ selector, ref, files, viaChooser, tabId, owner, force }) => {
+      let sel = "";
+      try {
+        sel = toSelector({ selector, ref });
+
+        // Validate every file exists on disk before touching the page.
+        const missing: string[] = [];
+        for (const f of files) {
+          try {
+            await fs.stat(f);
+          } catch {
+            missing.push(f);
+          }
+        }
+        if (missing.length > 0) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `File(s) not found on server: ${missing.join(", ")}`,
+              },
+            ],
+          };
+        }
+
+        const page = await mgr.getPage({ tabId, owner, force });
+
+        if (viaChooser) {
+          const [chooser] = await Promise.all([
+            page.waitForEvent("filechooser", { timeout: 10000 }),
+            page.locator(sel).click(),
+          ]);
+          await chooser.setFiles(files);
+        } else {
+          await page.locator(sel).setInputFiles(files, { timeout: 10000 });
+        }
+
+        await afterAction(page, env);
+
+        const mode = viaChooser ? "via chooser" : "direct";
+        const resolved = mgr.resolveTab({ tabId, owner, force });
+        const feedback = await actionFeedback(page, resolved);
+        const feedbackText = feedback ? `\n${feedback}` : "";
+        const dialogText = mgr.dialogNotice(resolved);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Uploaded ${files.length} file(s) to ${sel} (${mode}):\n  ${files.join("\n  ")}${feedbackText}${dialogText}`,
+            },
+          ],
+        };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          isError: true,
+          content: [{ type: "text", text: decorateRefError(error, sel) }],
+        };
+      }
+    },
+  });
+
+  // press_key -----------------------------------------------------------------
+  register({
+    name: "press_key",
+    title: "Press Key",
+    description: `Press a keyboard key or key combination. Target a specific element (focuses it first) or press at the page level. Supports all standard Playwright key names and combinations.
+
+Examples: "Enter", "Escape", "Control+A", "Shift+Tab", "ArrowDown", "PageDown", "Backspace", "Delete", "Tab", "F1", "Control+C".
+
+Errors: unknown key name, selector timeout.`,
+    toolset: "core",
+    inputSchema: {
+      ...tabTargetForce,
+      key: z
+        .string()
+        .describe("Playwright key or combo: Enter, Escape, Control+A, Shift+Tab, ArrowDown."),
+      selector: z
+        .string()
+        .optional()
+        .describe(
+          "CSS selector of the element to focus before pressing. Omit for page-level keypress.",
+        ),
+      ref: z
+        .string()
+        .optional()
+        .describe("Accessibility ref from snapshot (e.g. 'e5'). Use instead of selector."),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+    handler: async ({ key, selector, ref, tabId, owner, force }) => {
+      let sel: string | undefined;
+      try {
+        sel = selector || ref ? toSelector({ selector, ref }) : undefined;
+        const page = await mgr.getPage({ tabId, owner, force });
+
+        if (sel) {
+          await page.locator(sel).focus({ timeout: 5000 });
+        }
+
+        await page.keyboard.press(key);
+        await afterAction(page, env);
+
+        const target = sel ? ` on ${sel}` : "";
+        const resolved = mgr.resolveTab({ tabId, owner, force });
+        const feedback = await actionFeedback(page, resolved);
+        const feedbackText = feedback ? `\n${feedback}` : "";
+        const dialogText = mgr.dialogNotice(resolved);
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Pressed "${key}"${target}.${feedbackText}${dialogText}`,
+            },
+          ],
+        };
+      } catch (err) {
+        const error = err as Error;
+        const raw = error.message;
+        // Playwright "Unknown key" errors: "Unknown key: \"foo\""
+        if (/unknown key/i.test(raw)) {
+          const keyName = key.length > 30 ? `${key.slice(0, 30)}…` : key;
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `Unknown key "${keyName}". Examples: Enter, Escape, Control+A, Shift+Tab, ArrowDown, PageDown.`,
+              },
+            ],
+          };
+        }
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: sel ? decorateRefError(error, sel) : cleanErrorMessage(error),
             },
           ],
         };
