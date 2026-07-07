@@ -1,5 +1,6 @@
 import { describe, it, expect } from "bun:test";
 import {
+  captureSnapshot,
   diffSnapshots,
   truncateAtLine,
   clearSnapshot,
@@ -215,6 +216,47 @@ describe("diffSnapshots", () => {
   it("handles both empty", () => {
     expect(diffSnapshots("", "")).toBe("(no visible change)");
   });
+
+  // B1 regression: middle insertion must show + lines
+  it("shows '+' for a line inserted between two unchanged lines", () => {
+    const prev = `- heading "Title" [ref=e1]
+- link "B" [ref=e3]`;
+    const next = `- heading "Title" [ref=e1]
+- link "A" [ref=e2]
+- link "B" [ref=e3]`;
+
+    const result = diffSnapshots(prev, next);
+    expect(result).not.toBe("(no visible change)");
+    expect(result).toContain("+");
+    expect(result).toContain('"A"');
+  });
+
+  // B1 regression: middle deletion must show - lines
+  it("shows '-' for a line deleted between two unchanged lines", () => {
+    const prev = `- heading "Title" [ref=e1]
+- link "A" [ref=e2]
+- link "B" [ref=e3]`;
+    const next = `- heading "Title" [ref=e1]
+- link "B" [ref=e3]`;
+
+    const result = diffSnapshots(prev, next);
+    expect(result).not.toBe("(no visible change)");
+    expect(result).toContain("-");
+    expect(result).toContain('"A"');
+  });
+
+  // Truncation INCLUSIVE of notice (N2)
+  it("truncation respects maxChars inclusive of notice", () => {
+    // Build a diff result that's ~1000 chars
+    const lines = Array.from({ length: 50 }, (_, i) => `  - text "Item ${i}" [ref=e${i}]`);
+    const prev = lines.join("\n");
+    // Change every line so all are added
+    const next = "";
+    const result = diffSnapshots(prev, next, { maxChars: 300 });
+    // Total output must be ≤ maxChars
+    expect(result.length).toBeLessThanOrEqual(300);
+    expect(result).toContain("truncated");
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -265,5 +307,77 @@ describe("snapshot store", () => {
     expect(getStoredSnapshot(1)).toBeUndefined();
     expect(getStoredSnapshot(2)).toBeUndefined();
     expect(getStoredSnapshot(3)).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// captureSnapshot — with mocked page
+// ---------------------------------------------------------------------------
+describe("captureSnapshot", () => {
+  const fixture = `- heading "Welcome" [ref=e1]
+- textbox "Search" [ref=e2]
+- button "Go" [ref=e3]`;
+
+  it("returns snapshot text and generation counter", async () => {
+    const mockPage = {
+      locator: (_sel: string) => ({
+        ariaSnapshot: async (_opts?: unknown) => fixture,
+      }),
+    } as any;
+
+    clearAllSnapshots();
+    const result = await captureSnapshot(mockPage, 1);
+    expect(result.text).toBe(fixture);
+    expect(result.generation).toBe(1);
+  });
+
+  it("generation counter increments across captures", async () => {
+    const mockPage = {
+      locator: (_sel: string) => ({
+        ariaSnapshot: async (_opts?: unknown) => fixture,
+      }),
+    } as any;
+
+    clearAllSnapshots();
+    const r1 = await captureSnapshot(mockPage, 1);
+    expect(r1.generation).toBe(1);
+    const r2 = await captureSnapshot(mockPage, 1);
+    expect(r2.generation).toBe(2);
+    const r3 = await captureSnapshot(mockPage, 2); // different tab
+    expect(r3.generation).toBe(1);
+  });
+
+  it("truncates at line boundary and appends notice", async () => {
+    const long = Array.from({ length: 10 }, (_, i) => `- text "Line ${i}" [ref=e${i}]`).join("\n");
+    const mockPage = {
+      locator: (_sel: string) => ({
+        ariaSnapshot: async (_opts?: unknown) => long,
+      }),
+    } as any;
+
+    clearAllSnapshots();
+    // maxChars=200: small enough to truncate, large enough for the notice to fit
+    const result = await captureSnapshot(mockPage, 1, { maxChars: 200 });
+    expect(result.text).toContain("more lines");
+    expect(result.text).toContain("selector to scope");
+    // First few lines should be present
+    expect(result.text).toContain("Line 0");
+    // Total must be ≤ maxChars (notice included)
+    expect(result.text.length).toBeLessThanOrEqual(200);
+  });
+
+  it("hard-clips when maxChars is too small for the notice", async () => {
+    const long = Array.from({ length: 20 }, (_, i) => `- text "Line ${i}" [ref=e${i}]`).join("\n");
+    const mockPage = {
+      locator: (_sel: string) => ({
+        ariaSnapshot: async (_opts?: unknown) => long,
+      }),
+    } as any;
+
+    clearAllSnapshots();
+    // maxChars=20: notice alone is ~50 chars, so it won't fit — hard clip wins
+    const result = await captureSnapshot(mockPage, 1, { maxChars: 20 });
+    // Must not exceed maxChars
+    expect(result.text.length).toBeLessThanOrEqual(20);
   });
 });

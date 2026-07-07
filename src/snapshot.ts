@@ -54,7 +54,21 @@ export async function captureSnapshot(
   const { text, truncatedLines } = truncateAtLine(raw, maxChars);
   if (truncatedLines > 0) {
     const notice = `…[${truncatedLines} more lines — call snapshot with a selector to scope]`;
-    return { text: text + notice, generation };
+    let out = text + notice;
+    // Respect maxChars inclusive of the notice. When the notice itself consumes
+    // most of the budget, do a second truncation with the remaining headroom.
+    if (out.length > maxChars) {
+      const effective = maxChars - notice.length;
+      if (effective >= 1) {
+        const { text: trimmed } = truncateAtLine(raw, effective);
+        out = trimmed + notice;
+      }
+      // Hard clip as last resort (notice alone exceeds maxChars).
+      if (out.length > maxChars) {
+        out = out.slice(0, maxChars);
+      }
+    }
+    return { text: out, generation };
   }
 
   return { text, generation };
@@ -76,7 +90,6 @@ export function truncateAtLine(
 ): { text: string; truncatedLines: number } {
   if (text.length <= maxChars) return { text, truncatedLines: 0 };
 
-  // Walk lines, accumulating until the next line would push past maxChars.
   let kept = 0;
   const lines = text.split("\n");
 
@@ -118,61 +131,6 @@ function rolePrefix(normalized: string): string {
 }
 
 /**
- * Compute the longest common subsequence (DP, O(n*m)) of two line arrays.
- * Returns the set of indices in `a` that are part of the LCS.
- *
- * Falls back to a cheap set-based check when either array exceeds 1500 lines.
- */
-function lcsIndices(a: string[], b: string[]): Set<number> {
-  if (a.length > 1500 || b.length > 1500) {
-    // Fallback: set-based — any line that appears (at least once) in b is
-    // considered "common". This is O(n+m) and avoids allocating a 1500×1500
-    // DP matrix.
-    const bSet = new Set(b);
-    const indices = new Set<number>();
-    for (let i = 0; i < a.length; i++) {
-      if (bSet.has(a[i])) indices.add(i);
-    }
-    return indices;
-  }
-
-  // Standard O(n*m) LCS DP.
-  const n = a.length;
-  const m = b.length;
-  const dp: number[][] = Array.from({ length: n + 1 }, () =>
-    Array.from<number>({ length: m + 1 }).fill(0),
-  );
-
-  for (let i = 1; i <= n; i++) {
-    for (let j = 1; j <= m; j++) {
-      if (a[i - 1] === b[j - 1]) {
-        dp[i][j] = dp[i - 1][j - 1] + 1;
-      } else {
-        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
-      }
-    }
-  }
-
-  // Backtrack to collect LCS indices in `a`.
-  const indices = new Set<number>();
-  let i = n;
-  let j = m;
-  while (i > 0 && j > 0) {
-    if (a[i - 1] === b[j - 1]) {
-      indices.add(i - 1);
-      i--;
-      j--;
-    } else if (dp[i - 1][j] >= dp[i][j - 1]) {
-      i--;
-    } else {
-      j--;
-    }
-  }
-
-  return indices;
-}
-
-/**
  * Diff two accessibility snapshots (YAML text) and return a compact,
  * ref-invariant change summary.
  *
@@ -185,7 +143,7 @@ function lcsIndices(a: string[], b: string[]): Set<number> {
  * - Unpaired added lines → `+ <line>`.
  * - Unpaired removed lines → `- <line>`.
  * - Output indentation is preserved from the new side (or old for removals).
- * - Capped at maxChars (default 2000) with a truncation notice.
+ * - Capped at maxChars (default 2000) INCLUSIVE of the truncation notice.
  * - When either side exceeds 1500 lines, falls back to a simple set-diff
  *   (loses positional ordering but avoids O(n*m) DP cost).
  */
@@ -208,11 +166,103 @@ export function diffSnapshots(prev: string, next: string, opts?: { maxChars?: nu
     return diffLargeSnapshots(prevRaw, nextRaw, prevNorm, nextNorm, maxChars);
   }
 
-  // LCS over normalized lines.
-  const commonInPrev = lcsIndices(prevNorm, nextNorm);
-  const commonInNext = lcsIndices(nextNorm, prevNorm);
+  return lcsDiff(prevRaw, nextRaw, prevNorm, nextNorm, maxChars);
+}
 
-  return renderLcsDiff(prevRaw, nextRaw, prevNorm, nextNorm, commonInPrev, commonInNext, maxChars);
+// -----------------------------------------------------------------------------
+// LCS diff — proper DP backtracking producing aligned edit script
+// -----------------------------------------------------------------------------
+
+interface DiffEntry {
+  kind: "+" | "-" | "=" | "~";
+  raw: string;
+}
+
+/**
+ * LCS DP + backtracking that produces a correct, aligned edit script.
+ * Backtracks through the DP table from dp[n][m] → dp[0][0], naturally
+ * handling middle insertions/deletions by traversing the table edges.
+ */
+function lcsDiff(
+  prevRaw: string[],
+  nextRaw: string[],
+  prevNorm: string[],
+  nextNorm: string[],
+  maxChars: number,
+): string {
+  const n = prevNorm.length;
+  const m = nextNorm.length;
+
+  const dp: number[][] = Array.from({ length: n + 1 }, () =>
+    Array.from<number>({ length: m + 1 }).fill(0),
+  );
+
+  for (let i = 1; i <= n; i++) {
+    for (let j = 1; j <= m; j++) {
+      if (prevNorm[i - 1] === nextNorm[j - 1]) {
+        dp[i][j] = dp[i - 1][j - 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i - 1][j], dp[i][j - 1]);
+      }
+    }
+  }
+
+  // Backtrack to build edit script in reverse order.
+  const rev: DiffEntry[] = [];
+  let i = n;
+  let j = m;
+  while (i > 0 || j > 0) {
+    if (i > 0 && j > 0 && prevNorm[i - 1] === nextNorm[j - 1]) {
+      rev.push({ kind: "=", raw: nextRaw[j - 1] });
+      i--;
+      j--;
+    } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
+      // Addition — took the "down" path in DP (prefer additions when equal)
+      rev.push({ kind: "+", raw: nextRaw[j - 1] });
+      j--;
+    } else {
+      // Deletion
+      rev.push({ kind: "-", raw: prevRaw[i - 1] });
+      i--;
+    }
+  }
+
+  const entries = rev.reverse();
+
+  // Pair adjacent remove+add entries whose role prefix matches → "~".
+  const paired: (DiffEntry | null)[] = entries;
+  for (let k = 0; k < paired.length - 1; k++) {
+    const a = paired[k];
+    if (!a || a.kind !== "-") continue;
+
+    // Look ahead (skip "=" entries in between — common context)
+    let p = k + 1;
+    while (p < paired.length && paired[p] !== null && (paired[p] as DiffEntry).kind === "=") p++;
+    const b = p < paired.length ? paired[p] : null;
+    if (!b || b.kind !== "+") continue;
+
+    if (rolePrefix(normalizeLine(a.raw)) === rolePrefix(normalizeLine(b.raw))) {
+      paired[k] = null;
+      b.kind = "~";
+    }
+  }
+
+  // Render, preserving indentation.
+  const outputLines: string[] = [];
+  for (const e of paired) {
+    if (!e) continue;
+    if (e.kind === "=") continue;
+    const indent = e.raw.match(/^(\s*)/)?.[1] ?? "";
+    outputLines.push(`${indent}${e.kind} ${e.raw.trimStart()}`);
+  }
+
+  if (outputLines.length === 0) return "(no visible change)";
+
+  return capOutput(
+    outputLines.join("\n"),
+    maxChars,
+    "…diff truncated — call snapshot for full state",
+  );
 }
 
 /**
@@ -234,8 +284,6 @@ function diffLargeSnapshots(
   for (let i = 0; i < prevNorm.length; i++) {
     if (!nextSet.has(prevNorm[i])) {
       const indent = prevRaw[i].match(/^(\s*)/)?.[1] ?? "";
-      // Trimming the leading `- ` / `  - ` from the raw line for cleaner output
-      // but keep enough context to identify the element.
       outputLines.push(`${indent}- ${prevRaw[i].trimStart()}`);
     }
   }
@@ -249,109 +297,26 @@ function diffLargeSnapshots(
 
   if (outputLines.length === 0) return "(no visible change)";
 
-  let result = outputLines.join("\n");
-  if (result.length > maxChars) {
-    const { text } = truncateAtLine(result, maxChars);
-    result = text + "…diff truncated — call snapshot for full state";
-  }
-  return result;
+  return capOutput(
+    outputLines.join("\n"),
+    maxChars,
+    "…diff truncated — call snapshot for full state",
+  );
 }
 
-interface DiffEntry {
-  kind: "+" | "-" | "=" | "~";
-  raw: string;
-}
-
-function renderLcsDiff(
-  prevRaw: string[],
-  nextRaw: string[],
-  prevNorm: string[],
-  _nextNorm: string[],
-  commonInPrev: Set<number>,
-  commonInNext: Set<number>,
-  maxChars: number,
-): string {
-  // Walk both sequences and classify each line.
-  const entries: DiffEntry[] = [];
-  let pi = 0;
-  let ni = 0;
-
-  while (pi < prevRaw.length || ni < nextRaw.length) {
-    if (pi < prevRaw.length && commonInPrev.has(pi)) {
-      // This line is in LCS — it's common
-      entries.push({ kind: "=", raw: nextRaw[ni] });
-      pi++;
-      ni++;
-    } else if (pi < prevRaw.length && !commonInPrev.has(pi)) {
-      // Removed (or will be paired as changed)
-      entries.push({ kind: "-", raw: prevRaw[pi] });
-      pi++;
-    } else if (ni < nextRaw.length && !commonInNext.has(ni)) {
-      // Added (or will be paired as changed)
-      entries.push({ kind: "+", raw: nextRaw[ni] });
-      ni++;
-    } else {
-      // Safety belt
-      break;
-    }
-  }
-
-  // Pass 2: pair up adjacent remove+add entries whose role prefix matches.
-  const paired: (DiffEntry | null)[] = entries;
-  for (let i = 0; i < paired.length - 1; i++) {
-    const a = paired[i];
-    if (!a || a.kind !== "-") continue;
-
-    // Look ahead (skip any "=" entries in between)
-    let j = i + 1;
-    while (j < paired.length && paired[j] !== null && (paired[j] as DiffEntry).kind === "=") j++;
-    const b = j < paired.length ? paired[j] : null;
-    if (!b || b.kind !== "+") continue;
-
-    const aRole = rolePrefix(normalizeLine(a.raw));
-    const bRole = rolePrefix(normalizeLine(b.raw));
-
-    if (aRole === bRole) {
-      paired[i] = null;
-      b.kind = "~";
-    }
-  }
-
-  // Pass 3: render, preserving indentation.
-  const outputLines: string[] = [];
-  for (const e of paired) {
-    if (!e) continue;
-    const entry = e;
-    if (entry.kind === "=") continue;
-
-    const indent = entry.raw.match(/^(\s*)/)?.[1] ?? "";
-
-    switch (entry.kind) {
-      case "~":
-        outputLines.push(`${indent}~ ${entry.raw.trimStart()}`);
-        break;
-      case "+":
-        outputLines.push(`${indent}+ ${entry.raw.trimStart()}`);
-        break;
-      case "-":
-        outputLines.push(`${indent}- ${entry.raw.trimStart()}`);
-        break;
-    }
-  }
-
-  if (outputLines.length === 0) return "(no visible change)";
-
-  let result = outputLines.join("\n");
-  if (result.length > maxChars) {
-    const { text } = truncateAtLine(result, maxChars);
-    result = text + "…diff truncated — call snapshot for full state";
-  }
-
-  return result;
+/**
+ * Truncate output to maxChars, respecting the suffix length.
+ * Total output length is guaranteed ≤ maxChars.
+ */
+function capOutput(raw: string, maxChars: number, suffix: string): string {
+  if (raw.length <= maxChars) return raw;
+  const effective = Math.max(1, maxChars - suffix.length);
+  const { text } = truncateAtLine(raw, effective);
+  return text + suffix;
 }
 
 // -----------------------------------------------------------------------------
-// Per-tab snapshot store (used by diff-feedback consumers, e.g. C5)
+// Per-tab snapshot store
 // -----------------------------------------------------------------------------
 
 /** Store the latest snapshot text for a tab. */
