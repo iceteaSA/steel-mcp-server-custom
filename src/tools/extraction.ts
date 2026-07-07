@@ -17,6 +17,7 @@ import {
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
 import { tabTarget, tabTargetForce } from "./shared.js";
+import { captureSnapshot, storeSnapshot } from "../snapshot.js";
 
 // Singleton — configured once, reused across calls.
 const turndown = new TurndownService({
@@ -914,6 +915,50 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
         return {
           isError: true,
           content: [{ type: "text", text: cleanErrorMessage(err as Error) }],
+        };
+      }
+    },
+  });
+
+  // snapshot -------------------------------------------------------------------
+  register({
+    name: "snapshot",
+    title: "Page Snapshot",
+    description: `See the page as an accessibility tree with stable element refs ([ref=eN]). THE preferred first look at any page: ~10x cheaper than get_page_text for understanding structure, and refs feed click/fill/get_attrs/extract directly (pass ref instead of selector). Refs expire on navigation or page mutation — take a fresh snapshot after either.
+
+CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
+    toolset: "core",
+    inputSchema: {
+      selector: z
+        .string()
+        .optional()
+        .describe("Scope to a subtree (CSS selector). Default: whole page."),
+      maxChars: z
+        .number()
+        .optional()
+        .describe(
+          "Cap output (default 8000). Over-budget output is truncated at a line boundary — scope with selector instead of raising this.",
+        ),
+      ...tabTarget,
+    },
+    annotations: {
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: true,
+    },
+    handler: async ({ selector, maxChars, tabId, owner }) => {
+      try {
+        const resolvedTabId = mgr.resolveTab({ tabId, owner });
+        const page = await mgr.getPage({ tabId, owner });
+        const result = await captureSnapshot(page, resolvedTabId, { selector, maxChars });
+        storeSnapshot(resolvedTabId, result.text);
+        return { content: [{ type: "text", text: result.text }] };
+      } catch (err) {
+        const error = err as Error;
+        return {
+          isError: true,
+          content: [{ type: "text", text: cleanErrorMessage(error) }],
         };
       }
     },
