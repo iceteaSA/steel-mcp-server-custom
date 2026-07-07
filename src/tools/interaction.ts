@@ -1,6 +1,6 @@
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
-import { afterAction } from "../utils.js";
+import { afterAction, actionFeedback } from "../utils.js";
 import {
   buildRadioSelector,
   cleanErrorMessage,
@@ -83,6 +83,14 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         await page.click(sel, { timeout });
         await afterAction(page, env);
 
+        // Snapshot-diff feedback (best-effort — doesn't affect result on failure).
+        const afterUrl = page.url();
+        const navigated = afterUrl !== beforeUrl;
+        const feedback = await actionFeedback(page, mgr.resolveTab({ tabId, owner, force }), {
+          navigated,
+        });
+        const feedbackText = feedback ? `\n${feedback}` : "";
+
         let waitMsg = "";
         if (waitFor) {
           try {
@@ -105,10 +113,10 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           }
         }
 
-        const afterUrl = page.url();
-        const navigated = afterUrl !== beforeUrl;
         const navMsg = navigated ? `\nNavigated to: ${afterUrl}` : "";
-        return { content: [{ type: "text", text: `Clicked: ${sel}${navMsg}${waitMsg}` }] };
+        return {
+          content: [{ type: "text", text: `Clicked: ${sel}${navMsg}${waitMsg}${feedbackText}` }],
+        };
       } catch (err) {
         const error = err as Error;
         return {
@@ -277,6 +285,9 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         const filled: Array<{ selector: string; kind: string }> = [];
         const skipped: string[] = [];
 
+        // Capture URL before any field mutation for navigation detection.
+        const urlBefore = page.url();
+
         for (const f of fields) {
           try {
             // f.kind takes priority; otherwise use batched-detection result.
@@ -337,11 +348,18 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
             };
           }
         }
-        const beforeUrl = page.url();
         if (submitSelector) {
           await page.click(submitSelector, { timeout });
         }
         await afterAction(page, env);
+
+        const urlAfter = page.url();
+        const navigated = urlAfter !== urlBefore;
+        const feedback = await actionFeedback(page, mgr.resolveTab({ tabId, owner, force }), {
+          navigated,
+        });
+        const feedbackText = feedback ? `\n${feedback}` : "";
+
         const lines = [`Filled ${filled.length}/${fields.length} field(s).`];
         if (filled.length) {
           const byKind = filled.map((x) => `${x.selector} [${x.kind}]`).join(", ");
@@ -349,10 +367,10 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         }
         if (skipped.length) lines.push(`  skipped: ${skipped.join(", ")}`);
         if (submitSelector) {
-          const afterUrl = page.url();
           lines.push(`Clicked submit: ${submitSelector}`);
-          if (afterUrl !== beforeUrl) lines.push(`Navigated to: ${afterUrl}`);
+          if (urlAfter !== urlBefore) lines.push(`Navigated to: ${urlAfter}`);
         }
+        if (feedbackText) lines.push(feedbackText.trimStart());
         return { content: [{ type: "text", text: lines.join("\n") }] };
       } catch (err) {
         const error = err as Error;
@@ -494,6 +512,10 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
         }
 
         await afterAction(page, env);
+        // Snapshot feedback: silent when readAfterScroll already reports page text.
+        const scrollFeedback = await actionFeedback(page, mgr.resolveTab({ tabId, owner, force }), {
+          silent: readAfterScroll,
+        });
         const actual = Math.abs(result.after - result.before);
         const noOp = actual === 0;
         const suffix = noOp
@@ -533,11 +555,12 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
           }
         }
 
+        const feedbackSuffix = scrollFeedback ? `\n${scrollFeedback}` : "";
         return {
           content: [
             {
               type: "text",
-              text: `Scrolled ${direction} by ${pixels} pixels${suffix}.${posInfo}${pageText}`,
+              text: `Scrolled ${direction} by ${pixels} pixels${suffix}.${posInfo}${pageText}${feedbackSuffix}`,
             },
           ],
         };

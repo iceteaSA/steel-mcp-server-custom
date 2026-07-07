@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { Page } from "playwright";
 import type { BrowserManager, Env } from "../manager.js";
-import { afterAction, sleep } from "../utils.js";
+import { afterAction, actionFeedback, sleep } from "../utils.js";
 import {
   CAPTCHA_POLL_INTERVAL_MS,
   CAPTCHA_WAIT_TOTAL_MS,
@@ -217,12 +217,25 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
           }
         }
 
+        // Update snapshot baseline (silent when readPage already reports content).
+        const navFeedback = await actionFeedback(page, mgr.resolveTab({ tabId, owner, force }), {
+          navigated: true,
+          silent: readPage,
+        });
+
         const warningPrefix = priorWarning ? `[WARNING: ${priorWarning}]\n` : "";
         return {
           content: [
             {
               type: "text",
-              text: warningPrefix + navLine + titleLine + waitMsg + mediaNote + pageText,
+              text:
+                warningPrefix +
+                navLine +
+                titleLine +
+                waitMsg +
+                mediaNote +
+                pageText +
+                (navFeedback ? `\n${navFeedback}` : ""),
             },
           ],
         };
@@ -267,6 +280,13 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         }
         await afterAction(page, env);
         const afterUrl = page.url();
+
+        // Snapshot feedback — navigation always changes the page.
+        const histFeedback = await actionFeedback(page, mgr.resolveTab({ tabId, owner, force }), {
+          navigated: true,
+        });
+        const feedbackText = histFeedback ? `\n${histFeedback}` : "";
+
         const verb =
           action === "back" ? "Went back" : action === "forward" ? "Went forward" : "Reloaded";
         const noOp =
@@ -280,7 +300,10 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         const titlePart = pageTitle ? `\nTitle: ${pageTitle}` : "";
         return {
           content: [
-            { type: "text", text: `${verb}${suffix}.\nCurrent URL: ${afterUrl}${titlePart}` },
+            {
+              type: "text",
+              text: `${verb}${suffix}.\nCurrent URL: ${afterUrl}${titlePart}${feedbackText}`,
+            },
           ],
         };
       } catch (err) {

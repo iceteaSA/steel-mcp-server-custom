@@ -9,6 +9,7 @@ import path from "path";
 import type { Page } from "playwright";
 import type { BrowserManager, Env } from "./manager.js";
 import { waitForSettled } from "./settle.js";
+import { captureSnapshot, storeSnapshot, getStoredSnapshot, diffSnapshots } from "./snapshot.js";
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -61,4 +62,54 @@ export async function writeToFile(
   await fs.mkdir(path.dirname(filePath), { recursive: true });
   await fs.writeFile(filePath, data);
   return filePath;
+}
+
+// -----------------------------------------------------------------------------
+// actionFeedback — snapshot-diff feedback on action tools
+// -----------------------------------------------------------------------------
+
+/**
+ * Capture a post-action accessibility snapshot and return agent-facing feedback:
+ *   - navigated: baseline snapshot (max 3K chars)
+ *   - same page with prior snapshot: diff (max 2K chars) or no-change marker
+ *   - same page with no prior snapshot: "" (no feedback — agent never took a snapshot)
+ *
+ * `silent` captures + stores but always returns "" (use when the tool already
+ * reports page content, e.g. readPage / readAfterScroll).
+ *
+ * Best-effort: never throws — returns "" on any error.
+ */
+export async function actionFeedback(
+  page: Page,
+  tabId: number,
+  opts?: { navigated?: boolean; silent?: boolean },
+): Promise<string> {
+  try {
+    if (opts?.navigated) {
+      const snap = await captureSnapshot(page, tabId, { maxChars: 3000 });
+      storeSnapshot(tabId, snap.text);
+      if (opts?.silent) return "";
+      return `\n--- new page (baseline snapshot) ---\n${snap.text}`;
+    }
+
+    const stored = getStoredSnapshot(tabId);
+    if (!stored) {
+      // No stored snapshot — seed the store silently, no feedback.
+      const snap = await captureSnapshot(page, tabId, { maxChars: 8000 });
+      storeSnapshot(tabId, snap.text);
+      return "";
+    }
+
+    // Same page, has prior snapshot — capture fresh, diff, store new.
+    const fresh = await captureSnapshot(page, tabId, { maxChars: 8000 });
+    const diff = diffSnapshots(stored, fresh.text, { maxChars: 2000 });
+    storeSnapshot(tabId, fresh.text);
+
+    if (diff === "(no visible change)") {
+      return "\n(no visible change)";
+    }
+    return `\n--- page changes ---\n${diff}`;
+  } catch {
+    return ""; // best-effort — feedback never fails the action
+  }
 }

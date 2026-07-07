@@ -125,3 +125,81 @@ describe("waitForSettled", () => {
     expect(waitFnCalled()).toBe(false);
   });
 });
+
+// --------------------------------------------------------------------------- //
+// actionFeedback — unit tests with mocked page + real snapshot store
+// --------------------------------------------------------------------------- //
+
+import { actionFeedback } from "../utils.js";
+import { storeSnapshot, getStoredSnapshot, clearAllSnapshots } from "../snapshot.js";
+
+const SNAP_FIXTURE = `- heading "Welcome" [ref=e1]
+- textbox "Search" [ref=e2]
+- button "Go" [ref=e3]`;
+
+const SNAP_CHANGED = `- heading "Welcome" [ref=e4]
+- textbox "Search": hello [ref=e5]
+- button "Go" [ref=e6]`;
+
+function ariaPage(snapshot: string) {
+  return {
+    locator: (_sel: string) => ({
+      ariaSnapshot: async (_opts?: unknown) => snapshot,
+    }),
+  } as any;
+}
+
+describe("actionFeedback", () => {
+  it("returns empty string when no stored snapshot exists (seeds store silently)", async () => {
+    clearAllSnapshots();
+    const result = await actionFeedback(ariaPage(SNAP_FIXTURE), 1);
+    expect(result).toBe("");
+    // Store was seeded
+    expect(getStoredSnapshot(1)).toBeTruthy();
+  });
+
+  it("returns no-change marker when stored and fresh snapshots are identical", async () => {
+    clearAllSnapshots();
+    storeSnapshot(1, SNAP_FIXTURE);
+    const result = await actionFeedback(ariaPage(SNAP_FIXTURE), 1);
+    expect(result).toBe("\n(no visible change)");
+  });
+
+  it("returns page changes diff when snapshots differ", async () => {
+    clearAllSnapshots();
+    storeSnapshot(1, SNAP_FIXTURE);
+    const result = await actionFeedback(ariaPage(SNAP_CHANGED), 1);
+    expect(result).toContain("--- page changes ---");
+    // The store is updated to the fresh snapshot
+    expect(getStoredSnapshot(1)).toBe(SNAP_CHANGED);
+  });
+
+  it("returns baseline header when navigated=true", async () => {
+    clearAllSnapshots();
+    const result = await actionFeedback(ariaPage(SNAP_FIXTURE), 1, { navigated: true });
+    expect(result).toContain("--- new page (baseline snapshot) ---");
+    expect(result).toContain("Welcome");
+  });
+
+  it("returns empty when navigated=true and silent=true", async () => {
+    clearAllSnapshots();
+    const result = await actionFeedback(ariaPage(SNAP_FIXTURE), 1, {
+      navigated: true,
+      silent: true,
+    });
+    expect(result).toBe("");
+    // Store was still seeded
+    expect(getStoredSnapshot(1)).toBeTruthy();
+  });
+
+  it("returns empty string on error (best-effort)", async () => {
+    clearAllSnapshots();
+    const brokenPage = {
+      locator: () => {
+        throw new Error("broken");
+      },
+    } as any;
+    const result = await actionFeedback(brokenPage, 1, { navigated: true });
+    expect(result).toBe("");
+  });
+});
