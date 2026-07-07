@@ -34,12 +34,14 @@ const snapshotStore = new Map<number, string>();
  *
  * @param page  Playwright Page
  * @param tabId Numeric tab identifier (used for generation counter + store)
- * @param opts  Optional selector (default: "body") and maxChars (default: 8000)
+ * @param opts  Optional selector (default: "body"), maxChars (default: 8000),
+ *              and noTruncate (default: false — when true, returns the raw
+ *              untruncated text for use as an internal store baseline).
  */
 export async function captureSnapshot(
   page: Page,
   tabId: number,
-  opts?: { selector?: string; maxChars?: number },
+  opts?: { selector?: string; maxChars?: number; noTruncate?: boolean },
 ): Promise<SnapshotResult> {
   const selector = opts?.selector ?? "body";
   const maxChars = opts?.maxChars ?? 8000;
@@ -50,6 +52,9 @@ export async function captureSnapshot(
 
   const generation = (genCounter.get(tabId) ?? 0) + 1;
   genCounter.set(tabId, generation);
+
+  // Skip truncation when caller wants the full tree for internal storage.
+  if (opts?.noTruncate) return { text: raw, generation };
 
   const { text, truncatedLines } = truncateAtLine(raw, maxChars);
   if (truncatedLines > 0) {

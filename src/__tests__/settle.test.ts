@@ -150,12 +150,13 @@ function ariaPage(snapshot: string) {
 }
 
 describe("actionFeedback", () => {
-  it("returns empty string when no stored snapshot exists (seeds store silently)", async () => {
+  // B1: no-stored returns "" WITHOUT capturing — no spurious store seeding.
+  it("returns empty string when no stored snapshot exists (does NOT seed store)", async () => {
     clearAllSnapshots();
     const result = await actionFeedback(ariaPage(SNAP_FIXTURE), 1);
     expect(result).toBe("");
-    // Store was seeded
-    expect(getStoredSnapshot(1)).toBeTruthy();
+    // Store must NOT be seeded — agent hasn't opted in.
+    expect(getStoredSnapshot(1)).toBeUndefined();
   });
 
   it("returns no-change marker when stored and fresh snapshots are identical", async () => {
@@ -170,26 +171,53 @@ describe("actionFeedback", () => {
     storeSnapshot(1, SNAP_FIXTURE);
     const result = await actionFeedback(ariaPage(SNAP_CHANGED), 1);
     expect(result).toContain("--- page changes ---");
-    // The store is updated to the fresh snapshot
+    // The store is updated to the fresh (full) snapshot
     expect(getStoredSnapshot(1)).toBe(SNAP_CHANGED);
   });
 
-  it("returns baseline header when navigated=true", async () => {
+  // B2: navigated stores the FULL tree (untruncated) but displays ≤3K chars.
+  it("navigated stores full tree and displays truncated (no phantom diffs)", async () => {
     clearAllSnapshots();
-    const result = await actionFeedback(ariaPage(SNAP_FIXTURE), 1, { navigated: true });
+    // Build a long snapshot (>3K chars for display, <15K for realistic store).
+    const lines: string[] = [];
+    for (let i = 0; i < 120; i++) {
+      lines.push(`- text "This is a reasonably long line number ${i}" [ref=e${i}]`);
+    }
+    const longSnap = lines.join("\n");
+    const page = ariaPage(longSnap);
+
+    const result = await actionFeedback(page, 1, { navigated: true });
     expect(result).toContain("--- new page (baseline snapshot) ---");
-    expect(result).toContain("Welcome");
+
+    // Display must be ≤3000 chars (truncateAtLine may keep slightly over if
+    // one line exceeds the cap, but we check it's much shorter than full).
+    const displayText = result.replace("--- new page (baseline snapshot) ---\n", "");
+    expect(displayText.length).toBeLessThan(longSnap.length);
+
+    // Stored baseline must be the full untruncated tree.
+    const stored = getStoredSnapshot(1);
+    expect(stored).toBe(longSnap);
   });
 
-  it("returns empty when navigated=true and silent=true", async () => {
+  it("returns empty when navigated=true and silent=true (store still seeded)", async () => {
     clearAllSnapshots();
     const result = await actionFeedback(ariaPage(SNAP_FIXTURE), 1, {
       navigated: true,
       silent: true,
     });
     expect(result).toBe("");
-    // Store was still seeded
-    expect(getStoredSnapshot(1)).toBeTruthy();
+    // Store was still seeded (full tree for future diffs).
+    expect(getStoredSnapshot(1)).toBe(SNAP_FIXTURE);
+  });
+
+  // S5: >1500-line stored snapshot triggers early bail (no capture, no diff).
+  it("returns empty when stored snapshot exceeds 1500 lines (early bail)", async () => {
+    clearAllSnapshots();
+    const hugeLines = Array.from({ length: 1501 }, (_, i) => `- text "Line ${i}" [ref=e${i}]`);
+    storeSnapshot(1, hugeLines.join("\n"));
+
+    const result = await actionFeedback(ariaPage(SNAP_FIXTURE), 1);
+    expect(result).toBe("");
   });
 
   it("returns empty string on error (best-effort)", async () => {

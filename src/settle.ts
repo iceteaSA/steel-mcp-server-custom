@@ -40,7 +40,13 @@ export const SETTLE_INIT_SCRIPT = `(() => {
   if (_fetch) {
     window.fetch = function sf() {
       state.inflight++;
-      return _fetch.apply(this, arguments).finally(function fc() { state.inflight--; });
+      var p;
+      // Native fetch can throw synchronously (e.g. invalid URL scheme);
+      // catch + decrement so a poisoned inflight doesn't stall settle.
+      try { p = _fetch.apply(this, arguments); } catch (e) { state.inflight--; throw e; }
+      if (p && typeof p.finally === 'function') return p.finally(function fc() { state.inflight--; });
+      state.inflight--;
+      return p;
     };
   }
 
@@ -49,7 +55,9 @@ export const SETTLE_INIT_SCRIPT = `(() => {
   XMLHttpRequest.prototype.send = function ss() {
     state.inflight++;
     this.addEventListener('loadend', function se() { state.inflight--; }, { once: true });
-    return _send.apply(this, arguments);
+    // Native send throws synchronously for invalid state (e.g. send before
+    // open, or double-send).  Decrement on throw so inflight isn't leaked.
+    try { return _send.apply(this, arguments); } catch (e) { state.inflight--; throw e; }
   };
 
   // -- MutationObserver --

@@ -281,9 +281,11 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         await afterAction(page, env);
         const afterUrl = page.url();
 
-        // Snapshot feedback — navigation always changes the page.
+        // Snapshot feedback — compute navigated from actual URL comparison.
+        // Reload is always a navigation even if the URL stays the same
+        // (content may have changed), and no-ops report navigated:false.
         const histFeedback = await actionFeedback(page, mgr.resolveTab({ tabId, owner, force }), {
-          navigated: true,
+          navigated: afterUrl !== beforeUrl || action === "reload",
         });
         const feedbackText = histFeedback ? `\n${histFeedback}` : "";
 
