@@ -1085,7 +1085,11 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
           result.text += `\n--- frames ---\n${list}`;
         }
 
-        storeSnapshot(resolvedTabId, result.text);
+        // Only store main-page snapshots; frame-scoped snapshots would corrupt
+        // the per-tab baseline that actionFeedback diffs against.
+        if (frame === undefined) {
+          storeSnapshot(resolvedTabId, result.text);
+        }
         return { content: [{ type: "text", text: result.text }] };
       } catch (err) {
         const error = err as Error;
