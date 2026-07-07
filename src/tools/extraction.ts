@@ -2,6 +2,7 @@ import { z } from "zod";
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
+import { Impit } from "impit";
 import type { BrowserManager, Env } from "../manager.js";
 import { globalWait, withBackgroundTab, writeToFile } from "../utils.js";
 import {
@@ -11,6 +12,7 @@ import {
   detectErrorPage,
   extractPageContent,
   findTitle,
+  isSpaShell,
   pickPrimaryLink,
   validateExpression,
   type Link,
@@ -32,6 +34,78 @@ const turndown = new TurndownService({
   codeBlockStyle: "fenced",
   bulletListMarker: "-",
 });
+
+/**
+ * Pure extraction pipeline shared by the HTTP fast-path and the browser
+ * path. Runs Readability on the parsed linkedom document, then falls back
+ * to extractPageContent if Readability returned nothing.
+ */
+function extractFromHtml(
+  html: string,
+  titleHint: string,
+  extractContent: boolean,
+): { text: string; title: string } {
+  const { document: dom } = parseHTML(html);
+  let text = "";
+  let articleTitle = "";
+  if (extractContent) {
+    const reader = new Readability(dom as any);
+    const article = reader.parse();
+    if (article) {
+      articleTitle = article.title ?? "";
+      text = (article.textContent ?? "")
+        .replace(/[^\S\n]+/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim();
+      if (articleTitle && text) text = `# ${articleTitle}\n\n${text}`;
+    }
+  }
+  if (!text) {
+    const result = extractPageContent({ selector: null, mode: "innerText" }, dom as any);
+    text = (result.text ?? "")
+      .replace(/[^\S\n]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+  const domTitle = (dom as any)?.querySelector?.("title")?.textContent ?? "";
+  const title = (titleHint || domTitle || articleTitle).trim();
+  return { text, title };
+}
+
+/**
+ * HTTP fast-path using impit's TLS fingerprint impersonation. No JS, no
+ * cookies — designed for server-rendered / static HTML where it's ~10x
+ * faster than spinning a browser tab.
+ *
+ * The `client` param is injectable for unit tests; production callers omit
+ * it and a real Impit client is constructed. Returns a `path: "http"`
+ * result with the extracted text plus an `escalated` flag the caller
+ * checks to decide whether to retry in a real browser.
+ */
+export interface FetchResult {
+  url: string;
+  title: string;
+  text: string;
+  path: "http" | "browser";
+  escalated?: boolean;
+  status?: number;
+}
+
+export async function fetchHttp(
+  url: string,
+  opts: { client?: any; timeout?: number; extractContent?: boolean } = {},
+): Promise<FetchResult> {
+  const extractContent = opts.extractContent ?? true;
+  const client = opts.client ?? new Impit({ browser: "chrome", timeout: opts.timeout ?? 15_000 });
+  const response = await client.fetch(url, { redirect: "follow" });
+  const status: number = response.status;
+  const html: string = await response.text();
+  const { text, title } = extractFromHtml(html, "", extractContent);
+  const escalated = isSpaShell(html, text, status);
+  const tag = `[http${status === 200 ? "" : ` ${status}`}]`;
+  const contentText = `${tag} ${title || url}\nURL: ${url}\n\n${text}`;
+  return { url, title: title || url, text: contentText, path: "http", escalated, status };
+}
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // get_page_text -------------------------------------------------------------
@@ -393,6 +467,13 @@ CONTEXT BUDGET — output capped at maxCharsPerPage per URL (default 3K per URL)
         .default(3000)
         .optional()
         .describe("Max chars per page. Default: 3000."),
+      mode: z
+        .enum(["auto", "browser", "http"])
+        .default("auto")
+        .optional()
+        .describe(
+          'Fetch strategy. "http" = TLS-impersonated HTTP via impit (fast, no browser; misses JS-rendered content). "browser" = real browser tab per URL (always works, slower). "auto" (default) = try http first, escalate to browser when the HTTP result looks like an SPA shell or anti-bot challenge. Each URL result is prefixed with [http] or [browser] to show which path served it.',
+        ),
     },
     outputSchema: {
       results: z.array(
@@ -400,6 +481,8 @@ CONTEXT BUDGET — output capped at maxCharsPerPage per URL (default 3K per URL)
           url: z.string(),
           title: z.string(),
           text: z.string(),
+          path: z.enum(["http", "browser"]),
+          escalated: z.boolean().optional(),
         }),
       ),
     },
@@ -409,60 +492,87 @@ CONTEXT BUDGET — output capped at maxCharsPerPage per URL (default 3K per URL)
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ urls, extractContent = true, maxCharsPerPage = 3000 }) => {
+    handler: async ({ urls, extractContent = true, maxCharsPerPage = 3000, mode = "auto" }) => {
       try {
-        interface FetchResult {
-          url: string;
-          title: string;
-          text: string;
-        }
         const results: string[] = [];
         const structured: FetchResult[] = [];
 
-        const fetchOne = async (url: string): Promise<FetchResult> => {
+        // Browser path: original behavior — open a real background tab.
+        const fetchBrowser = async (url: string): Promise<FetchResult> => {
           return withBackgroundTab(mgr, async (page) => {
             await page.goto(url, { waitUntil: "domcontentloaded" });
             await globalWait(env);
 
-            const title = await page.title().catch(() => "");
-
-            const errorStatus = detectErrorPage(title);
+            const pageTitle = await page.title().catch(() => "");
+            const errorStatus = detectErrorPage(pageTitle);
             if (errorStatus) {
-              const msg = `## ${url}\n[HTTP ${errorStatus} — ${title}]`;
-              return { url, title, text: msg };
+              const msg = `[browser] ${url}\n[HTTP ${errorStatus} — ${pageTitle}]`;
+              return { url, title: pageTitle, text: msg, path: "browser" as const };
             }
 
-            let text = "";
-            if (extractContent) {
-              const html = await page.content();
-              const { document: dom } = parseHTML(html);
-              const reader = new Readability(dom as any);
-              const article = reader.parse();
-              text = article
-                ? (article.textContent ?? "")
-                    .replace(/[^\S\n]+/g, " ")
-                    .replace(/\n{3,}/g, "\n\n")
-                    .trim()
-                : "";
-              if (article?.title && text) text = `# ${article.title}\n\n${text}`;
-            }
-            if (!text) {
-              const result = await page.evaluate(extractPageContent, {
-                selector: null,
-                includeLinks: false,
-                mode: "innerText" as const,
-              });
-              text = result.text;
-            }
+            const html = await page.content();
+            const { text, title } = extractFromHtml(html, pageTitle, extractContent);
 
             if (maxCharsPerPage > 0 && text.length > maxCharsPerPage) {
-              text =
+              const truncated =
                 text.slice(0, maxCharsPerPage) +
                 `\n[TRUNCATED — ${text.length.toLocaleString()} total]`;
+              return {
+                url,
+                title: title || pageTitle || url,
+                text: `[browser] ${title || pageTitle || url}\nURL: ${url}\n\n${truncated}`,
+                path: "browser" as const,
+              };
             }
-            const contentText = `## ${title || url}\nURL: ${url}\n\n${text}`;
-            return { url, title: title || url, text: contentText };
+            return {
+              url,
+              title: title || pageTitle || url,
+              text: `[browser] ${title || pageTitle || url}\nURL: ${url}\n\n${text}`,
+              path: "browser" as const,
+            };
           });
+        };
+
+        const fetchOne = async (url: string): Promise<FetchResult> => {
+          if (mode === "browser") return fetchBrowser(url);
+          if (mode === "http") {
+            try {
+              return await fetchHttp(url, { extractContent });
+            } catch (err) {
+              const error = err as Error;
+              const msg = `## ${url}\n[ERROR: ${cleanErrorMessage(error)}]`;
+              return { url, title: url, text: msg, path: "http" };
+            }
+          }
+          // mode === "auto": try HTTP, escalate on shell/challenge.
+          let httpResult: FetchResult;
+          try {
+            httpResult = await fetchHttp(url, { extractContent });
+          } catch (err) {
+            // HTTP path failed entirely — fall back to browser.
+            const note = `## ${url}\n[HTTP path failed: ${cleanErrorMessage(err as Error)} — escalating to browser]`;
+            try {
+              const br = await fetchBrowser(url);
+              return { ...br, text: `${note}\n\n${br.text}` };
+            } catch (err2) {
+              const err2Msg = `## ${url}\n[ERROR: ${cleanErrorMessage(err2 as Error)}]`;
+              return { url, title: url, text: err2Msg, path: "browser" };
+            }
+          }
+          if (httpResult.escalated) {
+            try {
+              const br = await fetchBrowser(url);
+              const note = `[auto] HTTP path returned an SPA shell or challenge; escalated to browser.`;
+              return { ...br, text: `${note}\n\n${br.text}` };
+            } catch (escalationErr) {
+              // Browser escalation failed — keep whatever the http path gave us
+              // so the caller at least sees the raw HTML/text shell response.
+              // Surface the underlying error in the structured response for debugging.
+              const fallbackText = `${httpResult.text}\n\n[escalation failed: ${cleanErrorMessage(escalationErr as Error)}]`;
+              return { ...httpResult, text: fallbackText };
+            }
+          }
+          return httpResult;
         };
 
         const settled = await Promise.allSettled(urls.map(fetchOne));
@@ -470,18 +580,31 @@ CONTEXT BUDGET — output capped at maxCharsPerPage per URL (default 3K per URL)
           const r = settled[i];
           if (r.status === "fulfilled") {
             results.push(r.value.text);
-            structured.push({ url: r.value.url, title: r.value.title, text: r.value.text });
+            structured.push({
+              url: r.value.url,
+              title: r.value.title,
+              text: r.value.text,
+              path: r.value.path,
+              escalated: r.value.escalated ?? false,
+            });
           } else {
             const errText = `## ${urls[i]}\n[ERROR: ${cleanErrorMessage(r.reason)}]`;
             results.push(errText);
-            structured.push({ url: urls[i], title: urls[i], text: errText });
+            structured.push({
+              url: urls[i],
+              title: urls[i],
+              text: errText,
+              path: "browser" as const,
+              escalated: false,
+            });
           }
         }
 
-        return {
-          content: [{ type: "text", text: results.join("\n\n---\n\n") }],
+        const out = {
+          content: [{ type: "text" as const, text: results.join("\n\n---\n\n") }],
           structuredContent: { results: structured },
         };
+        return out;
       } catch (err) {
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(err) }] };
       }

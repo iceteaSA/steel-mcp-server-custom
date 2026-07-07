@@ -747,6 +747,47 @@ export function assertSafeProfilePath(name: string, profilesDir: string): string
 }
 
 // ---------------------------------------------------------------------------
+// SPA-shell / challenge detection — used by fetch_urls to decide when to
+// escalate from the HTTP fast-path to a real browser tab.
+//
+// A "shell" is what the server returns when the meaningful content is rendered
+// by client-side JavaScript (React/Next/Vue SPA roots) or when an anti-bot
+// challenge page is delivered instead of the real content. The HTTP path can't
+// execute JS, so it can't see the real text — it should fall back to the
+// browser path which can run the SPA or solve the challenge.
+//
+// Three detection signals, any one of which triggers escalation:
+//   1. SPA mount point: extracted text is short (<200 chars) AND the HTML has
+//      a root-level <div id="root|app|__next"> AND the HTML is non-trivial.
+//   2. Anti-bot challenge markers: "Just a moment...", "Checking your browser",
+//      "cf-challenge" — Cloudflare/Imperva/etc.
+//   3. Empty response: HTML is tiny (<2000 chars) with no extracted content.
+//   4. HTTP error status (403/429/503) — caller passes the status in.
+// ---------------------------------------------------------------------------
+
+const SPA_ROOT_RE = /<div[^>]+id=["'](?:root|app|__next)["']/i;
+const CHALLENGE_RE =
+  /cf-challenge|Just a moment|Checking your browser|Verify you are human|Attention Required/i;
+
+/**
+ * Returns true when the HTTP fast-path result looks like an SPA shell or a
+ * challenge page — i.e. caller should escalate to a real browser tab.
+ *
+ * Pure function; safe to unit-test with synthetic HTML. The optional `status`
+ * arg carries the HTTP response status; 403/429/503 always escalate.
+ */
+export function isSpaShell(html: string, extractedText: string, status?: number): boolean {
+  if (status === 403 || status === 429 || status === 503) return true;
+  if (CHALLENGE_RE.test(html)) return true;
+  const trimmed = extractedText.trim();
+  if (trimmed.length >= 200) return false;
+  // Short or empty text: shell or challenge.
+  if (html.length < 2000) return true;
+  if (SPA_ROOT_RE.test(html)) return true;
+  return false;
+}
+
+// ---------------------------------------------------------------------------
 // Network event filtering — pure helpers for get_network
 // ---------------------------------------------------------------------------
 

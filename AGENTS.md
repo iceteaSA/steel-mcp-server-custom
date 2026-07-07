@@ -50,6 +50,14 @@ via mcporter or the MCP inspector.
 the LXC — bun is not needed there. The `skill/` directory holds the agent-facing usage
 skill — keep it in sync with tool changes.
 
+**Native deps (build → runtime).** `--external` in the build script means
+`@napi-rs/image`, `patchright`, and `impit` are NOT bundled — the target needs
+its own `node_modules/` with the prebuilt binaries. Copy the per-dep trees
+alongside the artifact (e.g. `node_modules/impit/` + its native `.node` file
+shipped by `bun install --production` on a matching arch). On the LXC this
+means running `bun install --production` (or `npm ci --omit=dev`) inside the
+deploy dir so the prebuilt binaries land next to `dist/index.cjs`.
+
 ---
 
 ## Environment Variables

@@ -14,7 +14,7 @@
         "dist"
     ],
     "scripts": {
-        "build": "bun build src/index.ts --outfile dist/index.cjs --target=node --format=cjs --external @napi-rs/image --external patchright",
+        "build": "bun build src/index.ts --outfile dist/index.cjs --target=node --format=cjs --external @napi-rs/image --external patchright --external impit",
         "dev": "bun --watch src/index.ts",
         "start": "node dist/index.cjs",
         "lint": "oxlint src/",
@@ -28,6 +28,7 @@
         "@mozilla/readability": "^0.6.0",
         "@napi-rs/image": "^1.14.0",
         "dotenv": "^17.4.2",
+        "impit": "^0.14.2",
         "linkedom": "^0.18.12",
         "mime-types": "^3.0.2",
         "patchright": "1.61.1",
