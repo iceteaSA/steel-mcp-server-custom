@@ -11,7 +11,7 @@
         "dotenv": "^17.4.2",
         "linkedom": "^0.18.12",
         "mime-types": "^3.0.2",
-        "patchright": "^1.61.1",
+        "patchright": "1.61.1",
         "steel-sdk": "^0.18.0",
         "turndown": "^7.2.4",
         "zod": "^4.4.3",
