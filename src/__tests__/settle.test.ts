@@ -42,22 +42,37 @@ function mockPage(opts?: {
   waitFnThrows?: boolean;
   inflight?: number;
   ageMs?: number;
+  /** Whether a defensive injection (page.evaluate of the settle script) makes
+   *  the counter appear. Default true; set false to model a page that
+   *  navigated out from under the injection (counter stays absent). */
+  injectSucceeds?: boolean;
 }) {
-  const hasCounter = opts?.hasCounter ?? true;
   const waitFnThrows = opts?.waitFnThrows ?? false;
   const inflight = opts?.inflight ?? 0;
   const ageMs = opts?.ageMs ?? 500;
+  const injectSucceeds = opts?.injectSucceeds ?? true;
 
-  let evaluateCalled = false;
+  // Mutable so a defensive injection can flip the counter to present, exactly
+  // like the real waitForSettled inject-then-reprobe path.
+  let counterPresent = opts?.hasCounter ?? true;
+
+  let evaluateCalls = 0;
+  let injectCalls = 0;
   let waitFnCalled = false;
   let waitFnPredicate: Function | undefined;
 
   return {
     page: {
-      evaluate: async (_fn: Function) => {
-        evaluateCalled = true;
-        // Simulate the probe: fn is () => typeof window.__steelSettle
-        return hasCounter ? "object" : "undefined";
+      evaluate: async (fn: Function | string) => {
+        evaluateCalls++;
+        // The injection call passes the SETTLE_INIT_SCRIPT string; the probe
+        // passes a function () => typeof window.__steelSettle.
+        if (typeof fn === "string") {
+          injectCalls++;
+          if (injectSucceeds) counterPresent = true;
+          return undefined;
+        }
+        return counterPresent ? "object" : "undefined";
       },
       waitForFunction: async (fn: Function, _arg?: unknown, _opts?: unknown) => {
         waitFnCalled = true;
@@ -74,7 +89,8 @@ function mockPage(opts?: {
         // The real polling is Playwright's concern.
       },
     } as any,
-    evaluateCalled: () => evaluateCalled,
+    evaluateCalled: () => evaluateCalls > 0,
+    injectCalled: () => injectCalls > 0,
     waitFnCalled: () => waitFnCalled,
     waitFnPredicate: () => waitFnPredicate,
   };
@@ -84,11 +100,31 @@ const env5000: SettleEnv = { SETTLE_TIMEOUT_MS: 5000 };
 const env0: SettleEnv = { SETTLE_TIMEOUT_MS: 0 };
 
 describe("waitForSettled", () => {
-  // (a) __steelSettle undefined — probe says "undefined", resolve fast
-  it("resolves immediately when __steelSettle is undefined (init script never ran)", async () => {
-    const { page, evaluateCalled, waitFnCalled } = mockPage({ hasCounter: false });
+  // (a) __steelSettle absent but defensive injection lands it → then waits.
+  // Models history back/forward, where afterAction runs after "commit" (before
+  // DOMContentLoaded), so the per-page listener hasn't injected the counter yet.
+  it("defensively injects the counter when absent, then waits for settle", async () => {
+    const { page, evaluateCalled, injectCalled, waitFnCalled } = mockPage({
+      hasCounter: false,
+      injectSucceeds: true,
+    });
     await waitForSettled(page, env5000);
     expect(evaluateCalled()).toBe(true);
+    expect(injectCalled()).toBe(true);
+    // Counter now present → proceeds to the settle wait.
+    expect(waitFnCalled()).toBe(true);
+  });
+
+  // (a2) Counter absent AND defensive injection fails to land (page navigated
+  // out from under us) → no-op, never calls waitForFunction, never throws.
+  it("no-ops when the counter is absent and injection cannot land", async () => {
+    const { page, evaluateCalled, injectCalled, waitFnCalled } = mockPage({
+      hasCounter: false,
+      injectSucceeds: false,
+    });
+    await waitForSettled(page, env5000);
+    expect(evaluateCalled()).toBe(true);
+    expect(injectCalled()).toBe(true);
     expect(waitFnCalled()).toBe(false);
   });
 

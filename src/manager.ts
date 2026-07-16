@@ -468,6 +468,22 @@ export class BrowserManager {
       if (this.tabs.get(id) !== page) return;
       this.clearTabState(id);
     });
+
+    // Settle-counter injection. MUST NOT use page/context.addInitScript:
+    // patchright implements addInitScript via an internal catch-all
+    // route('**/*') document-interception (installInjectRoute), which breaks
+    // EVERY page-context WebSocket upgrade (ws:// and wss://) — patchright
+    // issue #31, upstream wontfix. Instead we (re)inject SETTLE_INIT_SCRIPT via
+    // page.evaluate on each document load: it runs in an isolated context,
+    // installs no route, so WebSockets work AND the counter lands. The script
+    // is idempotent (early-returns if window.__steelSettle already exists).
+    page.on("domcontentloaded", () => {
+      if (this.tabs.get(id) !== page) return;
+      page.evaluate(SETTLE_INIT_SCRIPT).catch(() => {
+        // best-effort: navigation may destroy the context mid-eval; settle is
+        // a nicety and waitForSettled no-ops when the counter is absent.
+      });
+    });
   }
 
   /**
@@ -694,9 +710,9 @@ export class BrowserManager {
 
     this.browser = await chromium.connectOverCDP(wsUrl);
     this.browserContext = this.browser.contexts()[0];
-    // Settle detection init runs before any page script on future pages;
-    // the first page (already loaded) will be guarded by the undefined probe.
-    await this.browserContext.addInitScript(SETTLE_INIT_SCRIPT);
+    // Settle detection is injected per-page via a domcontentloaded listener
+    // in attachPageListeners (NOT addInitScript — that breaks WebSockets under
+    // patchright; see the listener comment). The first page is wired below.
     const initialPage = this.browserContext.pages()[0];
     this.currentTabId = this.allocateTab(initialPage);
     // Mark as primary — idle sweeper must never close this tab, else Steel's
@@ -793,7 +809,9 @@ export class BrowserManager {
           height: this.env.DEFAULT_VIEWPORT_HEIGHT,
         },
       });
-      await this.browserContext.addInitScript(SETTLE_INIT_SCRIPT);
+      // Settle detection is injected per-page via the domcontentloaded
+      // listener in attachPageListeners (NOT addInitScript — breaks WebSockets
+      // under patchright).
       const initialPage = await this.browserContext.newPage();
       this.currentTabId = this.allocateTab(initialPage);
       // Mark primary — consistency with steel mode, and protects the only
@@ -1573,8 +1591,9 @@ export class BrowserManager {
 
     // Inject stealth overrides (extensions don't work in non-default contexts)
     await this.injectStealthIntoContext(context);
-    // Settle detection for profile pages
-    await context.addInitScript(SETTLE_INIT_SCRIPT);
+    // Settle detection for profile pages is injected per-page via the
+    // domcontentloaded listener in attachPageListeners (NOT addInitScript —
+    // breaks WebSockets under patchright; see that listener's comment).
 
     // Wire network + popup capture on profile contexts so profile tabs get
     // the same request/response and new-page tracking as the default context.

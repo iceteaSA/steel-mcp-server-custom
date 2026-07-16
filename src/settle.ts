@@ -105,8 +105,21 @@ export async function waitForSettled(page: Page, env: SettleEnv): Promise<void> 
 
   try {
     // Probe: did the init script run on this page?
-    const hasCounter = await page.evaluate(() => typeof (window as any).__steelSettle);
-    if (hasCounter === "undefined") return;
+    let hasCounter = await page.evaluate(() => typeof (window as any).__steelSettle);
+    if (hasCounter === "undefined") {
+      // Counter absent — the per-page domcontentloaded injection (see
+      // attachPageListeners) hasn't landed yet. This happens on the
+      // "commit"-level waits used by history back/forward, which return
+      // before DOMContentLoaded fires. Inject defensively here so settle
+      // still works; SETTLE_INIT_SCRIPT is idempotent so this never
+      // double-installs when the listener also fires. NOTE: we do NOT use
+      // addInitScript here — under patchright that breaks WebSockets
+      // (see attachPageListeners for the full rationale).
+      await page.evaluate(SETTLE_INIT_SCRIPT);
+      hasCounter = await page.evaluate(() => typeof (window as any).__steelSettle);
+      // Still absent (e.g. the page navigated out from under us) → no-op.
+      if (hasCounter === "undefined") return;
+    }
 
     await page.waitForFunction(
       () => {
