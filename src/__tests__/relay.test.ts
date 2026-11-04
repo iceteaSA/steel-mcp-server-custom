@@ -72,6 +72,37 @@ beforeEach(async () => {
 // ---------------------------------------------------------------------------
 
 describe("GET /status", () => {
+  it("accepts only loopback Host spellings with optional ports", async () => {
+    for (const host of [
+      "localhost",
+      "localhost:3921",
+      "127.0.0.1",
+      "127.0.0.1:3921",
+      "[::1]",
+      "[::1]:3921",
+    ]) {
+      expect(
+        (await fetch_(`http://127.0.0.1:${config.port}/status`, { headers: { Host: host } }))
+          .status,
+      ).toBe(200);
+    }
+  });
+  for (const route of ["/status", "/profiles"]) {
+    it(`rejects a hostile Host on ${route} without reflecting Origin`, async () => {
+      const response = await fetch_(`http://127.0.0.1:${config.port}${route}`, {
+        headers: {
+          Host: "evil.example",
+          Origin: "https://evil.example",
+          Authorization: "Bearer test-secret",
+        },
+      });
+      expect(response.status).toBe(403);
+      expect(Object.keys(await response.json())).toEqual(["error"]);
+      expect(
+        [...response.headers.keys()].some((key) => key.startsWith("access-control-allow-")),
+      ).toBe(false);
+    });
+  }
   it("returns ok without auth", async () => {
     const res = await fetch_(`http://127.0.0.1:${config.port}/status`);
     expect(res.ok).toBe(true);
@@ -189,6 +220,22 @@ describe("POST /push — localStorage", () => {
 });
 
 describe("POST /push — credentials", () => {
+  for (const existed of [false, true]) {
+    it(`saves credentials with mode 0600 when file ${existed ? "was 0644" : "is new"}`, async () => {
+      if (existed) await fs.writeFile(config.credentialsFile, "[]", { mode: 0o644 });
+      const response = await postPush({
+        profile: "permissions",
+        credentials: {
+          name: "fixture",
+          url: "example.com",
+          username: "fixture-only",
+          password: "fixture-only",
+        },
+      });
+      expect(response.status).toBe(200);
+      expect((await fs.stat(config.credentialsFile)).mode & 0o777).toBe(0o600);
+    });
+  }
   it("saves credentials to the credential store", async () => {
     const res = await postPush({
       profile: "cred-test",
@@ -254,6 +301,7 @@ describe("POST /push — encrypted credentials", () => {
     });
 
     try {
+      await fs.writeFile(encConfig.credentialsFile, "[]", { mode: 0o644 });
       const res = await fetch_(`http://127.0.0.1:${encConfig.port}/push`, {
         method: "POST",
         headers: {
@@ -266,6 +314,7 @@ describe("POST /push — encrypted credentials", () => {
         }),
       });
       expect(res.ok).toBe(true);
+      expect((await fs.stat(encConfig.credentialsFile)).mode & 0o777).toBe(0o600);
 
       // Verify file is encrypted (not valid JSON)
       const raw = await fs.readFile(encConfig.credentialsFile, "utf8");

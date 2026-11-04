@@ -11,10 +11,41 @@ import {
   readStorage,
   parentDomains,
   revokeDiscoveryAccess,
+  DISCOVERY_ORIGINS,
 } from "./core.js";
 
 let running = false;
 const ALARM = "steel-pinned-sync";
+// A worker restart clears local state. The session record keeps the deadline.
+const DISCOVERY_ALARM = "steel-discovery-deadline";
+const DISCOVERY_LIMIT = 60000;
+let discovering = false;
+
+async function finishDiscovery() {
+  await revokeDiscoveryAccess();
+  await chrome.storage.session.remove("discoveryRun");
+  await chrome.alarms.clear(DISCOVERY_ALARM);
+}
+
+async function recoverDiscovery() {
+  const { discoveryRun } = await chrome.storage.session.get("discoveryRun");
+  const startedAt = discoveryRun?.startedAt;
+  if (
+    Number.isFinite(startedAt) &&
+    startedAt <= Date.now() &&
+    Date.now() < startedAt + DISCOVERY_LIMIT
+  ) {
+    await chrome.alarms.create(DISCOVERY_ALARM, { when: startedAt + DISCOVERY_LIMIT });
+    return;
+  }
+  if (!discovering) await finishDiscovery();
+}
+
+async function beginDiscovery() {
+  const startedAt = Date.now();
+  await chrome.storage.session.set({ discoveryRun: { startedAt } });
+  await chrome.alarms.create(DISCOVERY_ALARM, { when: startedAt + DISCOVERY_LIMIT });
+}
 
 async function configureAlarm() {
   const settings = await getSettings();
@@ -27,6 +58,7 @@ async function configureAlarm() {
 }
 
 async function initialize() {
+  await recoverDiscovery();
   await chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
   await chrome.contextMenus.removeAll();
   chrome.contextMenus.create({
@@ -137,12 +169,35 @@ async function pushTab(tab) {
 
 async function handleMessage(message) {
   switch (message.type) {
+    case "prepare-discovery":
+      if (discovering) throw new Error("Discovery is already running. Wait for it to finish.");
+      await beginDiscovery();
+      return true;
+    case "recover-discovery":
+      await recoverDiscovery();
+      return true;
+    case "end-discovery":
+      if (!discovering) await finishDiscovery();
+      return true;
     case "discover":
+      if (discovering) throw new Error("Discovery is already running. Wait for it to finish.");
+      discovering = true;
       try {
-        return await handleMessage({ type: "sites" });
+        await beginDiscovery();
+        const domains = await handleMessage({ type: "sites" });
+        await chrome.storage.session.set({ discoveredSites: domains });
+        return domains;
       } finally {
-        await revokeDiscoveryAccess();
+        discovering = false;
+        await finishDiscovery();
       }
+    case "site-list": {
+      const current = await handleMessage({ type: "sites" });
+      const { discoveredSites = [] } = await chrome.storage.session.get("discoveredSites");
+      const merged = new Map(discoveredSites.map((entry) => [entry.domain, entry]));
+      for (const entry of current) merged.set(entry.domain, entry);
+      return [...merged.values()].sort((a, b) => a.domain.localeCompare(b.domain));
+    }
     case "profiles":
       return relayRequest("/profiles");
     case "summary":
@@ -220,10 +275,12 @@ async function handleMessage(message) {
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return false;
-  handleMessage(message).then(
-    (data) => respond({ ok: true, data }),
-    (error) => respond({ ok: false, error: error.message }),
-  );
+  discoveryReady
+    .then(() => handleMessage(message))
+    .then(
+      (data) => respond({ ok: true, data }),
+      (error) => respond({ ok: false, error: error.message }),
+    );
   return true;
 });
 chrome.runtime.onInstalled.addListener(initialize);
@@ -235,6 +292,10 @@ chrome.commands.onCommand.addListener((command) => {
   if (command === "push-site") return currentTab().then(pushTab);
 });
 chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === DISCOVERY_ALARM) {
+    if (discovering) return;
+    return recoverDiscovery();
+  }
   if (alarm.name !== ALARM) return;
   return getSettings()
     .then(async (settings) => {
@@ -257,4 +318,22 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && (changes.syncEnabled || changes.syncMinutes || changes.pinnedSites))
     void configureAlarm();
+});
+chrome.permissions.onAdded.addListener(async (permissions) => {
+  if (
+    !permissions.origins?.some((origin) =>
+      [...DISCOVERY_ORIGINS, "*://*/*", "<all_urls>"].includes(origin),
+    )
+  )
+    return;
+  await discoveryReady;
+  const { discoveryRun } = await chrome.storage.session.get("discoveryRun");
+  const when = Number.isFinite(discoveryRun?.startedAt)
+    ? discoveryRun.startedAt + DISCOVERY_LIMIT
+    : Date.now() + DISCOVERY_LIMIT;
+  await chrome.alarms.create(DISCOVERY_ALARM, { when });
+});
+
+export const discoveryReady = recoverDiscovery().catch(async () => {
+  await chrome.alarms.create(DISCOVERY_ALARM, { when: Date.now() + DISCOVERY_LIMIT });
 });

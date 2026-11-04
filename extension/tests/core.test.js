@@ -81,6 +81,15 @@ describe("explicit host permissions", () => {
 });
 
 describe("transfer boundaries", () => {
+  it("gives loopback Host recovery steps for a relay 403", async () => {
+    globalThis.chrome = { permissions: { contains: async () => true } };
+    globalThis.fetch = async () => Response.json({ error: "fixture-only" }, { status: 403 });
+    await expect(
+      relayRequest("/profiles", {
+        settings: { serverUrl: "http://localhost:3001", serverSecret: "fixture-only" },
+      }),
+    ).rejects.toThrow("loopback Host");
+  });
   it("does not replace an unsupported active tab with an unrelated site", async () => {
     globalThis.chrome = {
       runtime: { id: "fixture-extension" },
@@ -94,7 +103,7 @@ describe("transfer boundaries", () => {
     expect(await currentTab()).toBeNull();
   });
 
-  it("uses the most recently accessed granted site only for an extension page tab", async () => {
+  it("does not use another site when an extension popup tab is active", async () => {
     globalThis.chrome = {
       runtime: { id: "fixture-extension" },
       tabs: {
@@ -107,7 +116,20 @@ describe("transfer boundaries", () => {
               ],
       },
     };
-    expect((await currentTab()).id).toBe(2);
+    expect(await currentTab()).toBeNull();
+  });
+
+  it("returns no site when the options page is active", async () => {
+    globalThis.chrome = {
+      runtime: { id: "fixture-extension" },
+      tabs: {
+        query: async (query) =>
+          query.active
+            ? [{ id: 1, url: "chrome-extension://fixture-extension/options.html" }]
+            : [{ id: 2, url: "https://example.com" }],
+      },
+    };
+    expect(await currentTab()).toBeNull();
   });
 
   it("allows HTTPS remote relays and HTTP loopback only", () => {

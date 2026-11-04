@@ -55,6 +55,16 @@
       </section>
     </form>
     <p id="status" role="status" class="notice" aria-live="polite"></p>
+    <section id="discovery" aria-labelledby="discoveryHeading">
+      <h2 id="discoveryHeading">Temporary site discovery</h2>
+      <p>
+        Keep this tab open for the permission prompt. Discovery reads domains and counts only, then
+        removes broad access. A worker alarm also removes orphan access after 60 seconds. Go to the
+        popup to select sites.
+      </p>
+      <button id="discoverSites" type="button">Discover cookie domains</button>
+      <ul id="discoveredDomains"></ul>
+    </section>
     <section>
       <h2>Privacy and limits</h2>
       <p>

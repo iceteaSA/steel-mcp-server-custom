@@ -2,6 +2,8 @@
 
 Load this directory as an unpacked Manifest V3 extension. Open **Settings**. Set your relay URL and secret, then save and test the connection. Use HTTPS for remote relays. Use HTTP for localhost, 127.0.0.1, and ::1 only.
 
+The relay accepts only loopback `Host` headers: `localhost`, `127.0.0.1`, or `[::1]`, with an optional port. For a remote relay, configure the trusted `reverse proxy` to send a loopback upstream `Host`. The relay rejects other hosts with HTTP 403.
+
 ## Move site sign-ins
 
 1. Open a site and sign in.
@@ -13,13 +15,21 @@ The background worker sends data after you close the popup. The badge shows `OK`
 
 The page follows the system light or dark theme. You can use the keyboard for all controls. **Alt+Shift+S** and the page context menu push to the last selected profile. Grant site access in the popup first. Change the shortcut at `chrome://extensions/shortcuts`.
 
+Current-site commands use only the active HTTP or HTTPS tab. An active extension page does not select a different open site.
+
 ## Site access and batch transfer
 
 The extension has no permanent host permissions. It requests relay access when you save settings and site access when you grant a site. The cookies API cannot read a host without the cookies permission and host access.
 
 For a subdomain, open **Parent-domain cookie access** and grant each parent hostname that holds shared sign-in cookies. Chrome can ignore parent cookies when only the current hostname has access. Each grant includes one hostname, not all its subdomains. The list shows parent hostnames, not a guessed public-suffix boundary.
 
-`Push several sites` lists cookie domains with granted access. Search the list, select a maximum of 100 domains, then select **Push selected sites**. The optional **Discover sites with temporary access** control reads cookie domains on all HTTP and HTTPS sites. The worker removes that broad access immediately after the read, also on error. Push requests access only for selected hostnames. Your exact-host grants stay unchanged.
+`Push several sites` lists granted cookie domains and the last discovery snapshot for this browser session. Search the list, select a maximum of 100 domains, then select **Push selected sites**. Push requests access only for selected hostnames. Your exact-host grants stay unchanged.
+
+Select **Open temporary discovery tab** in the popup. In the full Settings tab, select **Discover cookie domains**. Keep that tab open for the permission prompt. The popup does not request wildcard access.
+
+Before the request, the worker records the start time in `storage.session` and sets a 60-second alarm. A wildcard permission event sets the alarm without a discovery message. The worker removes broad access after collection, also on error. While it collects domains, the worker keeps access until collection ends.
+
+At each worker start, browser startup, and installation, the worker checks the record. It revokes orphan or expired access. A start time in the last 60 seconds keeps access only until its initial deadline after a worker restart. The alarm then removes the access if collection has stopped. Chrome can run alarms late, so recovery also checks the deadline when the worker starts.
 
 Site pushes include cookies for the hostname and its parent domains, at all cookie paths. Site pushes do not include other sibling domains. Domain rows show raw cookie-domain counts. Parent cookies can be necessary for sign-in.
 

@@ -1,12 +1,4 @@
-import {
-  getSettings,
-  validProfile,
-  sitePatterns,
-  requestAccess,
-  DISCOVERY_ORIGINS,
-  revokeDiscoveryAccess,
-  send,
-} from "./core.js";
+import { getSettings, validProfile, sitePatterns, requestAccess, send } from "./core.js";
 
 const $ = (id) => document.getElementById(id);
 let site = null;
@@ -72,7 +64,7 @@ async function loadSite() {
   updateActions();
 }
 async function loadSites() {
-  sites = await send("sites");
+  sites = await send("site-list");
   const available = new Set(sites.map((entry) => entry.domain));
   for (const domain of selected) if (!available.has(domain)) selected.delete(domain);
   renderSites();
@@ -241,20 +233,12 @@ $("grantParent").addEventListener("click", async () => {
 $("discoverSites").addEventListener("click", async () => {
   $("discoverSites").disabled = true;
   try {
-    const granted = await requestAccess(DISCOVERY_ORIGINS);
-    if (!granted)
-      throw new Error("All-site discovery was not granted. Individual site access still works.");
-    sites = await send("discover");
-    renderSites();
-    await loadSite();
-    status(
-      "Discovery complete. Temporary all-site access removed. Push requests access only for selected sites.",
-    );
+    await chrome.tabs.create({ url: chrome.runtime.getURL("options.html#discovery") });
   } catch (error) {
     status(error.message, true);
   } finally {
     try {
-      await revokeDiscoveryAccess();
+      await send("recover-discovery");
     } catch (error) {
       status(error.message, true);
     }

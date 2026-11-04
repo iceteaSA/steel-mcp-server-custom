@@ -70,10 +70,10 @@
       <label for="siteSearch">Search domains</label
       ><input id="siteSearch" type="search" placeholder="Filter domains" />
       <ul id="siteList"></ul>
-      <button id="discoverSites" class="small">Discover sites with temporary access…</button>
+      <button id="discoverSites" class="small">Open temporary discovery tab…</button>
       <p class="muted">
-        Optional: reads cookie domains with temporary all-site access, then removes that access
-        immediately. Push requests exact-host access only for sites you select.
+        Discovery requests access in a full Settings tab, not this popup. A worker deadline removes
+        orphan access after 60 seconds. Push requests access only for selected hosts.
       </p>
       <button id="pushSelected">Push selected sites (0)</button>
     </details>

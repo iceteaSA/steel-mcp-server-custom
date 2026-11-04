@@ -181,11 +181,15 @@ async function loadCreds(file: string, passphrase?: string): Promise<Credential[
 
 async function saveCreds(creds: Credential[], file: string, passphrase?: string): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.chmod(file, 0o600).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+  });
   if (passphrase) {
-    await fs.writeFile(file, encryptJSON(creds, passphrase));
+    await fs.writeFile(file, encryptJSON(creds, passphrase), { mode: 0o600 });
   } else {
-    await fs.writeFile(file, JSON.stringify(creds, null, 2));
+    await fs.writeFile(file, JSON.stringify(creds, null, 2), { mode: 0o600 });
   }
+  await fs.chmod(file, 0o600);
 }
 
 // ---------------------------------------------------------------------------
@@ -333,6 +337,10 @@ export function startRelayServer(config: RelayConfig): http.Server {
     return next;
   };
   const srv = http.createServer(async (req, res) => {
+    if (!/^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i.test(req.headers.host ?? "")) {
+      jsonResponse(res, 403, { error: "Forbidden host." });
+      return;
+    }
     // Extension host permissions give access without CORS.
     if (req.method === "OPTIONS") {
       res.writeHead(204);

@@ -1,4 +1,12 @@
-import { getSettings, relayUrl, hostPattern, relayRequest, requestAccess, send } from "./core.js";
+import {
+  getSettings,
+  relayUrl,
+  hostPattern,
+  relayRequest,
+  requestAccess,
+  DISCOVERY_ORIGINS,
+  send,
+} from "./core.js";
 const $ = (id) => document.getElementById(id);
 function status(text, error = false) {
   $("status").textContent = text;
@@ -80,6 +88,33 @@ $("testConnection").addEventListener("click", async () => {
     $("testConnection").disabled = false;
   }
 });
+function renderDiscovery(domains) {
+  $("discoveredDomains").replaceChildren();
+  for (const entry of domains) {
+    const li = document.createElement("li");
+    li.textContent = `${entry.domain} · ${entry.cookieCount} cookies`;
+    $("discoveredDomains").append(li);
+  }
+}
+$("discoverSites").addEventListener("click", async () => {
+  $("discoverSites").disabled = true;
+  try {
+    await send("prepare-discovery");
+    if (!(await requestAccess(DISCOVERY_ORIGINS)))
+      throw new Error("Discovery access denied. The extension sent no sign-in data.");
+    renderDiscovery(await send("discover"));
+    status("Discovery complete. Broad access removed. Go to the popup and select sites.");
+  } catch (error) {
+    status(error.message, true);
+  } finally {
+    try {
+      await send("end-discovery");
+    } catch (error) {
+      status(error.message, true);
+    }
+    $("discoverSites").disabled = false;
+  }
+});
 async function init() {
   const settings = await getSettings();
   $("serverUrl").value = settings.serverUrl;
@@ -87,6 +122,9 @@ async function init() {
   $("syncEnabled").checked = settings.syncEnabled;
   $("syncMinutes").value = settings.syncMinutes;
   await renderPins();
+  await send("recover-discovery");
+  const { discoveredSites = [] } = await chrome.storage.session.get("discoveredSites");
+  renderDiscovery(discoveredSites);
 }
 void init().catch(() =>
   status("Settings could not load. Reload the extension and try again.", true),

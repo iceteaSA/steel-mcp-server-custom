@@ -102,6 +102,10 @@ export async function relayRequest(route, { method = "GET", body, settings } = {
   }
   if (response.status === 401)
     throw new Error("Secret rejected. Set the matching RELAY_SECRET in Settings.");
+  if (response.status === 403)
+    throw new Error(
+      "Use a loopback Host for the relay. Set a loopback URL or set the trusted proxy upstream Host to loopback.",
+    );
   if (response.status === 404)
     throw new Error(
       "Profile or endpoint not found. Refresh profiles; use a relay with profile management support.",
@@ -153,13 +157,7 @@ export function convertCookie(cookie) {
 export async function currentTab() {
   const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (active?.url?.match(/^https?:/)) return active;
-  if (!active?.url?.startsWith(`chrome-extension://${chrome.runtime.id}/`)) return null;
-  const tabs = await chrome.tabs.query({ currentWindow: true });
-  return (
-    tabs
-      .filter((tab) => tab.url?.match(/^https?:/))
-      .sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))[0] ?? null
-  );
+  return null;
 }
 
 export async function readStorage(tabId, expectedOrigin, countOnly = false) {

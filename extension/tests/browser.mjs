@@ -42,6 +42,19 @@ const fixture = http.createServer((req, res) => {
 await new Promise((resolve) => fixture.listen(3922, "127.0.0.1", resolve));
 let context;
 const errors = [];
+async function openInactivePopup(browserContext, extensionId, activeSite) {
+  await activeSite.bringToFront();
+  const session = await browserContext.newCDPSession(activeSite);
+  const ready = browserContext.waitForEvent("page");
+  await session.send("Target.createTarget", {
+    url: `chrome-extension://${extensionId}/popup.html`,
+    background: true,
+  });
+  const page = await ready;
+  await page.waitForLoadState();
+  await session.detach();
+  return page;
+}
 try {
   await fs.mkdir(path.join(scratch, "screens"), { recursive: true });
   await fs.rm(path.join(scratch, "profile"), { recursive: true, force: true });
@@ -128,9 +141,16 @@ try {
   await options.locator("#serverSecret").fill(secret);
   await options.locator("#testConnection").click();
   await options.locator("#status").filter({ hasText: "Secret accepted" }).waitFor();
-  const popup = await context.newPage();
+  const optionsProbe = await context.newCDPSession(options);
+  const noSite = await optionsProbe.send("Runtime.evaluate", {
+    expression: 'chrome.runtime.sendMessage({type:"site"})',
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  assert.equal(noSite.result.value.data, null);
+  await optionsProbe.detach();
+  const popup = await openInactivePopup(context, id, site);
   await popup.setViewportSize({ width: 440, height: 850 });
-  await popup.goto(`chrome-extension://${id}/popup.html`);
   await popup.locator("#connection").filter({ hasText: "secret accepted" }).waitFor();
   await popup.locator("#currentDomain").filter({ hasText: "127.0.0.1" }).waitFor();
   if (await popup.locator("#grantSite").isVisible()) await popup.locator("#grantSite").click();
@@ -171,6 +191,16 @@ try {
   });
   assert.equal(exactAccess.result.value, true);
   await discoverySession.detach();
+  const discoveryTabReady = context.waitForEvent("page");
+  await popup.locator("#batchPanel").evaluate((element) => {
+    element.open = true;
+  });
+  await popup.locator("#discoverSites").click();
+  const discoveryTab = await discoveryTabReady;
+  await discoveryTab.waitForLoadState();
+  assert.equal(new URL(discoveryTab.url()).hash, "#discovery");
+  assert.equal(await discoveryTab.locator("#discoverSites").isVisible(), true);
+  await discoveryTab.close();
 
   const secondSite = await context.newPage();
   await secondSite.goto("http://localhost:3922");
@@ -284,9 +314,8 @@ try {
   await context.clearCookies();
   const parentSite = await context.newPage();
   await parentSite.goto("http://app.fixture.test:3922");
-  const parentPopup = await context.newPage();
+  const parentPopup = await openInactivePopup(context, parentId, parentSite);
   await parentPopup.setViewportSize({ width: 440, height: 850 });
-  await parentPopup.goto(`chrome-extension://${parentId}/popup.html`);
   await parentPopup
     .locator("#siteCounts")
     .filter({ hasText: "3 cookies · 2 storage keys" })

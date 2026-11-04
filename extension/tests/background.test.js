@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 const originalChrome = globalThis.chrome;
 const originalFetch = globalThis.fetch;
@@ -9,6 +11,9 @@ let requests;
 let grants;
 let alarm;
 let accessLevel;
+let sessionState;
+let alarms;
+const originalNow = Date.now;
 const tab = { id: 1, url: "https://example.com/account", lastAccessed: 10 };
 const fixtureCookie = {
   name: "fixture-name",
@@ -44,6 +49,8 @@ beforeEach(async () => {
     profileName: "work",
     includeStorage: true,
   };
+  sessionState = {};
+  alarms = new Map();
   globalThis.chrome = {
     runtime: {
       id: "fixture-extension",
@@ -52,6 +59,15 @@ beforeEach(async () => {
       onStartup: event("startup"),
     },
     storage: {
+      session: {
+        get: async () => ({ ...sessionState }),
+        set: async (value) => {
+          Object.assign(sessionState, value);
+        },
+        remove: async (key) => {
+          delete sessionState[key];
+        },
+      },
       local: {
         get: async (keys) =>
           Array.isArray(keys)
@@ -66,7 +82,14 @@ beforeEach(async () => {
       },
       onChanged: event("changed"),
     },
-    permissions: { contains: async () => grants },
+    permissions: {
+      contains: async (input) =>
+        input.origins.some((origin) => ["http://*/*", "https://*/*"].includes(origin))
+          ? false
+          : grants,
+      remove: async () => true,
+      onAdded: event("permissionAdded"),
+    },
     cookies: { getAll: async () => [fixtureCookie] },
     tabs: { query: async () => [tab] },
     scripting: {
@@ -86,11 +109,13 @@ beforeEach(async () => {
       setTitle: async () => {},
     },
     alarms: {
-      clear: async () => {
-        alarm = null;
+      clear: async (name) => {
+        alarms.delete(name);
+        if (name === "steel-pinned-sync") alarm = null;
       },
-      create: async (_name, input) => {
-        alarm = input;
+      create: async (name, input) => {
+        alarms.set(name, input);
+        if (name === "steel-pinned-sync") alarm = input;
       },
       onAlarm: event("alarm"),
     },
@@ -101,14 +126,138 @@ beforeEach(async () => {
     requests.push({ url, input });
     return Response.json({ cookieCount: 1 });
   };
-  await import("../background.js");
+  const worker = await import("../background.js");
+  await worker.discoveryReady;
 });
 afterEach(() => {
+  Date.now = originalNow;
   globalThis.chrome = originalChrome;
   globalThis.fetch = originalFetch;
 });
 
 describe("MV3 transfer worker", () => {
+  it("revokes a killed run at its recorded deadline after worker restart", () => {
+    const child = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL("./worker-start.mjs", import.meta.url)),
+        JSON.stringify({ startedAt: 90000 }),
+        "100000",
+        "expire",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(child.status).toBe(0);
+    expect(JSON.parse(child.stdout).origins).toEqual(["https://example.com/*"]);
+  });
+  for (const lifecycle of ["startup", "installed"]) {
+    it(`revokes orphan wildcard access on ${lifecycle} and preserves exact hosts`, async () => {
+      const origins = new Set(["https://example.com/*", "http://*/*", "https://*/*"]);
+      chrome.permissions.contains = async (input) =>
+        input.origins.every((origin) => origins.has(origin));
+      chrome.permissions.remove = async (input) => {
+        for (const origin of input.origins) origins.delete(origin);
+        return true;
+      };
+      await events[lifecycle]();
+      expect([...origins]).toEqual(["https://example.com/*"]);
+    });
+  }
+  for (const [label, record] of [
+    ["no", null],
+    ["expired", { startedAt: 1 }],
+    ["malformed", { startedAt: "90000" }],
+    ["future", { startedAt: 100001 }],
+  ]) {
+    it(`revokes orphan access at worker evaluation with ${label} run record`, () => {
+      const child = spawnSync(
+        process.execPath,
+        [
+          fileURLToPath(new URL("./worker-start.mjs", import.meta.url)),
+          JSON.stringify(record),
+          "100000",
+        ],
+        { encoding: "utf8" },
+      );
+      expect(child.status).toBe(0);
+      const proof = JSON.parse(child.stdout);
+      expect(proof.origins).toEqual(["https://example.com/*"]);
+    });
+  }
+  it("retains a young recorded run only until its deadline after worker restart", () => {
+    const child = spawnSync(
+      process.execPath,
+      [
+        fileURLToPath(new URL("./worker-start.mjs", import.meta.url)),
+        JSON.stringify({ startedAt: 90000 }),
+        "100000",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(child.status).toBe(0);
+    const proof = JSON.parse(child.stdout);
+    expect(proof.alarm).toEqual({ when: 150000 });
+    expect(proof.origins.includes("http://*/*")).toBe(true);
+    expect(proof.origins.includes("https://example.com/*")).toBe(true);
+  });
+
+  it("expires an onAdded wildcard grant even when no discover message arrives", async () => {
+    const origins = new Set(["https://example.com/*", "http://*/*", "https://*/*"]);
+    chrome.permissions.contains = async (input) =>
+      input.origins.every((origin) => origins.has(origin));
+    chrome.permissions.remove = async (input) => {
+      for (const origin of input.origins) origins.delete(origin);
+      return true;
+    };
+    Date.now = () => 1000;
+    await events.permissionAdded?.({ origins: ["http://*/*", "https://*/*"] });
+    expect(alarms.get("steel-discovery-deadline")).toEqual({ when: 61000 });
+    Date.now = () => 61000;
+    await events.alarm({ name: "steel-discovery-deadline" });
+    expect([...origins]).toEqual(["https://example.com/*"]);
+  });
+
+  it("keeps a running discover until completion and then removes wildcard access", async () => {
+    const origins = new Set(["https://example.com/*", "http://*/*", "https://*/*"]);
+    chrome.permissions.contains = async (input) =>
+      input.origins.every((origin) => origins.has(origin));
+    chrome.permissions.remove = async (input) => {
+      for (const origin of input.origins) origins.delete(origin);
+      return true;
+    };
+    let release;
+    let entered;
+    const started = new Promise((resolve) => {
+      entered = resolve;
+    });
+    chrome.cookies.getAll = async () => {
+      entered();
+      await new Promise((resolve) => {
+        release = resolve;
+      });
+      return [fixtureCookie];
+    };
+    Date.now = () => 1000;
+    const response = message({ type: "discover" });
+    await started;
+    expect(sessionState.discoveryRun).toEqual({ startedAt: 1000 });
+    Date.now = () => 61000;
+    await events.alarm({ name: "steel-discovery-deadline" });
+    expect(origins.has("http://*/*")).toBe(true);
+    release();
+    expect((await response).ok).toBe(true);
+    expect([...origins]).toEqual(["https://example.com/*"]);
+    expect(sessionState.discoveryRun).toBeUndefined();
+  });
+
+  it("does not push another tab when the options page is active", async () => {
+    chrome.tabs.query = async () => [
+      { id: 2, url: "chrome-extension://fixture-extension/options.html" },
+      tab,
+    ];
+    await events.command("push-site");
+    expect(requests.length).toBe(0);
+  });
   for (const failure of [false, true]) {
     it(`revokes only wildcard discovery access after ${failure ? "failure" : "success"}`, async () => {
       const origins = new Set([
@@ -133,7 +282,10 @@ describe("MV3 transfer worker", () => {
       expect(removals).toEqual([{ origins: ["http://*/*", "https://*/*"] }]);
       expect([...origins]).toEqual(["https://example.com/*", "http://localhost/*"]);
       expect(response.ok).toBe(!failure);
-      if (!failure) expect(response.data.map((entry) => entry.domain)).toEqual(["example.com"]);
+      if (!failure) {
+        expect(response.data.map((entry) => entry.domain)).toEqual(["example.com"]);
+        expect(JSON.stringify(sessionState.discoveredSites).includes("fixture-")).toBe(false);
+      }
     });
   }
 
