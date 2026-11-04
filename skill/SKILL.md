@@ -4,7 +4,7 @@ skill-memory:
   enabled: true
 description: >
   Use before browser work through Steel in Code Mode. Covers navigation, extraction,
-  screenshots, forms, tab ownership, and human handoff.
+  screenshots, forms, caller lanes, and human handoff.
 ---
 
 # Steel Browser
@@ -26,16 +26,25 @@ const tab = await tools["steel"].new_tab({
 return tab;
 ```
 
-## Shared state
+## Caller lanes
 
-- Open your own tab with a unique `owner` string.
-- Read the result for the tab ID. Give `owner` and `tabId` on each page call.
-- Use `close_tabs({ owner })` for your cleanup.
-- Do not call `stop_browser` for task cleanup. It stops the shared browser session.
-- Do not use `force` to bypass a different agent's ownership without operator approval.
-- Use a browser profile when an isolated login session is necessary.
-- Save the browser profile only when the task must keep state on disk.
-- Make sure that tabs and login state from an earlier task are applicable.
+- Use the lane that the hub selects through request metadata, not an `owner` string.
+- On `no_caller`, repair the hub's `ai.opencode/sessionID` metadata before the next stateful call.
+- Open tabs with `new_tab` and keep each `tabId` from the result.
+- Give `tabId` when a workflow uses more than one tab.
+- Use `owner` only as an optional tab label.
+- Do not use `force` for access to a different lane. Lane mode ignores it and reports a NOTE line.
+- Use `close_tabs` for selected tabs or `close_lane` for all your tabs and browser storage.
+- Use `list_lanes` for caller names, ages, and tab counts, not other lanes' URLs.
+- On `not_in_lane`, select one of your tabs through `list_tabs`.
+- On `lane_closed`, discard previous tab IDs and call without `tabId` to open a new lane.
+- On `lanes_full`, use `list_lanes` to inspect usage and `close_lane` to release your lane before a retry.
+- Read closure NOTE lines before the next step. Close, idle, or restart can reset cookies, tabs, and buffers.
+- Save a named profile only when the task must keep state on disk.
+- Load a profile through `new_tab({profile})` only when its saved state applies to the task.
+- Use one shared context for all profile names in a lane.
+- Send caller metadata for credential writes and deletes, even without a browser lane.
+- In legacy mode (`STEEL_LANES=off`), use unique owner labels and do not stop the shared browser.
 
 ## Observation and interaction
 
@@ -93,7 +102,7 @@ return await tools["steel"].snapshot({ tabId: 7, owner: "agent:research" });
 - Use the specified interface address when the server listens only on that interface.
 - Do not make a development server listen on all interfaces merely to test loopback access.
 - For a remote browser, use a URL reachable from the browser host. Operator-local loopback is a different host.
-- Use an owner-tagged tab for UI checks and close only that owner's tabs.
+- Use a lane tab for UI checks and close only your task's tabs.
 - Compare structural data from `evaluate` for deterministic checks. Use screenshots for visual checks.
 
 ```javascript

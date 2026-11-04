@@ -32,8 +32,9 @@ import { tabTarget, tabTargetForce } from "./shared.js";
 export function authorizeBodyFetch(
   event: { id: number; tabId?: number },
   callerOwner: string | undefined,
-  mgr: { getTabOwner: (tabId: number) => string | undefined },
+  mgr: { getTabOwner: (tabId: number) => string | undefined; isLaneContext?: boolean },
 ): { ok: true } | { ok: false; error: string } {
+  if (mgr.isLaneContext) return { ok: true };
   if (event.tabId === undefined) return { ok: true };
   const tabOwner = mgr.getTabOwner(event.tabId);
   if (tabOwner === undefined) return { ok: true };
@@ -59,11 +60,12 @@ export function authorizeBodyFetch(
  * for tools that validate after resolution.
  */
 export function assertTabOwner(
-  mgr: { getTabOwner: (tabId: number) => string | undefined },
+  mgr: { getTabOwner: (tabId: number) => string | undefined; isLaneContext?: boolean },
   tabId: number,
   callerOwner: string | undefined,
   force: boolean | undefined,
 ): { ok: true } | { ok: false; error: string } {
+  if (mgr.isLaneContext) return { ok: true };
   if (force) return { ok: true };
   const tabOwner = mgr.getTabOwner(tabId);
   if (tabOwner === undefined) return { ok: true };
@@ -644,7 +646,7 @@ CONTEXT BUDGET — HAR is always written to disk (no inline option).`,
     }) => {
       try {
         // Refuse an unscoped dump of every owner's traffic.
-        if (tabId === undefined && owner === undefined) {
+        if (!mgr.isLaneContext && tabId === undefined && owner === undefined) {
           return {
             isError: true,
             content: [

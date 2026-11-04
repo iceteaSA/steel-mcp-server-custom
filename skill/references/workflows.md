@@ -15,19 +15,17 @@ return await tools["steel"].go_to_url({ url: "https://example.com", readPage: tr
 - Translate the shorthand examples below to `tools["steel"].<tool>({ ... })`.
 - Await each call whose result is necessary.
 - Use `Promise.allSettled` only for independent calls on separate tabs.
-- Keep the returned tab ID and pass it with your owner on subsequent calls.
+- Keep the tab ID from the result and give it on each call to that page.
 
 ## Core Rules
 
 - **You are the brain.** The MCP is a dumb Playwright driver. Every decision
   is yours.
-- **Never `stop_browser` mid-task.** Destroys the shared session + other agents'
-  tabs. For your own cleanup use `close_tabs` (see Concurrent Agents).
+- Use `close_tabs` for selected tabs and `close_lane` to close your lane.
 - **Auto-init.** No need to call `start_browser` unless you want the Steel
   debug URL to watch live.
-- **Shared session.** Other agents may be using this browser. Open your own
-  tab with an `owner` tag, operate with `tabId`, clean up with
-  `close_tabs` at the end.
+- Use your caller lane in the shared browser. Give `tabId` for workflows with multiple tabs.
+- Read [lane instructions](#concurrent-agents-and-lanes) before work with multiple callers or saved profiles.
 
 ## Snapshot-First — The Default Read
 
@@ -184,61 +182,33 @@ save_profile(name: "b-session")
 delete_profile(name: "b-session")
 ```
 
-Both agents pass their `tabId` AND `owner` on every call. The `tabId` pins the
-operation to the right page; the `owner` is used by the ownership guard.
+Give `tabId` to select a page. In lane mode, `owner` is only a label.
 
-## Concurrent Agents — Tab Ownership
+## Concurrent agents and lanes
 
-Multiple agents share one browser session. To avoid stepping on each other:
+- On `lanes_full`, use `list_lanes` to inspect the active lanes. Close only your lane with `close_lane`.
+- Expect lane closure to interrupt browser work after `LANE_DRAIN_MS` (default 5000 ms).
+- Use caller metadata with `list_profiles` to see your active usage. Anonymous calls show only saved catalogue data.
+- Send caller metadata for credential writes and deletes. Reads do not require it.
 
-1. **Open your own tab with an owner tag.** Pick a unique string per agent
-   (e.g. `"agent:my-scraper-<timestamp>"`):
-   ```
-   new_tab(url: "https://example.com", owner: "agent:my-scraper-12345")
-   → Opened Tab 7 (owner=agent:my-scraper-12345)
-   ```
-
-2. **Pass `owner` + `tabId` on every page call.** All page-interacting tools
-   (`go_to_url`, `snapshot`, `click`, `fill`, `get_page_text`, `get_links`,
-   `get_attrs`, `evaluate`, `wait_for`, `scroll`, `press_key`, `history`,
-   `get_screenshot`, `get_network`, …) accept both `tabId` and `owner`. Without
-   them, the tool uses the global current-active-tab, which another agent may
-   have moved. Always pass them:
-   ```
-   snapshot(tabId: 7, owner: "agent:my-scraper-12345")
-   click(ref: "e4", tabId: 7, owner: "agent:my-scraper-12345")
-   go_to_url(url: "https://other-site.com", tabId: 7, owner: "agent:my-scraper-12345")
-   ```
-
-3. **Ownership guard.** Action tools (`click`, `fill`, `scroll`, `press_key`,
-   `upload_file`, `history`) will reject calls to a tab owned
-   by a different agent unless you pass `force: true`. This catches the
-   "I clicked but another agent's tab moved" race. Prefer fixing the call
-   (target your own tab) over `force: true`.
-
-4. **Clean up only your own tabs** at end of task:
-   ```
-   close_tabs(owner: "agent:my-scraper-12345")
-   → Closed 3 tab(s) owned by agent:my-scraper-12345: 7, 9, 11
-   ```
-   Do NOT call `stop_browser` — that kills everyone's tabs. (If you do need
-   to stop the browser, pass `owner` + `force: true` to override the
-   multi-agent safety check, but only when you're sure no other agents
-   have live work.)
-
-### Idle-tab sweeper (automatic)
-
-Tabs with no tool activity for `TAB_IDLE_TIMEOUT_MS` (default 5 min) are
-auto-closed. Any `tabId`-targeted tool call refreshes the activity timestamp.
-Don't rely on it as your primary cleanup — call `close_tabs` when
-you're done. The sweeper is a safety net for abandoned tabs.
-
-### Browser-closed auto-retry (automatic)
-
-If you see `browserContext.newPage: Target page, context or browser has been
-closed` on a very recent `start_browser` / `new_tab`, the server now soft-resets
-+ retries internally. You don't need retry loops around `new_tab`. If the
-retried call still fails, treat it as a real browser outage.
+- Use the caller identity that the hub sends in `params._meta["ai.opencode/sessionID"]`.
+- On `no_caller`, repair request metadata. Do not use an owner label as a replacement.
+- Keep work in your lane's BrowserContext. The operator keeps Steel's default context and primary tab.
+- Give `tabId` for each page when a task uses multiple tabs.
+- Use `list_tabs` to find your lane's tabs and popups.
+- On `not_in_lane`, select your own tab. Do not use `force` to bypass the error.
+- Use `owner` only as a tab label or filter in your lane.
+- Use parallel calls for different tabs. Calls on one tab run in order.
+- Use `get_console({clear:true})` to clear only your lane's console buffer.
+- Use `list_lanes` to see callers, ages, and tab counts. It does not give page URLs from other lanes.
+- Use `close_lane` to close your context and all its tabs without a save.
+- Use `stop_browser` only when no other lane is active. It closes only your lane.
+- On `lane_closed`, discard the previous tab ID and call without `tabId` for a new lane.
+- Read the closure NOTE line before the next step. It reports the reset of cookies, tabs, and buffers.
+- Use the lane's idle lease, not an idle tab sweeper. The lease closes the lane after `LANE_IDLE_MS` (default 15 minutes).
+- After an MCP restart, discard all previous in-memory lane state. Saved profile files stay on disk.
+- On a `session-ended` NOTE line, use a new lane instead of previous tabs or browser storage.
+- In legacy mode (`STEEL_LANES=off`), use owner labels and the tab sweeper. Do not stop the browser while other callers use it.
 
 ## Handle Dialog — Pre-Arm the Policy
 
@@ -466,18 +436,15 @@ use_credential(name: "github")
   "github-work", fill with work credential; create "github-personal",
   fill with personal credential. Both active simultaneously.
 
-## Profiles — Concurrent Isolated Sessions
+## Profiles and lane storage
 
-Profiles let multiple agents operate simultaneously with separate cookie jars,
-localStorage, and browsing history. Each profile is a distinct BrowserContext
-within the same Chromium instance — zero resource duplication.
+Each caller lane has its own BrowserContext. A profile supplies saved cookies and localStorage to that context.
+Different profile names in one lane do not isolate tabs. Profile leases are not available.
 
 ### When to use profiles
 
-- Multiple agents need **separate auth sessions** (e.g. Agent A logged into
-  GitHub, Agent B logged into Jira — concurrently)
-- You want to **persist login state** across browser restarts
-- You need **isolation** between scraping targets to avoid cookie leaks
+- Use a profile to keep approved login state across restarts.
+- Use different caller lanes, not different profile names, when isolated browser storage is necessary.
 
 ### Workflow
 
@@ -505,16 +472,17 @@ list_profiles()
 
 # 6. Clean up when done
 delete_profile(name: "github")
-→ Closes all tabs + BrowserContext. Saved state remains on disk.
+→ Closes the profile's tabs. The lane context and saved state remain.
 ```
 
 ### Key rules
 
 - **Tabs from profiles use the same global tabId space.** All existing tools
   work unchanged — just pass the tabId returned by `create_profile`.
-- **Profiles don't share cookies.** That's the point. Each context is isolated.
-- **`save_profile` before `stop_browser`.** Stopping the browser kills all
-  contexts including profiles. Save first if you want to restore later.
+- Save the profile before `close_lane` when the task must keep login state.
+- Use `new_tab({profile})` to load a saved profile into the lane's context.
+- Use profile files as shared files. Profile leases are different work.
+- In legacy mode, each active profile uses a different BrowserContext.
 - **Saved profiles survive restarts.** `create_profile("github")` automatically
   restores cookies/localStorage from the last `save_profile("github")` call.
 - **Profile HTTP UA limitation.** Profile contexts show `HeadlessChrome` in
@@ -985,13 +953,11 @@ cookies(setCookies:cookies: [...])   # paste the saved array
 go_to_url(url: "https://target.example.com/dashboard")
 ```
 
-`cookies` / `cookies` operate on the shared context, so cookies
-survive until `stop_browser` or until they expire naturally.
+`cookies` operates on the caller's lane context. Cookies stay until expiry or lane closure.
 
 **Output cap**: without `limit`, `cookies` returns at most 50 cookies
 and appends a `[CAPPED — N total]` footer. Set `limit: 0` for all cookies.
-Shared multi-agent contexts can hold hundreds of cross-site cookies, so
-prefer filtering via `domain` or `urls` to keep output tight.
+Use `domain` or `urls` to limit output from a lane with many cookies.
 
 **urls filter fallback**: if Playwright's exact-match URL filter returns
 nothing (happens with some Set-Cookie redirect chains), the tool automatically
@@ -1000,9 +966,8 @@ surfaces in the result the same way a clean match would.
 
 ## Multi-Tab Workflows
 
-Tabs are per-session, each with own URL/cookies/DOM. For concurrent-safe use,
-always address tabs by their `tabId` AND pass your `owner` — never rely on a
-shared "active tab".
+Tabs have different URLs and DOMs, but all tabs in one lane share browser storage.
+Give `tabId` to select a tab in a workflow with multiple tabs.
 
 ```
 a = new_tab(url: "https://site-a.com", owner: "agent:my-job-42")  # → Tab 7
@@ -1023,12 +988,11 @@ close_tabs(owner: "agent:my-job-42")                      # clean up both
 ```
 
 Rules:
-- Always pass both `tabId` and `owner` so concurrent agents don't race on a
-  global active-tab pointer and the ownership guard accepts the call.
+- Give `tabId` to select the correct page. Use `owner` only as an optional label in the lane.
 - `new_tab` uses real CDP context; visible in session viewer.
 - Never `browser.newPage()` / `browser.newContext()` directly — phantom
   contexts. Always use MCP tools.
-- Prefer `close_tabs` over `stop_browser` for end-of-task cleanup.
+- Use `close_tabs` for selected tabs or `close_lane` for complete lane cleanup.
 
 ## Debugging Failures
 
