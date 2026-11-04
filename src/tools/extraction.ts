@@ -3,6 +3,7 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
 import { Impit } from "impit";
+import { PageTextStore } from "../page-output.js";
 import type { BrowserManager, Env } from "../manager.js";
 import { globalWait, withBackgroundTab, writeToFile } from "../utils.js";
 import {
@@ -286,6 +287,30 @@ export const snapshotFilterSchema = z
   );
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
+  const pageTextStore = new PageTextStore();
+  const continuationParams = {
+    query: z
+      .string()
+      .min(1)
+      .max(256)
+      .optional()
+      .describe(
+        "Find lines containing this case-insensitive literal text. Returns refs in snapshots. Enables bounded continuation.",
+      ),
+    paginate: z
+      .boolean()
+      .optional()
+      .describe(
+        "Read a stable capture in bounded chunks. Continue with nextCursor and the same targeting/query arguments.",
+      ),
+    cursor: z
+      .string()
+      .max(64)
+      .optional()
+      .describe(
+        "Continuation token from this tool. Keep the same tab, owner, frame, selector, and query. Expires after five minutes; navigation invalidates it.",
+      ),
+  };
   // get_page_text -------------------------------------------------------------
   register({
     name: "get_page_text",
@@ -361,6 +386,7 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
         ),
       ...tabTarget,
       ...frameTarget,
+      ...continuationParams,
     },
     annotations: {
       readOnlyHint: true,
@@ -382,10 +408,36 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
       tabId,
       owner,
       frame,
+      query,
+      paginate,
+      cursor,
     }) => {
       try {
         const page = await mgr.getPage({ tabId, owner });
         const ctx = resolveFrame(page, frame);
+        const paginated = query !== undefined || paginate || cursor !== undefined;
+        if (paginated && (matchAll || outputMode !== "inline")) {
+          throw new Error("query, paginate, and cursor require inline single-match text output.");
+        }
+        const readChunk = (text?: string) =>
+          pageTextStore.read(text, {
+            scope: JSON.stringify([
+              "get_page_text",
+              mgr.resolveTab({ tabId, owner }),
+              owner,
+              ctx.url(),
+              frame,
+              selector,
+              query,
+              extractContent,
+              format,
+              includeLinks,
+            ]),
+            query,
+            cursor,
+            maxChars,
+          });
+        if (cursor !== undefined) return readChunk();
 
         // --- extractContent: Readability-based article extraction ----------
         if (extractContent && !matchAll) {
@@ -408,6 +460,7 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
           }
 
           if (text) {
+            if (paginated) return readChunk(text);
             if (outputMode === "file") {
               const filePath = await writeToFile(
                 Buffer.from(text, "utf8"),
@@ -565,6 +618,8 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
           .replace(/[^\S\n]+/g, " ")
           .replace(/\n{3,}/g, "\n\n")
           .trim();
+
+        if (paginated) return readChunk(text);
 
         if (outputMode === "file") {
           const filePath = await writeToFile(
@@ -1252,6 +1307,7 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         ),
       ...tabTarget,
       ...frameTarget,
+      ...continuationParams,
     },
     annotations: {
       readOnlyHint: true,
@@ -1259,11 +1315,44 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
       idempotentHint: true,
       openWorldHint: true,
     },
-    handler: async ({ selector, maxChars, filter, diff, intent, tabId, owner, frame }) => {
+    handler: async ({
+      selector,
+      maxChars,
+      filter,
+      diff,
+      intent,
+      tabId,
+      owner,
+      frame,
+      query,
+      paginate,
+      cursor,
+    }) => {
       try {
         const resolvedTabId = mgr.resolveTab({ tabId, owner });
         const page = await mgr.getPage({ tabId, owner });
         const ctx = resolveFrame(page, frame);
+        const paginated = query !== undefined || paginate || cursor !== undefined;
+        if (paginated && diff)
+          throw new Error("Continuation and query cannot be combined with diff.");
+        const readChunk = (text?: string) =>
+          pageTextStore.read(text, {
+            scope: JSON.stringify([
+              "snapshot",
+              resolvedTabId,
+              owner,
+              ctx.url(),
+              frame,
+              selector,
+              query,
+              filter,
+              intent,
+            ]),
+            query,
+            cursor,
+            maxChars: maxChars ?? 8000,
+          });
+        if (cursor !== undefined) return readChunk();
 
         // Capture the full untruncated tree.
         const result = await captureSnapshot(ctx, resolvedTabId, { selector, noTruncate: true });
@@ -1294,9 +1383,11 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         // When an intent is given, its own role set narrows the FULL tree (base
         // "all"), so content intents (read_content / extract_data) aren't pre-stripped
         // by the interactive default. An explicit filter arg is still honored.
-        const baseFilter = intent ? (filter ?? "all") : (filter ?? "interactive");
+        const baseFilter =
+          intent || query !== undefined ? (filter ?? "all") : (filter ?? "interactive");
         const filtered = filterTree(result.text, baseFilter);
         const scoped = intent ? applyIntent(filtered, intent) : filtered;
+        if (paginated) return readChunk(scoped);
 
         // Build the frames block first so we can reserve its budget — maxChars
         // must be a hard cap on the whole output, frames included.

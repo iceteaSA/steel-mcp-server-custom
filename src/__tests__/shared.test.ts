@@ -301,6 +301,17 @@ describe("execScroll", () => {
 });
 
 describe("resolveFrame", () => {
+  it("resolves numeric indexes before matching digits in frame URLs", () => {
+    const first = { name: () => "outer", url: () => "http://127.0.0.1:4001/outer" };
+    const second = { name: () => "inner", url: () => "http://127.0.0.1:4002/inner" };
+    const page = { frames: () => [{}, first, second] } as unknown as Page;
+    expect(resolveFrame(page, "1")).toBe(second as unknown as Page);
+  });
+
+  it("accepts Patchright frame-qualified refs without changing legacy refs", () => {
+    expect(toSelector({ ref: "@f2e3" })).toBe("aria-ref=f2e3");
+    expect(toSelector({ ref: "f12e99" })).toBe("aria-ref=f12e99");
+  });
   it("returns the page when frame is omitted", () => {
     const page = { frames: () => [] } as any;
     expect(resolveFrame(page)).toBe(page);

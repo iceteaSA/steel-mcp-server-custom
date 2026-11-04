@@ -405,6 +405,17 @@ describe("captureSnapshot", () => {
 // CaptureSnapshot compact refs — ariaSnapshot returns [ref=eN], we show @eN
 // ---------------------------------------------------------------------------
 describe("captureSnapshot compact refs", () => {
+  it("compacts frame-qualified refs and ignores their churn in diffs", async () => {
+    const page = { locator: () => ({ ariaSnapshot: async () => '- button "Inner" [ref=f2e3]' }) };
+    const result = await captureSnapshot(
+      page as unknown as Parameters<typeof captureSnapshot>[0],
+      91,
+    );
+    expect(result.text).toBe('- button "Inner" @f2e3');
+    expect(diffSnapshots('- button "Inner" @f1e2', '- button "Inner" @f2e3')).toBe(
+      "(no visible change)",
+    );
+  });
   it("transforms [ref=eN] to @eN in snapshot output", async () => {
     const raw = '- button "Go" [ref=e7]';
     const mockPage = {

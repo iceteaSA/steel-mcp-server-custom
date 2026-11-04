@@ -51,7 +51,7 @@ export async function captureSnapshot(
   // Compact ref format: Playwright ai-mode emits [ref=eN]; we show @eN (saves
   // ~6 chars/element). Resolution unchanged — toSelector maps @eN → aria-ref=eN.
   const raw = (await ctx.locator(selector).ariaSnapshot({ mode: "ai" } as any)).replace(
-    /\[ref=(e\d+)\]/g,
+    /\[ref=((?:f\d+)?e\d+)\]/g,
     "@$1",
   );
 
@@ -125,7 +125,7 @@ export function truncateAtLine(
 // -----------------------------------------------------------------------------
 
 // Strip @eN markers so ref-churn doesn't count as a change.
-const REF_RE = /\s*@e\d+/g;
+const REF_RE = /\s*@(?:f\d+)?e\d+/g;
 
 function normalizeLine(line: string): string {
   return line.replace(REF_RE, "");

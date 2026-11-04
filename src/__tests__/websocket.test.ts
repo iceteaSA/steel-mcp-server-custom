@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { chromium, type Page } from "patchright";
 import { EnvSchema } from "../env.js";
 import { BrowserManager } from "../manager.js";
+import { register as registerExtraction } from "../tools/extraction.js";
+import { register as registerInteraction } from "../tools/interaction.js";
+import type { ToolSpec } from "../tools/shared.js";
+import { clearSnapshot, getStoredSnapshot } from "../snapshot.js";
 
 test("settle injection on document load preserves page WebSocket upgrades", async () => {
   const server = Bun.serve({
@@ -72,6 +76,91 @@ test("settle injection on document load preserves page WebSocket upgrades", asyn
   } finally {
     await context.close();
     server.stop(true);
+    await rm(profile, { recursive: true, force: true });
+  }
+}, 20000);
+
+test("nested cross-origin iframe snapshots keep frame refs and the main baseline isolated", async () => {
+  const inner = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () =>
+      new Response("<button onclick=\"this.textContent='Inner clicked'\">Inner target</button>", {
+        headers: { "content-type": "text/html" },
+      }),
+  });
+  const outer = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: (request) =>
+      new Response(
+        new URL(request.url).pathname === "/outer"
+          ? `<button>Outer target</button><iframe name="inner" src="http://127.0.0.1:${inner.port}/inner"></iframe>`
+          : `<button>Main target</button><iframe name="outer" src="/outer"></iframe>`,
+        { headers: { "content-type": "text/html" } },
+      ),
+  });
+  const profile = await mkdtemp(join(tmpdir(), "steel-iframe-"));
+  const context = await chromium.launchPersistentContext(profile, {
+    executablePath: "/usr/bin/chromium",
+    headless: true,
+    args: ["--no-sandbox"],
+    timeout: 5000,
+  });
+  try {
+    const page = context.pages()[0];
+    await page.goto(`http://127.0.0.1:${outer.port}/`, { waitUntil: "domcontentloaded" });
+    await page
+      .frameLocator('iframe[name="outer"]')
+      .frameLocator('iframe[name="inner"]')
+      .getByRole("button")
+      .waitFor();
+    const env = EnvSchema.parse({ BROWSER_MODE: "local", SETTLE_TIMEOUT_MS: "0" });
+    const mgr = {
+      getPage: async () => page,
+      resolveTab: () => 991,
+      dialogNotice: () => "",
+      getTabLastUrl: () => page.url(),
+      setTabLastUrl: () => {},
+    } as unknown as BrowserManager;
+    const specs: ToolSpec[] = [];
+    registerExtraction((spec) => specs.push(spec), mgr, env);
+    registerInteraction((spec) => specs.push(spec), mgr, env);
+    const snapshot = specs.find((spec) => spec.name === "snapshot")!;
+    clearSnapshot(991);
+    await snapshot.handler({ filter: "all" });
+    const baseline = getStoredSnapshot(991);
+    expect(baseline).toContain("Main target");
+    const index = page
+      .frames()
+      .slice(1)
+      .findIndex((frame) => frame.name() === "inner");
+    expect(index).toBeGreaterThanOrEqual(0);
+    for (const frame of ["inner", `:${inner.port}/inner`, String(index)]) {
+      const result = await snapshot.handler({ frame, filter: "all" });
+      expect(result.isError).toBeUndefined();
+      expect(result.content[0].text).toContain("Inner target");
+      expect(result.content[0].text).not.toContain('button "Main target"');
+      expect(result.content[0].text).not.toContain('button "Outer target"');
+      expect(getStoredSnapshot(991)).toBe(baseline);
+    }
+    const found = await snapshot.handler({ frame: "inner", query: "Inner target" });
+    const ref = found.structuredContent.text.match(/@(?:f\d+)?e\d+/)?.[0];
+    expect(ref).toBeDefined();
+    const click = await specs
+      .find((spec) => spec.name === "click")!
+      .handler({ frame: "inner", ref });
+    expect(click.isError).toBeUndefined();
+    expect(await page.frame({ name: "inner" })!.getByRole("button").innerText()).toBe(
+      "Inner clicked",
+    );
+    const wrongFrame = await snapshot.handler({ frame: "missing" });
+    expect(wrongFrame.isError).toBe(true);
+  } finally {
+    clearSnapshot(991);
+    await context.close();
+    outer.stop(true);
+    inner.stop(true);
     await rm(profile, { recursive: true, force: true });
   }
 }, 20000);

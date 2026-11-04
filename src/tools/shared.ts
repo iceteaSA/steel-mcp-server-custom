@@ -16,6 +16,7 @@ import {
   interpretCheckboxValue,
 } from "../helpers.js";
 import { afterAction } from "../utils.js";
+import { fenceToolResult } from "../untrusted.js";
 
 // Re-exported because @modelcontextprotocol/sdk 1.29 doesn't re-export
 // ToolAnnotations from the server/mcp module.
@@ -114,7 +115,10 @@ export function makeRegistrar(
       // Handler type is intentionally loose — the SDK validates args at
       // runtime against inputSchema; compile-time narrowing would need
       // per-tool generics that defeat the wrapper's purpose.
-      spec.handler as Parameters<McpServer["registerTool"]>[2],
+      (async (args: Record<string, unknown>) =>
+        fenceToolResult(await spec.handler(args), spec.name)) as Parameters<
+        McpServer["registerTool"]
+      >[2],
     );
     count++;
   };
@@ -180,14 +184,12 @@ export function resolveFrame(page: Page, frame?: string): Frame | Page {
   const byName = frames.find((f) => f.name() === frame);
   if (byName) return byName;
 
-  // (b) URL substring match
-  const byUrl = frames.find((f) => f.url().includes(frame));
-  if (byUrl) return byUrl;
-
-  // (c) child-frame index (0-based, excludes main frame)
   if (/^\d+$/.test(frame)) {
     const idx = parseInt(frame, 10);
     if (idx >= 0 && idx < frames.length) return frames[idx];
+  } else {
+    const byUrl = frames.find((f) => f.url().includes(frame));
+    if (byUrl) return byUrl;
   }
 
   const list = frames.map((f, i) => `[${i}] name="${f.name()}" url=${f.url()}`).join("\n");
@@ -218,7 +220,7 @@ export function toSelector(args: { selector?: string; ref?: string }): string {
   if (hasRef) {
     // Strip leading "@" — compact snapshot format emits @eN; bare eN also accepted.
     const ref = args.ref!.startsWith("@") ? args.ref!.slice(1) : args.ref!;
-    if (!/^e\d+$/.test(ref)) {
+    if (!/^(?:f\d+)?e\d+$/.test(ref)) {
       throw new Error(
         `Invalid ref "${args.ref}" — expected format e<digits> or @e<digits> (e.g. "e5" or "@e5").`,
       );

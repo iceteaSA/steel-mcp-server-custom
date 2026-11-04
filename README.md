@@ -168,6 +168,24 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 
 The unit suite compares this inventory with the actual MCP `tools/list`, with both AI tools enabled.
 
+### Focused reads and continuation
+
+Use `query` on `snapshot` or `get_page_text` to find lines with case-insensitive literal text.
+Snapshot results keep their element refs, including frame-qualified refs such as `@f2e3`.
+Use `paginate: true` without a query to read a long capture in chunks.
+The structured result contains `text`, `totalChars`, and an optional `nextCursor`.
+Give that token as `cursor` with the same targeting and query arguments.
+
+Continuation reads the stored capture, not the changing page. Get a fresh snapshot before an interaction if the page changed.
+Tokens expire after five minutes. The cache holds at most 32 tokens and rejects captures larger than 1,000,000 characters.
+Paginated `maxChars` must be from 1 to 64,000. Continuation is not available with snapshot diffs or text list/file modes.
+
+All MCP text blocks have an untrusted-content fence. Page text cannot close this fence with a forged delimiter.
+The aggregate text limit is 512,000 UTF-8 bytes, including fences and truncation notices.
+Per-tool `maxChars` controls the payload before this envelope. Structured results are also untrusted data.
+
+These features adapt the focused-read, pagination, and provenance-fence methods from upstream v2.0.1 under the existing MIT license.
+
 ---
 
 ## Cookie Push Extension

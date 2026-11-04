@@ -28,6 +28,10 @@ The settle check is best-effort. It does not guarantee application readiness or 
 
 `writeToFile` applies the configured output-root check. Large outputs can use file mode. JSON tools provide output schemas and structured results where supported.
 
+`PageTextStore` provides opt-in literal search and cursor continuation for snapshots and text. Tokens bind to the tool, tab, owner, URL, frame, selector, and query options. Continuation uses a stored capture, so page changes do not move the text between chunks. The cache has a five-minute lifetime, a 32-token limit, and a 1,000,000-character limit per capture.
+
+The registrar fences every MCP text block through `fenceToolResult`. It removes invisible control characters and escapes forged fence delimiters. The aggregate text budget includes the fence and truncation notice. Structured data keeps its schema and carries untrusted provenance in `_meta`.
+
 ## Boundaries
 
 The server uses Patchright directly for browser operations. Steel mode connects through CDP. Local mode launches a browser. Optional AI tools call an OpenAI-compatible endpoint. The cookie relay uses a different transport from stdio.
