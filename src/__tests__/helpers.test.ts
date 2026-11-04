@@ -12,8 +12,6 @@ import {
   detectErrorPage,
   ErrorTracker,
   ERROR_TRACKER_TTL_MS,
-  CAPTCHA_WAIT_TOTAL_MS,
-  CAPTCHA_POLL_INTERVAL_MS,
   dedupeLinks,
   pickPrimaryLink,
   findTitle,
@@ -289,23 +287,6 @@ describe("detectErrorPage", () => {
   });
   it("returns null for empty title", () => {
     expect(detectErrorPage("")).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// CAPTCHA wait constants
-// ---------------------------------------------------------------------------
-describe("CAPTCHA wait constants", () => {
-  it("has reasonable wait total (10-30s)", () => {
-    expect(CAPTCHA_WAIT_TOTAL_MS).toBeGreaterThanOrEqual(10_000);
-    expect(CAPTCHA_WAIT_TOTAL_MS).toBeLessThanOrEqual(30_000);
-  });
-  it("has reasonable poll interval (1-5s)", () => {
-    expect(CAPTCHA_POLL_INTERVAL_MS).toBeGreaterThanOrEqual(1_000);
-    expect(CAPTCHA_POLL_INTERVAL_MS).toBeLessThanOrEqual(5_000);
-  });
-  it("allows multiple polls within total wait", () => {
-    expect(CAPTCHA_WAIT_TOTAL_MS / CAPTCHA_POLL_INTERVAL_MS).toBeGreaterThanOrEqual(3);
   });
 });
 

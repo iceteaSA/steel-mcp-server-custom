@@ -26,18 +26,12 @@ export function collapseWhitespace(s: string | null | undefined): string {
  * hCaptcha, AWS WAF, DataDome, and generic challenge pages.
  *
  * When CapSolver is loaded, these challenges may auto-solve within seconds.
- * Callers should wait + re-check (see CAPTCHA_WAIT_* constants) before
- * returning isError to the agent.
+ * Callers use awaitCaptcha to wait before returning isError to the agent.
  */
 const BOT_WALL_TITLE_RE =
   /just a moment|attention required|access denied|verify you are human|unusual traffic|are you a robot|captcha|human verification/i;
 const BOT_WALL_URL_RE =
   /\/cdn-cgi\/challenge-platform\/|\/sorry\/index|google\.com\/sorry|recaptcha\/api|hcaptcha\.com\/captcha|challenges\.cloudflare\.com/i;
-
-/** How long to wait for CapSolver to auto-solve a detected CAPTCHA (ms). */
-export const CAPTCHA_WAIT_TOTAL_MS = 15_000;
-/** Polling interval while waiting for CAPTCHA solve (ms). */
-export const CAPTCHA_POLL_INTERVAL_MS = 2_000;
 
 export function isBotWall(title: string, url: string): boolean {
   return BOT_WALL_TITLE_RE.test(title) || BOT_WALL_URL_RE.test(url);

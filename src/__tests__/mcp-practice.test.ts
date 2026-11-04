@@ -141,7 +141,7 @@ test("annotations cover mutating modes, arbitrary page effects, and remote navig
   }
 });
 
-test("the complete 43-tool annotation policy matches every declared mode", () => {
+test("the complete 44-tool annotation policy matches every declared mode", () => {
   const readOnly = new Set([
     "captcha_status",
     "extract",

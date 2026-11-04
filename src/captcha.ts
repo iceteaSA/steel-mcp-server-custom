@@ -1,6 +1,6 @@
 import type { Frame, Page } from "patchright";
 import { isBotWall } from "./helpers.js";
-import { solveTask, type CaptchaTask, type SolverOptions } from "./capsolver.js";
+import { CapSolverApiError, solveTask, type CaptchaTask, type SolverOptions } from "./capsolver.js";
 
 export type CaptchaContext = Page | Frame;
 export interface CaptchaDetection {
@@ -28,7 +28,18 @@ export interface CaptchaResult {
 
 declare global {
   interface Window {
-    __steelCaptchaSignal?: { state: string; buttonState?: string };
+    __steelCaptchaSignal?: {
+      state: string;
+      armed: boolean;
+      buttonState?: string;
+      document: Document;
+      url: string;
+      nodes: Element[];
+      key: string;
+      buttonElement?: Element | null;
+      ignoredButton?: Element | null;
+      ignoredButtonState?: string;
+    };
   }
 }
 
@@ -39,22 +50,101 @@ export function captchaTimeoutMs(): number {
 
 // Run in the page world. The extension calls page functions through postMessage.
 export function readCaptchaDocument(): CaptchaDetection | null {
+  function readScope() {
+    const nodes = Array.from(
+      document.querySelectorAll(
+        '.g-recaptcha[data-sitekey], .cf-turnstile[data-sitekey], .h-captcha[data-sitekey], iframe[src*="recaptcha/api2/anchor"], iframe[src*="recaptcha/enterprise/anchor"], iframe[src*="challenges.cloudflare.com"], capsolver-widget, script[src*="recaptcha/"], [name="g-recaptcha-response"], [name="cf-turnstile-response"], [name="h-captcha-response"]',
+      ),
+    );
+    return {
+      document,
+      url: location.href,
+      nodes,
+      key: JSON.stringify(
+        nodes.map((node) => [
+          node.getAttribute("data-sitekey"),
+          node.getAttribute("src"),
+          node.getAttribute("data-widget-id"),
+          node.getAttribute("data-captcha-type"),
+        ]),
+      ),
+    };
+  }
+  function syncScope(signal: NonNullable<Window["__steelCaptchaSignal"]>, force = false) {
+    const scope = readScope();
+    if (
+      force ||
+      signal.document !== scope.document ||
+      signal.url !== scope.url ||
+      signal.key !== scope.key ||
+      signal.nodes.length !== scope.nodes.length ||
+      signal.nodes.some((node, index) => node !== scope.nodes[index])
+    ) {
+      const button = document.querySelector("#capsolver-solver-tip-button");
+      signal.ignoredButton = button === signal.buttonElement ? button : null;
+      signal.ignoredButtonState = signal.ignoredButton?.getAttribute("data-state") || "";
+      Object.assign(signal, scope, { state: "", buttonState: "", armed: false });
+    }
+  }
   if (!window.__steelCaptchaSignal) {
-    const signal = { state: "" };
+    const signal: NonNullable<Window["__steelCaptchaSignal"]> = {
+      state: "",
+      armed: true,
+      ...readScope(),
+    };
     Object.defineProperty(window, "__steelCaptchaSignal", { value: signal, configurable: true });
     window.addEventListener("message", (event) => {
       if (event.source !== window || !event.data || typeof event.data !== "object") return;
-      if (event.data.type === "capsolverCallback") signal.state = "solved";
-      if (event.data.type === "capsolverDetectedCallback") signal.state = "detected";
-      if (event.data.type === "capsolverFailedCallback") signal.state = "error";
+      syncScope(signal);
+      if (!signal.nodes.length && !document.querySelector("#capsolver-solver-tip-button")) return;
+      if (event.data.type === "capsolverDetectedCallback") {
+        signal.armed = true;
+        signal.state = "detected";
+      }
+      // Terminal callbacks have no widget ID. A reset requires a fresh detection signal.
+      if (
+        signal.armed &&
+        ["capsolverCallback", "capsolverFailedCallback"].includes(event.data.type)
+      ) {
+        signal.buttonElement = document.querySelector("#capsolver-solver-tip-button");
+        signal.buttonState = signal.buttonElement?.getAttribute("data-state") || "";
+        signal.state = event.data.type === "capsolverCallback" ? "solved" : "error";
+      }
+    });
+    for (const method of ["pushState", "replaceState"] as const) {
+      const original = window.history?.[method];
+      if (typeof original !== "function") continue;
+      window.history[method] = function (this: History, ...args: Parameters<History["pushState"]>) {
+        const result = original.apply(this, args);
+        syncScope(signal, true);
+        return result;
+      };
+    }
+    window.addEventListener("popstate", () => syncScope(signal, true));
+    window.addEventListener("pageshow", (event) => {
+      if (event.persisted) syncScope(signal, true);
     });
   }
   const button = document.querySelector("#capsolver-solver-tip-button");
-  const buttonState = button?.getAttribute("data-state") || "";
   const signal = window.__steelCaptchaSignal;
+  if (signal) syncScope(signal);
+  const rawButtonState = button?.getAttribute("data-state") || "";
+  if (signal && (signal.ignoredButton !== button || signal.ignoredButtonState !== rawButtonState)) {
+    signal.ignoredButton = null;
+    signal.ignoredButtonState = undefined;
+  }
+  const buttonState =
+    signal?.ignoredButton === button &&
+    signal.ignoredButtonState === rawButtonState &&
+    ["solved", "error"].includes(rawButtonState)
+      ? ""
+      : rawButtonState;
   if (signal && signal.buttonState !== buttonState && ["solving", "ready"].includes(buttonState))
     signal.state = "";
-  if (signal) signal.buttonState = buttonState;
+  if (signal) {
+    signal.buttonState = buttonState;
+    signal.buttonElement = button;
+  }
   // Failure callbacks do not always update the extension button.
   const state =
     signal?.state === "error" || signal?.state === "solved"
@@ -88,10 +178,11 @@ export function readCaptchaDocument(): CaptchaDetection | null {
     !script &&
     !button &&
     !extensionWidget &&
-    !responseField &&
-    !window.__steelCaptchaSignal?.state
-  )
+    !responseField
+  ) {
+    if (signal) signal.state = "";
     return null;
+  }
   const params = new URL(anchor?.src || script?.src || location.href, location.href).searchParams;
   const extensionType = extensionWidget?.getAttribute("data-captcha-type");
   function describe(widget: Element | null): CaptchaDetection {
@@ -179,8 +270,18 @@ async function probe(
 ): Promise<{ detection: CaptchaDetection; context: CaptchaContext } | null> {
   const found: Array<{ detection: CaptchaDetection; context: CaptchaContext }> = [];
   for (const target of contexts(context)) {
-    const detection = await detectCaptcha(target);
-    if (detection) found.push({ detection, context: target });
+    if ("isDetached" in target && target.isDetached()) throw new CaptchaFrameDetachedError();
+    try {
+      const detection = await detectCaptcha(target);
+      if (detection) found.push({ detection, context: target });
+    } catch (error) {
+      if (
+        ("isDetached" in target && target.isDetached()) ||
+        (error instanceof Error && /frame (?:was |has been )?detached/i.test(error.message))
+      )
+        throw new CaptchaFrameDetachedError();
+      throw error;
+    }
   }
   if (!found.length && "title" in context && isBotWall(await context.title(), context.url())) {
     return {
@@ -192,6 +293,7 @@ async function probe(
 }
 
 class CaptchaDeadlineError extends Error {}
+class CaptchaFrameDetachedError extends Error {}
 
 // CDP evaluations have no per-call timeout.
 async function withinDeadline<T>(work: () => Promise<T>, deadline: number): Promise<T> {
@@ -235,6 +337,7 @@ export async function awaitCaptcha(
       if (detected.state === "error" || detected.state === "failed")
         return result("failed", "extension reported an error");
     } catch (error) {
+      if (error instanceof CaptchaFrameDetachedError) return result("failed", "frame detached");
       if (error instanceof CaptchaDeadlineError) return result("timeout");
       if ("isClosed" in context && context.isClosed()) return result("failed", "page closed");
       // Navigation can destroy the execution context while the extension submits.
@@ -437,7 +540,9 @@ async function solveCaptchaOnce(
       ? result("solved")
       : result("failed", "no response field or callback accepted the token");
   } catch (error) {
+    if (error instanceof CaptchaFrameDetachedError) return result("failed", "frame detached");
     if (error instanceof CaptchaDeadlineError) return result("timeout");
+    if (error instanceof CapSolverApiError) return result("failed", error.message);
     const text = error instanceof Error ? error.message : "";
     return result(
       "failed",

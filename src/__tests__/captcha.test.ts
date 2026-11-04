@@ -210,6 +210,47 @@ describe("R1 CAPTCHA signal scope and exits", () => {
     runInContext('window.dispatchEvent(new window.Event("pageshow"))', f.context);
     expect((await awaitCaptcha(f.page, { timeoutMs: 20 })).status).toBe("solved");
   });
+  it("ignores a late completion from the prior route until the new widget is detected", async () => {
+    const f = fixture('<div class="g-recaptcha" data-sitekey="old-key"></div>');
+    await detectCaptcha(f.page);
+    message(f, "capsolverDetectedCallback");
+    runInContext('history.pushState({}, "", "/new")', f.context);
+    f.window.document.body.innerHTML = '<div class="cf-turnstile" data-sitekey="new-key"></div>';
+    await detectCaptcha(f.page);
+    message(f, "capsolverCallback");
+    expect((await awaitCaptcha(f.page, { timeoutMs: 20, pollIntervalMs: 5 })).status).toBe(
+      "timeout",
+    );
+    message(f, "capsolverDetectedCallback");
+    message(f, "capsolverCallback");
+    expect((await awaitCaptcha(f.page, { timeoutMs: 20 })).status).toBe("solved");
+  });
+  it("rejects an old solved tip after navigation but accepts a fresh solving-to-solved transition", async () => {
+    const f = fixture(
+      '<div class="cf-turnstile" data-sitekey="key"></div><div id="capsolver-solver-tip-button" data-state="solved"></div>',
+    );
+    expect((await detectCaptcha(f.page))?.state).toBe("solved");
+    runInContext('history.pushState({}, "", "/new")', f.context);
+    expect((await detectCaptcha(f.page))?.state).not.toBe("solved");
+    const tip = f.window.document.querySelector("#capsolver-solver-tip-button")!;
+    tip.setAttribute("data-state", "solving");
+    expect((await detectCaptcha(f.page))?.state).toBe("solving");
+    tip.setAttribute("data-state", "solved");
+    expect((await detectCaptcha(f.page))?.state).toBe("solved");
+  });
+  it("keeps a fresh failure callback newer than the solving tip after a route reset", async () => {
+    const f = fixture(
+      '<div class="cf-turnstile" data-sitekey="key"></div><div id="capsolver-solver-tip-button" data-state="solving"></div>',
+    );
+    await detectCaptcha(f.page);
+    runInContext('history.pushState({}, "", "/new")', f.context);
+    message(f, "capsolverDetectedCallback");
+    message(f, "capsolverFailedCallback");
+    expect(await awaitCaptcha(f.page, { timeoutMs: 20, pollIntervalMs: 5 })).toMatchObject({
+      status: "failed",
+      error: "extension reported an error",
+    });
+  });
   for (const mode of ["before", "during"] as const) {
     it(`reports a frame detached ${mode} inspection without a timeout`, async () => {
       let calls = 0;
@@ -284,7 +325,7 @@ describe("R1 CAPTCHA signal scope and exits", () => {
       let calls = 0;
       const result = await solveCaptcha(f.page, {
         apiKey: "private-key",
-        fetch: (async () => {
+        fetch: (async (_url: string | URL | Request, _init?: RequestInit) => {
           calls++;
           if (change === "removed") f.window.document.body.innerHTML = "<p>new page</p>";
           if (change === "key")
@@ -312,7 +353,7 @@ describe("R1 CAPTCHA signal scope and exits", () => {
     const f = fixture('<div class="g-recaptcha" data-sitekey="public-site-key"></div>');
     const result = await solveCaptcha(f.page, {
       apiKey: "private-key",
-      fetch: (async () =>
+      fetch: (async (_url: string | URL | Request, _init?: RequestInit) =>
         Response.json(
           {
             errorId: 1,

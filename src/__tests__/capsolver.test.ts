@@ -149,7 +149,11 @@ describe("CapSolver REST client", () => {
     }
     expect(message).toStartWith("CapSolver ERROR_INVALID_TASK_DATA: invalid task data");
     expect(message.length).toBeLessThanOrEqual("CapSolver ERROR_INVALID_TASK_DATA: ".length + 240);
-    expect(message).not.toMatch(/[\x00-\x1f\x7f]/);
+    expect(
+      [...message].some(
+        (character) => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127,
+      ),
+    ).toBe(false);
   });
   it("treats non-JSON create bodies as transport failures without retry", async () => {
     const c = client([new Response("gateway private-key", { status: 502 })]);
