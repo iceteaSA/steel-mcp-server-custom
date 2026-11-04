@@ -1,15 +1,13 @@
 import { z } from "zod";
 import type { Page } from "patchright";
 import type { BrowserManager, Env } from "../manager.js";
-import { afterAction, actionFeedback, sleep } from "../utils.js";
+import { afterAction, actionFeedback } from "../utils.js";
+import { awaitCaptcha, formatCaptchaResult } from "../captcha.js";
 import {
-  CAPTCHA_POLL_INTERVAL_MS,
-  CAPTCHA_WAIT_TOTAL_MS,
   cleanErrorMessage,
   detectErrorPage,
   ErrorTracker,
   extractPageContent,
-  isBotWall,
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
 import { tabTargetForce } from "./shared.js";
@@ -27,7 +25,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "go_to_url",
     title: "Navigate to URL",
-    description: `Navigate the current tab to a URL and return the final URL + page title. Auto-detects bot walls (waits up to 15s for CapSolver auto-solve) and HTTP error pages (404/5xx). Combine with readPage to extract text in the same call, or waitFor to pause until a selector appears. Use this as the primary navigation tool — do NOT use new_tab just to change pages.
+    description: `Navigate the current tab to a URL and return the final URL + page title. Detects CAPTCHA widgets and bot walls, then waits up to 90s for the CapSolver extension (CAPTCHA_WAIT_TOTAL_MS overrides). No CAPTCHA means no added wait. Returns solved or an actionable failure; use solve_captcha for an explicit paid API fallback, or start_browser for handoff. Also detects HTTP error pages (404/5xx). Combine with readPage to extract text in the same call, or waitFor to pause until a selector appears. Use this as the primary navigation tool — do NOT use new_tab just to change pages.
 
 CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (default 5K).`,
     toolset: "core",
@@ -121,41 +119,14 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         let finalUrl = page.url();
         let title = await page.title().catch(() => "");
 
-        // Bot-check / CAPTCHA detection. If CapSolver is configured, wait up
-        // to 15s for it to auto-solve before returning isError. Without a
-        // CapSolver key, fail immediately — no point waiting.
-        if (isBotWall(title, finalUrl)) {
-          const hasCapSolver = !!process.env.CAPSOLVER_API_KEY;
-          let solved = false;
-          if (hasCapSolver) {
-            const deadline = Date.now() + CAPTCHA_WAIT_TOTAL_MS;
-            while (Date.now() < deadline) {
-              await sleep(CAPTCHA_POLL_INTERVAL_MS);
-              title = await page.title().catch(() => "");
-              finalUrl = page.url();
-              if (!isBotWall(title, finalUrl)) {
-                solved = true;
-                break;
-              }
-            }
-          }
-          if (!solved) {
-            errorTracker.record(url);
-            const waitNote = hasCapSolver
-              ? ` (waited ${CAPTCHA_WAIT_TOTAL_MS / 1000}s for CapSolver)`
-              : " (no CAPSOLVER_API_KEY set — skipped auto-solve wait)";
-            return {
-              isError: true,
-              content: [
-                {
-                  type: "text",
-                  text: `Bot-check wall detected${waitNote}. title="${title}" url=${finalUrl}. Hand off to user via start_browser (Interactive URL).`,
-                },
-              ],
-            };
-          }
-          // CapSolver solved it — continue with normal response
+        const captcha = await awaitCaptcha(page);
+        const captchaLine = formatCaptchaResult(captcha);
+        if (captcha.status !== "none" && captcha.status !== "solved") {
+          errorTracker.record(url);
+          return { isError: true, content: [{ type: "text", text: captchaLine }] };
         }
+        title = await page.title().catch(() => "");
+        finalUrl = page.url();
 
         // HTTP error page detection (404, 5xx, etc.)
         const errorStatus = detectErrorPage(title);
@@ -238,6 +209,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
               text:
                 warningPrefix +
                 navLine +
+                (captchaLine ? `\n${captchaLine}` : "") +
                 titleLine +
                 waitMsg +
                 mediaNote +

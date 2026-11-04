@@ -665,7 +665,7 @@ NOTE: when clear=true with a filter, ALL entries captured up to read time are re
   register({
     name: "captcha_status",
     title: "CAPTCHA Solver Status",
-    description: `Check whether CapSolver CAPTCHA auto-solving is available: API key configured, balance, and supported CAPTCHA types. Use before tasks that may encounter CAPTCHAs (Cloudflare, reCAPTCHA, hCaptcha). The solver runs automatically during go_to_url — this tool is for pre-flight checks, not for solving.`,
+    description: `Check whether CapSolver CAPTCHA auto-solving is available: API key configured, balance, and supported CAPTCHA types. Use before tasks that may encounter CAPTCHAs (Cloudflare, reCAPTCHA, hCaptcha). Navigation and action tools wait for detected extension solves. This tool is only a pre-flight check; use solve_captcha after an automatic wait fails, or start_browser for human handoff. The MCP API key and browser extension configuration can differ.`,
     toolset: "debug",
     inputSchema: {},
     outputSchema: {

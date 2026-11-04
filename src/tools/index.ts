@@ -9,3 +9,4 @@ export { register as registerCredentials } from "./credentials.js";
 export { register as registerProfiles } from "./profiles.js";
 export { register as registerIntercept } from "./intercept.js";
 export { register as registerAct } from "./act.js";
+export { register as registerCaptcha } from "./captcha.js";

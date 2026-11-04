@@ -133,7 +133,51 @@ describe("non-browser tools", () => {
   it("tools/list returns expected tools with correct names", async () => {
     const r = await client.call(100, "tools/list");
     const names = r.result?.tools?.map((t) => t.name).sort() || [];
-    expect(names.length).toBe(41);
+    expect(names.length).toBe(42);
+    expect(names).toEqual([
+      "captcha_status",
+      "click",
+      "click_at",
+      "close_tabs",
+      "cookies",
+      "create_profile",
+      "credentials",
+      "delete_profile",
+      "download_file",
+      "evaluate",
+      "export_har",
+      "extract",
+      "fetch_urls",
+      "fill",
+      "get_attrs",
+      "get_console",
+      "get_links",
+      "get_network",
+      "get_page_text",
+      "get_screenshot",
+      "go_to_url",
+      "handle_dialog",
+      "history",
+      "intercept",
+      "list_profiles",
+      "list_tabs",
+      "mouse_down",
+      "mouse_move",
+      "mouse_up",
+      "new_tab",
+      "page_state",
+      "press_key",
+      "save_profile",
+      "scroll",
+      "smoke_test",
+      "snapshot",
+      "solve_captcha",
+      "start_browser",
+      "stop_browser",
+      "upload_file",
+      "use_credential",
+      "wait_for",
+    ]);
 
     // Verify removed tools are gone
     const removed = [
@@ -194,10 +238,10 @@ describe("non-browser tools", () => {
       const documented = [...section.matchAll(/^\| `([a-z_]+)` \|/gm)]
         .map((match) => match[1])
         .sort();
-      expect(names).toHaveLength(43);
+      expect(names).toHaveLength(44);
       expect(documented).toEqual(names);
       expect(new Set(documented).size).toBe(documented.length);
-      expect(readme).toContain("41 default, 43 with AI tools");
+      expect(readme).toContain("42 default, 44 with AI tools");
     } finally {
       allTools.kill();
     }

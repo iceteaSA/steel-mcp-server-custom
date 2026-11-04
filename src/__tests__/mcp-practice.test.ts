@@ -8,6 +8,53 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+const expectedToolNames = [
+  "act",
+  "captcha_status",
+  "click",
+  "click_at",
+  "close_tabs",
+  "cookies",
+  "create_profile",
+  "credentials",
+  "delete_profile",
+  "download_file",
+  "evaluate",
+  "export_har",
+  "extract",
+  "extract_ai",
+  "fetch_urls",
+  "fill",
+  "get_attrs",
+  "get_console",
+  "get_links",
+  "get_network",
+  "get_page_text",
+  "get_screenshot",
+  "go_to_url",
+  "handle_dialog",
+  "history",
+  "intercept",
+  "list_profiles",
+  "list_tabs",
+  "mouse_down",
+  "mouse_move",
+  "mouse_up",
+  "new_tab",
+  "page_state",
+  "press_key",
+  "save_profile",
+  "scroll",
+  "smoke_test",
+  "snapshot",
+  "solve_captcha",
+  "start_browser",
+  "stop_browser",
+  "upload_file",
+  "use_credential",
+  "wait_for",
+];
+
 function specs(mgr: Partial<BrowserManager> = {}, overrides: Record<string, string> = {}) {
   const tools: ToolSpec[] = [];
   const env = EnvSchema.parse({ BROWSER_MODE: "local", RELAY_PORT: "0", ...overrides });
@@ -18,7 +65,14 @@ function specs(mgr: Partial<BrowserManager> = {}, overrides: Record<string, stri
 
 test("every tool explicitly declares all four MCP safety hints", () => {
   const tools = specs();
-  expect(tools).toHaveLength(43);
+  expect(tools).toHaveLength(44);
+  expect(tools.map((tool) => tool.name).sort()).toEqual(expectedToolNames);
+  expect(tools.find((tool) => tool.name === "solve_captcha")?.annotations).toEqual({
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: true,
+  });
   for (const tool of tools) {
     for (const hint of [
       "readOnlyHint",
@@ -128,7 +182,8 @@ test("the complete 43-tool annotation policy matches every declared mode", () =>
     "stop_browser",
   ]);
   const tools = specs();
-  expect(tools).toHaveLength(43);
+  expect(tools).toHaveLength(44);
+  expect(tools.map((tool) => tool.name).sort()).toEqual(expectedToolNames);
   for (const tool of tools) {
     expect(tool.annotations.readOnlyHint, tool.name).toBe(readOnly.has(tool.name));
     expect(tool.annotations.destructiveHint, tool.name).toBe(!nonDestructive.has(tool.name));

@@ -51,6 +51,11 @@ return tab;
 - Check the URL after navigation. A redirect can open a login page or bot check.
 - Use `wait_for` for task-specific readiness. The settle check alone does not prove application readiness.
 - Read interaction feedback before the next operation.
+- Use `captcha_status` before CAPTCHA-heavy work.
+- Let `go_to_url`, `click`, `fill`, `press_key` and `act` finish their CAPTCHA wait. The default maximum is 90 s.
+- Read the CAPTCHA result: solved or a failure with the next steps.
+- After a CAPTCHA failure, use `solve_captcha({ tabId, owner })` for an explicit API attempt when permitted. Read [CAPTCHA instructions](references/workflows.md#captcha-solving) for supported types and spend risks.
+- Do not run `solve_captcha` in parallel with actions on the same tab. Do not add CAPTCHA sleep or retry loops.
 - Stop retries when the result shows a bot wall or error-loop warning.
 - Use the interactive URL from `start_browser` for human CAPTCHA or login handoff.
 

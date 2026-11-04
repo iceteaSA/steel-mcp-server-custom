@@ -8,7 +8,7 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 
 ## Features
 
-- **41 browser tools** (43 with AI tools). Use snapshots, navigation, forms, screenshots, extraction, network inspection, and owner-scoped tabs. `act` and `extract_ai` require `ACT_LLM_BASE_URL` and `ACT_LLM_MODEL`.
+- **42 browser tools** (44 with AI tools). Use snapshots, navigation, forms, screenshots, extraction, network inspection, and owner-scoped tabs. `act` and `extract_ai` require `ACT_LLM_BASE_URL` and `ACT_LLM_MODEL`.
 - **Patchright browser engine** — drops the `Runtime.enable` CDP fingerprint that vanilla Playwright leaks; native binary stays compatible with all standard Playwright page APIs
 - **Snapshot-first paradigm** — `snapshot` returns an accessibility tree with stable `[ref=eN]` tokens; refs feed `click`/`fill`/`scroll`/`get_attrs`/`extract`/`press_key` directly without re-discovering selectors
 - **MCP 2025 best practices** — `server.registerTool` with `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` annotations and `outputSchema` → `structuredContent` on JSON tools
@@ -19,7 +19,7 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 - **Profiles** — isolated BrowserContexts with persistent cookies/localStorage across restarts
 - **Credentials** — encrypted credential store (AES-256-GCM) with auto-fill support
 - **Cookie Push Extension** — Chrome/Vivaldi extension pushes real browser sessions to Steel profiles via HTTP relay
-- **CAPTCHA solving** — CapSolver extension (reCAPTCHA, hCaptcha, Turnstile, AWS WAF, GeeTest) + automatic wait-and-retry (15s CapSolver poll before returning `isError`)
+- **CAPTCHA solving**: navigation and action tools wait a maximum of 90 s for CAPTCHA widgets or bot walls. Use `solve_captcha` for the REST API fallback (reCAPTCHA v2/v3 and Turnstile).
 - **Dialog pre-arming** — `handle_dialog` sets an accept/dismiss policy for a tab before an action that triggers alert/confirm/prompt
 - **Network inspection** — `get_network` exposes the request/response ring buffer; per-tab `pageerror` capture
 - **Stealth fingerprint** — unified navigator/WebGL/canvas/audio/Intl spoofing across JS and HTTP
@@ -109,14 +109,14 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 
 ---
 
-## Tools (41 default, 43 with AI tools)
+## Tools (42 default, 44 with AI tools)
 
 All page-interacting tools accept an optional `tabId`. Omit for current-active-tab; pass it for concurrent-agent safety. `click`, `fill`, `scroll`, `wait_for`, `get_attrs`, `extract`, `press_key`, and `upload_file` also accept `ref: "eN"` from `snapshot` in place of a CSS `selector`. `click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot` accept `frame` to target an iframe by name, URL substring, or 0-based child index.
 
 | Tool | Description |
 |---|---|
 | **Navigation** | |
-| `go_to_url` | Navigate + optional `waitFor`. `readPage` extracts content in same call. `disableMedia` blocks images/fonts/CSS. CAPTCHA wait-and-retry (15s poll). Auto-detects bot walls + error loops |
+| `go_to_url` | Navigate + optional `waitFor`. `readPage` extracts content in the same call. `disableMedia` blocks images/fonts/CSS. Waits up to 90 s for detected CAPTCHAs. Detects bot walls + error loops |
 | `history` | Back, forward, or reload |
 | `scroll` | Scroll up/down by `selector`/`ref`. `readAfterScroll` returns visible text in same call |
 | `wait_for` | Wait for selector, text appear, text disappear. Accepts `ref` |
@@ -160,6 +160,7 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 | `use_credential` | Retrieve or auto-fill login form |
 | **System** | |
 | `captcha_status` | CapSolver balance + extension status |
+| `solve_captcha` | Wait for an active extension solve, or solve reCAPTCHA v2/v3 and Turnstile through the REST API. Accepts `tabId`, `owner`, `frame`, `timeoutMs`. Returns type, public site key, seconds, injection status and errors, never the token |
 | `smoke_test` | Self-test: navigate, fingerprint, stealth, CapSolver checks. Headless-detection probe (sannysoft) |
 | `start_browser` | Start browser, get Session Viewer + Interactive + Relay URLs |
 | `stop_browser` | Stop browser. `owner`+`force` override the multi-agent safety check |
@@ -168,6 +169,32 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 | `extract_ai` | LLM structured extraction from the current page (text or html, optional JSON Schema) |
 
 The unit suite compares this inventory with the actual MCP `tools/list`, with both AI tools enabled.
+
+### CAPTCHA waits and explicit fallback
+
+`go_to_url`, `click`, `fill`, `press_key` and `act` detect CAPTCHA widgets,
+extension signals and bot walls. They wait for a token, a solved signal, an
+extension error, or a timeout. The default timeout is 90 s. Set the MCP process
+variable `CAPTCHA_WAIT_TOTAL_MS` to change it. Pages without a detected CAPTCHA
+have no added wait. These waits do not create paid REST tasks.
+
+Use `captcha_status` before CAPTCHA-heavy work. Read the result line before
+the next operation: `CAPTCHA reCAPTCHA v2 solved in 31 s`, or a failure with
+`solve_captcha` and `start_browser` guidance. Do not add sleep or retry loops.
+
+After a failure, call `solve_captcha({tabId, owner, timeoutMs: 90000})` for an
+explicit API task. The MCP process must have `CAPSOLVER_API_KEY` for this path.
+An extension key in the browser container is not sufficient. The tool first
+reuses an existing token or waits for an extension that is already solving.
+The timeout includes this wait and all API polling. hCaptcha and other types
+are unsupported by the direct API path. Use the extension or the Interactive
+URL from `start_browser` for those types, or when the site key is unavailable.
+
+The API path uses ProxyLess tasks. A site can reject a token bound to another
+IP. An extension can start a task after the API check and cause a second charge.
+Do not call `solve_captcha` in parallel with other actions on the same tab.
+Success means a token was injected or the extension reported success, not that
+the site accepted the form. Check the page with `snapshot` or `wait_for`.
 
 ### Focused reads and continuation
 
@@ -340,7 +367,8 @@ This starts the Steel Browser on port `3000` (API + session viewer) and `9223` (
 
 | Env Variable | Default | Description |
 |---|---|---|
-| `CAPSOLVER_API_KEY` | — | CapSolver API key. Leave empty to disable CAPTCHA solving |
+| `CAPSOLVER_API_KEY` | — | CapSolver key for the container extension, or for `solve_captcha` when set on the MCP process. Do not expose this value in tool calls |
+| `CAPTCHA_WAIT_TOTAL_MS` | `90000` | MCP CAPTCHA wait budget in ms. `solve_captcha.timeoutMs` overrides it for one call |
 | `TZ` | `UTC` | Container timezone |
 | `LANG` | `en-US` | Chrome `--lang` flag |
 

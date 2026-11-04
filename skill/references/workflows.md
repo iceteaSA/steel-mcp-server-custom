@@ -567,31 +567,17 @@ get_page_text(selector: "main", tabId: 4)
 
 ## CAPTCHA Solving
 
-CapSolver extension is loaded in the Steel container. It auto-detects and
-solves CAPTCHAs via API (token mode — no visual click simulation).
-
-**Supported:** reCAPTCHA v2/v3, hCaptcha, Cloudflare Turnstile, AWS WAF,
-GeeTest v4, DataDome, ImageToText.
-
-```
-# Check balance and availability before CAPTCHA-heavy tasks
-captcha_status()
-→ Balance: $10.00 | Extension: loaded (token mode)
-```
-
-### Key rules
-
-- **Automatic.** No manual trigger needed — extension detects CAPTCHAs and
-  solves them without agent intervention.
-- **Token mode.** Solutions are injected via API tokens, not visual clicking.
-  More reliable in headless environments.
-- **Budget.** ~$0.80-1.20 per 1000 solves depending on type. Check balance
-  with `captcha_status` before large batches.
-- **Google `/sorry` pages.** CapSolver handles these transparently — wait
-  a few seconds after the redirect and the page loads with results.
-- **Wait-and-retry built in.** `go_to_url` polls CapSolver for up to 15s when
-  it detects a CAPTCHA wall before returning `isError: true`. You don't need
-  manual retry loops — the tool waits for the solver to complete.
+- Use `captcha_status` to check balance and availability before CAPTCHA-heavy work.
+- Let `go_to_url`, `click`, `fill`, `press_key` and `act` wait for detected CAPTCHAs. These tools use extension signals, widget fields and bot-wall checks. The default wait is 90 s. `CAPTCHA_WAIT_TOTAL_MS` on the MCP process changes it.
+- Read the CAPTCHA result line before the next action. A page without a detected CAPTCHA has no added wait. A detected CAPTCHA returns solved, an extension error, or a timeout with the next steps.
+- Do not add sleep or retry loops for CAPTCHAs. The automatic wait does not create another paid REST task.
+- After a failure, call `solve_captcha({ tabId, owner, timeoutMs: 90000 })` for an explicit API attempt when permitted. Give `frame` when the widget is inside a specific frame.
+- Configure `CAPSOLVER_API_KEY` on the MCP process for the direct API path. A key in the browser container alone does not configure that path. Do not retrieve or print the key.
+- Expect `solve_captcha` to reuse an existing token or wait for an active extension solve first. Its timeout covers the extension wait and API polling together. If the extension wait times out, the tool does not create another task.
+- Use the direct API path for reCAPTCHA v2/v3 and Turnstile only. Use the extension or human handoff for hCaptcha, other unsupported types, or a missing site key.
+- Read the returned type, public site key, seconds, injection status and error. Do not request the token. Success does not prove the site accepted the token. Check with `snapshot` or `wait_for`.
+- Do not call `solve_captcha` in parallel with actions on the same tab. The extension can start after the API check and cause a second charge. ProxyLess tokens can fail when the site binds a token to an IP.
+- Use the Interactive URL from `start_browser` when the solver fails or human input is necessary.
 
 ## Stealth & Fingerprint
 
@@ -680,11 +666,8 @@ If waitFor times out, `go_to_url` returns success with a `TIMED OUT` note in tex
 - Title matches `/just a moment|attention required|access denied|verify you are human/i`
 - URL matches `/cdn-cgi/challenge-platform/`
 
-Before returning `isError`, the tool polls CapSolver for up to 15s to give the
-solver time to complete. If the CAPTCHA resolves, navigation continues normally.
-If it doesn't, `isError: true` is returned with the final URL + title.
-
-Hand off via `start_browser` Interactive URL (HITL section below). Don't retry.
+Follow [CAPTCHA Solving](#captcha-solving) for the automatic wait, explicit API
+fallback and human handoff. Read the result line instead of starting a retry loop.
 
 ### Error Loop Detection (automatic)
 
@@ -901,20 +884,8 @@ Returns `{n: 21, sample: ["<article class=\"...\" ...>"]}`. Read the classes + n
 
 ## Bot-Check / Cloudflare Detection
 
-`go_to_url` auto-detects and returns `isError: true` (see "Nav + Wait in One Call" above). No manual check needed after nav.
-
-Before returning `isError`, the tool waits up to 15s for CapSolver to resolve
-the CAPTCHA. If it resolves, navigation continues normally. If not, `isError: true`
-is returned with the final URL + title.
-
-For bot walls that appear **after** a click (rare — usually on form submits):
-
-```
-list_tabs()              # check for unexpected redirect
-evaluate(expression: "document.title")
-```
-
-If signals match (`Just a moment`, `Attention Required`, `/cdn-cgi/challenge-platform/`): stop automation. Hand off via HITL pattern. Don't retry — same IP fails again.
+- Follow [CAPTCHA Solving](#captcha-solving) for bot walls after navigation or actions.
+- Read the automatic wait result before another operation. Use `solve_captcha` for an explicit API attempt, or `start_browser` for human handoff.
 
 ## Waiting Correctly
 
@@ -982,7 +953,7 @@ wait_for(text: "Welcome", tabId: 7)
 
 ## Human-in-the-Loop (HITL)
 
-CAPTCHA / 2FA / login walls / Cloudflare block → hand off:
+For a failed CAPTCHA solve, 2FA, or a login that needs human input, hand off:
 
 1. `start_browser()` → returns **Session Viewer** + **Interactive URL**
 2. Send user the Interactive URL + task description

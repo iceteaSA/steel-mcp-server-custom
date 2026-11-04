@@ -27,6 +27,7 @@ import {
   registerProfiles,
   registerIntercept,
   registerAct,
+  registerCaptcha,
 } from "./tools/index.js";
 import { llmConfigured } from "./llm.js";
 
@@ -70,6 +71,7 @@ registerNetwork(register, mgr, env);
 registerCredentials(register, mgr, env);
 registerProfiles(register, mgr, env);
 registerIntercept(register, mgr, env);
+registerCaptcha(register, mgr);
 if (llmConfigured(env)) {
   registerAct(register, mgr, env);
 }

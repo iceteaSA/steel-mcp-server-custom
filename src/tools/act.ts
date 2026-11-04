@@ -1,5 +1,6 @@
 import type { BrowserManager, Env } from "../manager.js";
 import { z } from "zod";
+import { awaitCaptcha, formatCaptchaResult } from "../captcha.js";
 import { extractPageContent as defaultExtractPageContent } from "../helpers.js";
 import { llmJson as defaultLlmJson } from "../llm.js";
 import { captureSnapshot as defaultCaptureSnapshot } from "../snapshot.js";
@@ -52,7 +53,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "act",
     title: "Act via LLM",
-    description: `Execute a natural-language browser instruction through a bounded LLM micro-loop. The model sees an accessibility snapshot of the page and chooses one action per step (click, fill, press_key, scroll). Stops at done/stuck or when maxSteps is reached.
+    description: `Execute a natural-language browser instruction through a bounded LLM micro-loop. The model sees an accessibility snapshot of the page and chooses one action per step (click, fill, press_key, scroll). Stops at done/stuck or when maxSteps is reached. Waits up to 90s for detected CAPTCHAs before reading the page and after each action (CAPTCHA_WAIT_TOTAL_MS overrides). No CAPTCHA means no added wait. CAPTCHA waits do not consume the 60s LLM/action budget. Returns solved or an actionable failure; use solve_captcha for explicit API fallback or start_browser for handoff.
 
 CONTEXT BUDGET — returns a plain-text transcript; each step is one line.`,
     toolset: "ai",
@@ -167,6 +168,7 @@ export async function runAct(
   const resolvedTabId = mgr.resolveTab({ tabId, owner, force });
   const startedAt = Date.now();
   const WALL_CAP_MS = 60_000;
+  let captchaWaitMs = 0;
 
   const systemPrompt =
     "You drive a browser via an accessibility tree. Each element may have @eN. Given the user's instruction and the current tree, choose the SINGLE next action. Use the ref of the target element. action=done when the instruction is satisfied; action=stuck if impossible. Only click/fill/press_key/scroll are available. Include a short `reason` string explaining the choice when useful — it is optional but encouraged for transparency.";
@@ -174,7 +176,7 @@ export async function runAct(
   const steps: string[] = [];
 
   function elapsedMs(): number {
-    return Date.now() - startedAt;
+    return Date.now() - startedAt - captchaWaitMs;
   }
 
   function remainingMs(): number {
@@ -188,7 +190,17 @@ export async function runAct(
     }
   }
 
+  async function waitForCaptcha(): Promise<void> {
+    const before = Date.now();
+    const result = await awaitCaptcha(page);
+    captchaWaitMs += Date.now() - before;
+    const line = formatCaptchaResult(result);
+    if (line) steps.push(line);
+    if (result.status !== "none" && result.status !== "solved") throw new Error(line);
+  }
+
   try {
+    await waitForCaptcha();
     for (let step = 1; step <= maxSteps; step++) {
       checkCap(`step ${step}`);
 
@@ -270,6 +282,7 @@ export async function runAct(
       }
       const actionElapsed = Date.now() - actionStart;
       steps[steps.length - 1] = `${stepLine} (${actionElapsed}ms)`;
+      await waitForCaptcha();
 
       if (step === maxSteps) {
         steps.push(`reached maxSteps (${maxSteps}) without completing`);

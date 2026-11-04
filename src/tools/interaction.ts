@@ -3,6 +3,7 @@ import fs from "fs/promises";
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
 import { afterAction, actionFeedback } from "../utils.js";
+import { awaitCaptcha, formatCaptchaResult } from "../captcha.js";
 import {
   assertInsideRoot,
   cleanErrorMessage,
@@ -30,7 +31,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "click",
     title: "Click Element",
-    description: `Click a page element identified by CSS selector or snapshot ref. Reports navigation if the URL changes. Optionally wait for a selector or text to appear after clicking (saves a separate wait_for call). Use for buttons, links, and interactive elements — do NOT use for form inputs (use fill instead). Refs come from the snapshot tool; refresh after navigation or page mutation. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main). Use snapshot to list available frames.`,
+    description: `Click a page element identified by CSS selector or snapshot ref. Reports navigation if the URL changes. Waits up to 90s for detected CAPTCHAs (CAPTCHA_WAIT_TOTAL_MS overrides); returns solved or a failure with solve_captcha/start_browser guidance. No CAPTCHA means no added wait. Optionally wait for a selector or text to appear after clicking (saves a separate wait_for call). Use for buttons, links, and interactive elements — do NOT use for form inputs (use fill instead). Refs come from the snapshot tool; refresh after navigation or page mutation. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main). Use snapshot to list available frames.`,
     toolset: "core",
     inputSchema: {
       selector: z
@@ -97,6 +98,14 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         const ctx = resolveFrame(page, frame);
         const beforeUrl = page.url();
         await execClick(page, env, { selector: sel, frame, timeout });
+        const captcha = await awaitCaptcha(page);
+        const captchaLine = formatCaptchaResult(captcha);
+        if (captcha.status !== "none" && captcha.status !== "solved") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: `Clicked: ${sel}\n${captchaLine}` }],
+          };
+        }
 
         // Snapshot-diff feedback (best-effort — doesn't affect result on failure).
         const afterUrl = page.url();
@@ -138,7 +147,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           content: [
             {
               type: "text",
-              text: `Clicked: ${sel}${navMsg}${waitMsg}${feedbackText}${dialogText}`,
+              text: `Clicked: ${sel}${navMsg}${waitMsg}${feedbackText}${dialogText}${captchaLine ? `\n${captchaLine}` : ""}`,
             },
           ],
         };
@@ -156,7 +165,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "fill",
     title: "Fill Form",
-    description: `Fill one or more form fields on the page. Auto-detects field types (text, select, checkbox, radio). Pass submitSelector to click a submit button after filling. Each field accepts selector or snapshot ref. Use for any form interaction (login, search, registration, checkout) — do NOT use click on form elements; fill handles all input types correctly. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main). Use snapshot to list available frames.`,
+    description: `Fill one or more form fields on the page. Auto-detects field types (text, select, checkbox, radio). Pass submitSelector to click a submit button after filling. Waits up to 90s for detected CAPTCHAs (CAPTCHA_WAIT_TOTAL_MS overrides); returns solved or a failure with solve_captcha/start_browser guidance. No CAPTCHA means no added wait. Each field accepts selector or snapshot ref. Use for any form interaction (login, search, registration, checkout) — do NOT use click on form elements; fill handles all input types correctly. Pass frame to target an iframe by name, URL substring, or child-frame index (0-based, excludes main). Use snapshot to list available frames.`,
     toolset: "core",
     inputSchema: {
       fields: z
@@ -363,6 +372,20 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         }
         await afterAction(page, env);
 
+        const captcha = await awaitCaptcha(page);
+        const captchaLine = formatCaptchaResult(captcha);
+        if (captcha.status !== "none" && captcha.status !== "solved") {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: `Filled ${filled.length}/${fields.length} field(s).\n${captchaLine}`,
+              },
+            ],
+          };
+        }
+
         const urlAfter = page.url();
         const resolved = mgr.resolveTab({ tabId, owner, force });
         if (urlAfter !== urlBefore) {
@@ -374,6 +397,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         const feedbackText = feedback ? `\n${feedback}` : "";
 
         const lines = [`Filled ${filled.length}/${fields.length} field(s).`];
+        if (captchaLine) lines.push(captchaLine);
         if (filled.length) {
           const byKind = filled.map((x) => `${x.selector} [${x.kind}]`).join(", ");
           lines.push(`  ok: ${byKind}`);
@@ -1092,7 +1116,7 @@ page.mouse coordinates are viewport-absolute — the optional frame param is acc
   register({
     name: "press_key",
     title: "Press Key",
-    description: `Press a keyboard key or key combination. Target a specific element (focuses it first) or press at the page level. Supports all standard Playwright key names and combinations.
+    description: `Press a keyboard key or key combination. Target a specific element (focuses it first) or press at the page level. Supports all standard Playwright key names and combinations. Waits up to 90s for detected CAPTCHAs (CAPTCHA_WAIT_TOTAL_MS overrides); returns solved or a failure with solve_captcha/start_browser guidance. No CAPTCHA means no added wait.
 
 Examples: "Enter", "Escape", "Control+A", "Shift+Tab", "ArrowDown", "PageDown", "Backspace", "Delete", "Tab", "F1", "Control+C".
 
@@ -1129,6 +1153,15 @@ Errors: unknown key name, selector timeout.`,
 
         await execPressKey(page, env, { selector: sel, key });
 
+        const captcha = await awaitCaptcha(page);
+        const captchaLine = formatCaptchaResult(captcha);
+        if (captcha.status !== "none" && captcha.status !== "solved") {
+          return {
+            isError: true,
+            content: [{ type: "text", text: `Pressed "${key}".\n${captchaLine}` }],
+          };
+        }
+
         const urlAfter = page.url();
         const navigated = urlAfter !== urlBefore;
         const target = sel ? ` on ${sel}` : "";
@@ -1144,7 +1177,7 @@ Errors: unknown key name, selector timeout.`,
           content: [
             {
               type: "text",
-              text: `Pressed "${key}"${target}.${feedbackText}${dialogText}`,
+              text: `Pressed "${key}"${target}.${feedbackText}${dialogText}${captchaLine ? `\n${captchaLine}` : ""}`,
             },
           ],
         };
