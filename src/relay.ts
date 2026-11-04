@@ -22,6 +22,7 @@ import { encryptJSON, decryptJSON } from "./crypto.js";
 import { assertSafeProfilePath, isValidProfileName } from "./helpers.js";
 import { WebSocket, WebSocketServer } from "ws";
 import { SigninStore, type SigninRequest } from "./signin.js";
+import { withProfileWrite, writeProfileData } from "./profile-store.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -127,15 +128,8 @@ async function readProfile(name: string, config: RelayConfig): Promise<ProfileSt
 }
 
 async function writeProfile(name: string, state: ProfileState, config: RelayConfig): Promise<void> {
-  await fs.mkdir(config.profilesDir, { recursive: true });
   const file = assertSafeProfilePath(name, config.profilesDir);
-  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
-  try {
-    await fs.writeFile(temporary, JSON.stringify(state, null, 2), { mode: 0o600 });
-    await fs.rename(temporary, file);
-  } finally {
-    await fs.unlink(temporary).catch(() => {});
-  }
+  await writeProfileData(file, state);
 }
 
 function normalizeDomain(domain: string): string {
@@ -218,44 +212,46 @@ async function handlePush(payload: PushPayload, config: RelayConfig): Promise<Pu
   // --- Cookies + localStorage → profile JSON ---
   // Defense in depth: assertSafeProfilePath validates the name AND confirms
   // the resolved path stays under profilesDir (catches bugs in the regex).
-  let existingState: ProfileState = {};
-  try {
-    existingState = await readProfile(profileName, config);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-  }
+  await withProfileWrite(assertSafeProfilePath(profileName, config.profilesDir), async () => {
+    let existingState: ProfileState = {};
+    try {
+      existingState = await readProfile(profileName, config);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
 
-  // Merge cookies: new cookies override existing ones (by name+domain+path)
-  const mergedCookies = [...(existingState.cookies ?? [])];
-  if (cookies?.length) {
-    for (const newCookie of cookies) {
-      const idx = mergedCookies.findIndex(
-        (c) =>
-          c.name === newCookie.name && c.domain === newCookie.domain && c.path === newCookie.path,
-      );
-      if (idx >= 0) {
-        mergedCookies[idx] = newCookie;
-      } else {
-        mergedCookies.push(newCookie);
+    // Merge cookies: new cookies override existing ones (by name+domain+path)
+    const mergedCookies = [...(existingState.cookies ?? [])];
+    if (cookies?.length) {
+      for (const newCookie of cookies) {
+        const idx = mergedCookies.findIndex(
+          (c) =>
+            c.name === newCookie.name && c.domain === newCookie.domain && c.path === newCookie.path,
+        );
+        if (idx >= 0) {
+          mergedCookies[idx] = newCookie;
+        } else {
+          mergedCookies.push(newCookie);
+        }
       }
     }
-  }
 
-  // Merge localStorage: new origins override existing, within an origin new keys override
-  const mergedLS: Record<string, Record<string, string>> = { ...existingState.localStorage };
-  if (localStorage) {
-    for (const [origin, entries] of Object.entries(localStorage)) {
-      mergedLS[origin] = { ...mergedLS[origin], ...entries };
+    // Merge localStorage: new origins override existing, within an origin new keys override
+    const mergedLS: Record<string, Record<string, string>> = { ...existingState.localStorage };
+    if (localStorage) {
+      for (const [origin, entries] of Object.entries(localStorage)) {
+        mergedLS[origin] = { ...mergedLS[origin], ...entries };
+      }
     }
-  }
 
-  const state = {
-    cookies: mergedCookies,
-    localStorage: mergedLS,
-    savedAt: new Date().toISOString(),
-    pushedFrom: "extension",
-  };
-  await writeProfile(profileName, state, config);
+    const state = {
+      cookies: mergedCookies,
+      localStorage: mergedLS,
+      savedAt: new Date().toISOString(),
+      pushedFrom: "extension",
+    };
+    await writeProfile(profileName, state, config);
+  });
 
   // --- Credentials ---
   let credentialSaved = false;
@@ -595,20 +591,22 @@ export function startRelayServer(config: RelayConfig): http.Server {
         }
         if (req.method === "DELETE" && segments.length === 4 && segments[2] === "domains") {
           const domain = normalizeDomain(domainSchema.parse(segments[3]));
-          const summary = await mutate(async () => {
-            const state = await readProfile(name, config);
-            state.cookies = (state.cookies ?? []).filter(
-              (cookie) => normalizeDomain(cookie.domain) !== domain,
-            );
-            state.localStorage = Object.fromEntries(
-              Object.entries(state.localStorage ?? {}).filter(
-                ([origin]) => new URL(origin).hostname.toLowerCase() !== domain,
-              ),
-            );
-            state.savedAt = new Date().toISOString();
-            await writeProfile(name, state, config);
-            return summarizeProfile(name, state);
-          });
+          const summary = await mutate(() =>
+            withProfileWrite(assertSafeProfilePath(name, config.profilesDir), async () => {
+              const state = await readProfile(name, config);
+              state.cookies = (state.cookies ?? []).filter(
+                (cookie) => normalizeDomain(cookie.domain) !== domain,
+              );
+              state.localStorage = Object.fromEntries(
+                Object.entries(state.localStorage ?? {}).filter(
+                  ([origin]) => new URL(origin).hostname.toLowerCase() !== domain,
+                ),
+              );
+              state.savedAt = new Date().toISOString();
+              await writeProfile(name, state, config);
+              return summarizeProfile(name, state);
+            }),
+          );
           jsonResponse(res, 200, summary);
           return;
         }

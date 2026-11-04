@@ -8,7 +8,7 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 
 ## Features
 
-- **44 browser tools** (46 with AI tools) in lane mode. Each caller has different tabs and browser storage. `STEEL_LANES=off` uses the legacy tool set.
+- **47 browser tools** (49 with AI tools) in lane mode. Each caller has different tabs and browser storage. `STEEL_LANES=off` uses the legacy tool set.
 - **Patchright browser engine** — drops the `Runtime.enable` CDP fingerprint that vanilla Playwright leaks; native binary stays compatible with all standard Playwright page APIs
 - **Snapshot-first paradigm** — `snapshot` returns an accessibility tree with stable `[ref=eN]` tokens; refs feed `click`/`fill`/`scroll`/`get_attrs`/`extract`/`press_key` directly without re-discovering selectors
 - **MCP 2025 best practices** — `server.registerTool` with `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` annotations and `outputSchema` → `structuredContent` on JSON tools

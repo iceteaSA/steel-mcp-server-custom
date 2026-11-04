@@ -10,6 +10,14 @@
 // -----------------------------------------------------------------------------
 
 import fs from "fs/promises";
+import {
+  withProfileWrite,
+  readProfileData,
+  writeProfileData,
+  removeProfileData,
+  profileRevision,
+  mergeProfileData,
+} from "./profile-store.js";
 import path from "path";
 import { sleep } from "./utils.js";
 
@@ -155,6 +163,7 @@ export class BrowserManager {
   // share the global tabs map (globally unique tabId), so existing tools work
   // unchanged — agents just pass their tabId.
   private profiles: Map<string, { context: BrowserContext; tabIds: Set<number> }> = new Map();
+  private profileVersions = new Map<string, number>();
   private tabToProfile: Map<number, string> = new Map(); // tabId → profileName
 
   // Tracks pages → tabIds for idempotent allocation. A context.on("page")
@@ -1583,21 +1592,13 @@ export class BrowserManager {
     // Restore saved state if it exists
     let restored = false;
     const savedPath = assertSafeProfilePath(name, this.env.PROFILES_DIR);
+    this.profileVersions.set(name, profileRevision(savedPath));
     try {
-      const raw = await fs.readFile(savedPath, "utf8");
-      const state = JSON.parse(raw) as {
-        cookies?: Array<{
-          name: string;
-          value: string;
-          domain: string;
-          path: string;
-          expires?: number;
-          httpOnly?: boolean;
-          secure?: boolean;
-          sameSite?: "Strict" | "Lax" | "None";
-        }>;
-        localStorage?: Record<string, Record<string, string>>;
-      };
+      const { state, revision } = await withProfileWrite(savedPath, async () => ({
+        state: await readProfileData(savedPath),
+        revision: profileRevision(savedPath),
+      }));
+      this.profileVersions.set(name, revision);
       if (state.cookies?.length) {
         await context.addCookies(state.cookies);
         restored = true;
@@ -1637,12 +1638,11 @@ export class BrowserManager {
   async applyProfileUpdated(name: string): Promise<boolean> {
     if (!this.hasProfile(name)) return false;
     const profile = this.profiles.get(name)!;
-    const state = JSON.parse(
-      await fs.readFile(assertSafeProfilePath(name, this.env.PROFILES_DIR), "utf8"),
-    ) as {
-      cookies?: Parameters<BrowserContext["addCookies"]>[0];
-      localStorage?: Record<string, Record<string, string>>;
-    };
+    const savedPath = assertSafeProfilePath(name, this.env.PROFILES_DIR);
+    const { state, revision } = await withProfileWrite(savedPath, async () => ({
+      state: await readProfileData(savedPath),
+      revision: profileRevision(savedPath),
+    }));
     if (!this.hasProfile(name) || this.profiles.get(name) !== profile) return false;
     if (state.cookies?.length) await profile.context.addCookies(state.cookies);
     for (const [origin, entries] of Object.entries(state.localStorage ?? {})) {
@@ -1678,6 +1678,7 @@ export class BrowserManager {
         if (!existing) await page.close().catch(() => {});
       }
     }
+    this.profileVersions.set(name, revision);
     return true;
   }
 
@@ -1693,37 +1694,46 @@ export class BrowserManager {
     }
     const profile = this.profiles.get(name);
     if (!profile) throw new Error(`Profile "${name}" is not active.`);
-
-    const cookies = await profile.context.cookies();
-
-    // Collect localStorage from all open pages in this profile
-    const localStorage: Record<string, Record<string, string>> = {};
-    for (const tabId of profile.tabIds) {
-      const page = this.tabs.get(tabId);
-      if (!page || page.isClosed()) continue;
-      try {
-        const origin = new URL(page.url()).origin;
-        if (origin === "about:" || origin === "chrome:") continue;
-        const ls = await page.evaluate(() => {
-          const entries: Record<string, string> = {};
-          for (let i = 0; i < window.localStorage.length; i++) {
-            const key = window.localStorage.key(i);
-            if (key) entries[key] = window.localStorage.getItem(key) ?? "";
-          }
-          return entries;
-        });
-        if (Object.keys(ls).length > 0) {
-          localStorage[origin] = ls;
-        }
-      } catch {
-        // Page might be on a special URL or crashed — skip
-      }
-    }
-
-    const state = { cookies, localStorage, savedAt: new Date().toISOString() };
     const savedPath = assertSafeProfilePath(name, this.env.PROFILES_DIR);
-    await fs.mkdir(path.dirname(savedPath), { recursive: true });
-    await fs.writeFile(savedPath, JSON.stringify(state, null, 2));
+    const state = await withProfileWrite(savedPath, async () => {
+      const cookies = await profile.context.cookies();
+
+      // Collect localStorage from all open pages in this profile
+      const localStorage: Record<string, Record<string, string>> = {};
+      for (const tabId of profile.tabIds) {
+        const page = this.tabs.get(tabId);
+        if (!page || page.isClosed()) continue;
+        try {
+          const origin = new URL(page.url()).origin;
+          if (origin === "about:" || origin === "chrome:") continue;
+          const ls = await page.evaluate(() => {
+            const entries: Record<string, string> = {};
+            for (let i = 0; i < window.localStorage.length; i++) {
+              const key = window.localStorage.key(i);
+              if (key) entries[key] = window.localStorage.getItem(key) ?? "";
+            }
+            return entries;
+          });
+          if (Object.keys(ls).length > 0) {
+            localStorage[origin] = ls;
+          }
+        } catch {
+          // Page might be on a special URL or crashed — skip
+        }
+      }
+
+      const disk = await readProfileData(savedPath);
+      const stale = (this.profileVersions.get(name) ?? 0) !== profileRevision(savedPath);
+      // A newer file can contain state that this context has not received.
+      const snapshot = { cookies, localStorage };
+      const merged = stale ? mergeProfileData(snapshot, disk) : mergeProfileData(disk, snapshot);
+      merged.savedAt = new Date().toISOString();
+      await writeProfileData(savedPath, merged);
+      if (!stale) this.profileVersions.set(name, profileRevision(savedPath));
+      return merged;
+    });
+    const cookies = state.cookies ?? [];
+    const localStorage = state.localStorage ?? {};
 
     // Return summary for LLM context
     const lsDomains = Object.keys(localStorage);
@@ -1824,11 +1834,12 @@ export class BrowserManager {
       // Close the context
       if (!this.laneContext) await profile.context.close().catch(() => {});
       this.profiles.delete(name);
+      this.profileVersions.delete(name);
     }
 
     if (removeSaved) {
       const savedPath = assertSafeProfilePath(name, this.env.PROFILES_DIR);
-      await fs.unlink(savedPath).catch(() => {});
+      await removeProfileData(savedPath);
     }
   }
 

@@ -336,6 +336,7 @@ export class LaneRuntime {
     if (!hasCaller) {
       return {
         isError: true,
+        ...(SIGNIN_TOOLS.has(name) ? { structuredContent: { error: "no_caller" } } : {}),
         content: [
           {
             type: "text",
@@ -436,6 +437,7 @@ export class LaneRuntime {
           args.tabId = ids[0];
         const profileMutation =
           name === "create_profile" ||
+          name === "save_profile" ||
           name === "delete_profile" ||
           (name === "new_tab" && typeof args.profile === "string");
         return this.queue(lane, profileMutation ? [0, ...ids] : ids, async () => {

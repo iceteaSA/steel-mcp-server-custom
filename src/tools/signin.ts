@@ -46,7 +46,8 @@ export async function cancel_signin(
   caller: SigninCaller,
   { id }: { id: string },
 ) {
-  return result(await store.cancel(caller, id));
+  const { error: _error, ...terminal } = result(await store.cancel(caller, id));
+  return terminal;
 }
 
 export function registerSignin(

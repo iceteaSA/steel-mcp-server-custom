@@ -291,6 +291,8 @@ export class SigninStore extends EventEmitter {
     return this.serial(async () => {
       await this.expire();
       const request = caller ? this.own(caller, id) : this.find(id);
+      if (caller && status === "cancelled" && request.status !== "pending")
+        return this.copy(request);
       if (request.status !== "pending")
         throw new Error(`signin_${request.status === "approved" ? "used" : request.status}`);
       request.status = status;
