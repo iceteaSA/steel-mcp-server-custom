@@ -4,12 +4,14 @@ import { EnvSchema } from "../env.js";
 import type { BrowserManager } from "../manager.js";
 import * as groups from "../tools/index.js";
 import type { ToolSpec } from "../tools/shared.js";
+import { registerSignin } from "../tools/signin.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const expectedToolNames = [
   "act",
+  "cancel_signin",
   "captcha_status",
   "click",
   "click_at",
@@ -43,8 +45,10 @@ const expectedToolNames = [
   "new_tab",
   "page_state",
   "press_key",
+  "request_signin",
   "save_profile",
   "scroll",
+  "signin_status",
   "smoke_test",
   "snapshot",
   "solve_captcha",
@@ -65,12 +69,19 @@ function specs(mgr: Partial<BrowserManager> = {}, overrides: Record<string, stri
   });
   for (const register of Object.values(groups))
     register((tool) => tools.push(tool), mgr as BrowserManager, env);
+  registerSignin(
+    (tool) => tools.push(tool),
+    async () => {
+      throw new Error("specs only");
+    },
+    () => "single-process",
+  );
   return tools;
 }
 
 test("every tool explicitly declares all four MCP safety hints", () => {
   const tools = specs();
-  expect(tools).toHaveLength(44);
+  expect(tools).toHaveLength(47);
   expect(tools.map((tool) => tool.name).sort()).toEqual(expectedToolNames);
   expect(tools.find((tool) => tool.name === "solve_captcha")?.annotations).toEqual({
     readOnlyHint: false,
@@ -146,8 +157,9 @@ test("annotations cover mutating modes, arbitrary page effects, and remote navig
   }
 });
 
-test("the complete 44-tool annotation policy matches every declared mode", () => {
+test("the complete 47-tool annotation policy matches every declared mode", () => {
   const readOnly = new Set([
+    "signin_status",
     "captcha_status",
     "extract",
     "get_attrs",
@@ -158,8 +170,10 @@ test("the complete 44-tool annotation policy matches every declared mode", () =>
     "snapshot",
     "wait_for",
   ]);
-  const nonDestructive = new Set([...readOnly, "smoke_test", "start_browser"]);
+  const nonDestructive = new Set([...readOnly, "smoke_test", "start_browser", "request_signin"]);
   const idempotent = new Set([
+    "cancel_signin",
+    "signin_status",
     "captcha_status",
     "cookies",
     "export_har",
@@ -176,6 +190,8 @@ test("the complete 44-tool annotation policy matches every declared mode", () =>
     "wait_for",
   ]);
   const closedWorld = new Set([
+    "cancel_signin",
+    "signin_status",
     "close_tabs",
     "cookies",
     "credentials",
@@ -187,7 +203,7 @@ test("the complete 44-tool annotation policy matches every declared mode", () =>
     "stop_browser",
   ]);
   const tools = specs();
-  expect(tools).toHaveLength(44);
+  expect(tools).toHaveLength(47);
   expect(tools.map((tool) => tool.name).sort()).toEqual(expectedToolNames);
   for (const tool of tools) {
     expect(tool.annotations.readOnlyHint, tool.name).toBe(readOnly.has(tool.name));
@@ -200,6 +216,9 @@ test("the complete 44-tool annotation policy matches every declared mode", () =>
 test("all JSON-producing tools publish an output schema", () => {
   const tools = specs();
   for (const name of [
+    "request_signin",
+    "signin_status",
+    "cancel_signin",
     "list_tabs",
     "cookies",
     "credentials",

@@ -30,6 +30,8 @@ import {
   registerCaptcha,
 } from "./tools/index.js";
 import { llmConfigured } from "./llm.js";
+import { SigninStore } from "./signin.js";
+import { registerSignin } from "./tools/signin.js";
 
 // -----------------------------------------------------------------------------
 // Parse environment + CLI flags
@@ -55,6 +57,9 @@ const server = new McpServer(
 );
 
 const rootManager = new BrowserManager(env);
+const signinStore = SigninStore.open({ profilesDir: env.PROFILES_DIR });
+let relayServer: ReturnType<typeof startRelayServer> | undefined;
+let stopping = false;
 
 // -----------------------------------------------------------------------------
 // Register tools via the gated wrapper
@@ -64,6 +69,8 @@ const {
   toolCount,
   manager,
   close: closeLanes,
+  getCaller,
+  applyProfileUpdated,
 } = makeRegistrar(server, activeToolsets, { manager: rootManager, env });
 const mgr = manager ?? rootManager;
 
@@ -78,6 +85,7 @@ registerCredentials(register, mgr, env);
 registerProfiles(register, mgr, env);
 registerIntercept(register, mgr, env);
 registerCaptcha(register, mgr);
+registerSignin(register, () => signinStore, getCaller);
 if (llmConfigured(env)) {
   registerAct(register, mgr, env);
 }
@@ -86,6 +94,7 @@ if (llmConfigured(env)) {
 // Server lifecycle
 // -----------------------------------------------------------------------------
 async function runServer() {
+  const store = await signinStore;
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
@@ -101,13 +110,15 @@ async function runServer() {
         "[steel-mcp] WARNING: RELAY_PORT is set but RELAY_SECRET is not. Relay server disabled for security.",
       );
     } else {
-      startRelayServer({
+      relayServer = startRelayServer({
         port: env.RELAY_PORT,
         bindAddr: env.RELAY_BIND_ADDR,
         secret: env.RELAY_SECRET,
         profilesDir: env.PROFILES_DIR,
         credentialsFile: env.CREDENTIALS_FILE,
         credentialsPassphrase: env.CREDENTIALS_PASSPHRASE,
+        signinStore: store,
+        onProfileUpdated: applyProfileUpdated,
       });
     }
   }
@@ -119,24 +130,36 @@ runServer().catch((error) => {
 });
 
 process.on("SIGINT", async () => {
+  if (stopping) return;
+  stopping = true;
   console.error("Received SIGINT, cleaning up...");
-  const deadline =
-    env.STEEL_LANES === "on"
-      ? setTimeout(() => process.exit(0), env.LANE_DRAIN_MS + 1500)
-      : undefined;
-  await closeLanes?.();
+  const deadline = setTimeout(() => process.exit(0), env.LANE_DRAIN_MS + 1500);
+  await Promise.all([
+    signinStore.then((store) => store.shutdown()),
+    new Promise((resolve) => {
+      if (relayServer) relayServer.close(() => resolve(undefined));
+      else resolve(undefined);
+    }),
+    closeLanes?.(),
+  ]);
   await rootManager.stop();
   clearTimeout(deadline);
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
+  if (stopping) return;
+  stopping = true;
   console.error("Received SIGTERM, cleaning up...");
-  const deadline =
-    env.STEEL_LANES === "on"
-      ? setTimeout(() => process.exit(0), env.LANE_DRAIN_MS + 1500)
-      : undefined;
-  await closeLanes?.();
+  const deadline = setTimeout(() => process.exit(0), env.LANE_DRAIN_MS + 1500);
+  await Promise.all([
+    signinStore.then((store) => store.shutdown()),
+    new Promise((resolve) => {
+      if (relayServer) relayServer.close(() => resolve(undefined));
+      else resolve(undefined);
+    }),
+    closeLanes?.(),
+  ]);
   await rootManager.stop();
   clearTimeout(deadline);
   process.exit(0);

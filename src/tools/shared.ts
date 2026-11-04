@@ -90,6 +90,8 @@ export interface RegistrarHandle {
   register: ToolRegistrar;
   manager?: BrowserManager;
   close?: () => Promise<void>;
+  getCaller(): string;
+  applyProfileUpdated(profile: string): Promise<boolean>;
   /** Number of tools actually registered (post-filter). */
   toolCount(): number;
 }
@@ -124,7 +126,9 @@ export function makeRegistrar(
         "Global numeric tab ID in your lane. Omit for your lane's current tab. Foreign tabs return not_in_lane; closed or unknown IDs return lane_closed.",
       force: "Accepted and ignored in lane mode, with a NOTE line. Cannot bypass lane isolation.",
       profile:
-        "Saved profile name. Loads state into the caller's lane context; all tabs in this lane share its storage.",
+        spec.name === "request_signin"
+          ? "Saved state target. The request does not open a browser lane."
+          : "Saved profile name. Loads state into the caller's lane context; all tabs in this lane share its storage.",
     };
     const inputSchema = runtime
       ? Object.fromEntries(
@@ -193,6 +197,16 @@ export function makeRegistrar(
   return {
     register,
     toolCount: () => count,
+    getCaller: () => {
+      if (!runtime) return "single-process";
+      const caller = runtime.getCaller();
+      if (!caller) throw new Error("no_caller");
+      return caller;
+    },
+    applyProfileUpdated: (profile) =>
+      runtime
+        ? runtime.applyProfileUpdated(profile)
+        : (lanes?.manager.applyProfileUpdated(profile) ?? Promise.resolve(false)),
     ...(runtime ? { manager: runtime.manager, close: () => runtime.close() } : {}),
   };
 }

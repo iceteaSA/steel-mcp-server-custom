@@ -68,7 +68,7 @@ export interface RelayConfig {
   credentialsFile: string;
   credentialsPassphrase?: string;
   signinStore?: SigninStore;
-  onProfileUpdated?: (profile: string) => void | Promise<void>;
+  onProfileUpdated?: (profile: string) => boolean | void | Promise<boolean | void>;
 }
 
 const domainSchema = z
@@ -520,9 +520,10 @@ export function startRelayServer(config: RelayConfig): http.Server {
                   }),
                 );
                 // A live apply error must not cause a second state write.
-                let liveApplied = true;
+                let liveApplied = false;
                 try {
-                  await config.onProfileUpdated?.(counts.profile);
+                  if (config.onProfileUpdated)
+                    liveApplied = (await config.onProfileUpdated(counts.profile)) !== false;
                 } catch {
                   liveApplied = false;
                 }

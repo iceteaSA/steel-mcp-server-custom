@@ -28,6 +28,7 @@ export interface LaneOptions {
 }
 
 const STATELESS = new Set(["list_profiles", "credentials", "captcha_status"]);
+const SIGNIN_TOOLS = new Set(["request_signin", "signin_status", "cancel_signin"]);
 const CONTEXT_TOOLS = new Set([
   "new_tab",
   "list_tabs",
@@ -149,6 +150,33 @@ export class LaneRuntime {
       }
     }
     return [...profiles.values()];
+  }
+
+  getCaller(): string | undefined {
+    return this.profileCaller.getStore() ?? this.current.getStore()?.lane.caller;
+  }
+
+  async applyProfileUpdated(profile: string): Promise<boolean> {
+    if (this.stopping) return false;
+    // The `0` key prevents `profile` changes during a live update.
+    const results = await Promise.all(
+      [...this.lanes.values()]
+        .filter((lane) => !lane.closing && lane.manager.hasProfile(profile))
+        .map(async (lane) => {
+          const operation = this.queue(lane, [0, ...lane.manager.tabIds], () =>
+            lane.closing ? Promise.resolve(false) : lane.manager.applyProfileUpdated(profile),
+          );
+          lane.running.add(operation);
+          try {
+            const applied = await operation;
+            if (applied) lane.touched = this.now();
+            return applied;
+          } finally {
+            lane.running.delete(operation);
+          }
+        }),
+    );
+    return results.some(Boolean);
   }
 
   private async open(caller: string, mayWait = true): Promise<Lane> {
@@ -327,6 +355,7 @@ export class LaneRuntime {
         );
       return result;
     }
+    if (SIGNIN_TOOLS.has(name)) return this.profileCaller.run(caller, handler);
     const notes: string[] = [];
     if (args.force !== undefined) notes.push("NOTE: force is accepted and ignored in lane mode.");
     const finish = (result: CallToolResult): CallToolResult =>
@@ -405,7 +434,11 @@ export class LaneRuntime {
         }
         if (name === "close_tabs" && args.tabId === undefined && args.owner === undefined)
           args.tabId = ids[0];
-        return this.queue(lane, ids, async () => {
+        const profileMutation =
+          name === "create_profile" ||
+          name === "delete_profile" ||
+          (name === "new_tab" && typeof args.profile === "string");
+        return this.queue(lane, profileMutation ? [0, ...ids] : ids, async () => {
           if (lane.manager.isLaneClosed)
             throw new Error("lane_closed: context closed while the call was queued.");
           return this.current.run(

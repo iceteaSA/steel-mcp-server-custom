@@ -95,6 +95,8 @@ export class SigninStore extends EventEmitter {
   private readonly now: () => number;
   private queue: Promise<unknown> = Promise.resolve();
   private timer?: ReturnType<typeof setInterval>;
+  private stopping = false;
+  private shutdownPromise?: Promise<void>;
   private constructor(private readonly options: SigninOptions) {
     super();
     this.now = options.now ?? Date.now;
@@ -198,6 +200,7 @@ export class SigninStore extends EventEmitter {
   }
   async create(caller: SigninCaller, input: SigninInput): Promise<SigninRequest> {
     return this.serial(async () => {
+      if (this.stopping) throw new Error("signin_cancelled");
       if (!caller?.sessionID || typeof caller.sessionID !== "string") throw new Error("no_caller");
       if (
         caller.sessionID.length > 256 ||
@@ -507,6 +510,22 @@ export class SigninStore extends EventEmitter {
       }
     }
   }
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise) return this.shutdownPromise;
+    this.stopping = true;
+    if (this.timer) clearInterval(this.timer);
+    this.shutdownPromise = this.serial(async () => {
+      for (const request of this.state.requests) {
+        if (request.status !== "pending") continue;
+        request.status = "cancelled";
+        await this.audit(request, "cancelled");
+      }
+      await this.save();
+      this.close();
+    }).then(() => new Promise<void>((resolve) => setImmediate(resolve)));
+    return this.shutdownPromise;
+  }
+
   close(): void {
     if (this.timer) clearInterval(this.timer);
     this.removeAllListeners();

@@ -1625,6 +1625,62 @@ export class BrowserManager {
     return { tabId, restored };
   }
 
+  hasProfile(name: string): boolean {
+    return (
+      this.profiles.has(name) &&
+      this.initialized &&
+      !this.laneClosed &&
+      this.browser?.isConnected() === true
+    );
+  }
+
+  async applyProfileUpdated(name: string): Promise<boolean> {
+    if (!this.hasProfile(name)) return false;
+    const profile = this.profiles.get(name)!;
+    const state = JSON.parse(
+      await fs.readFile(assertSafeProfilePath(name, this.env.PROFILES_DIR), "utf8"),
+    ) as {
+      cookies?: Parameters<BrowserContext["addCookies"]>[0];
+      localStorage?: Record<string, Record<string, string>>;
+    };
+    if (!this.hasProfile(name) || this.profiles.get(name) !== profile) return false;
+    if (state.cookies?.length) await profile.context.addCookies(state.cookies);
+    for (const [origin, entries] of Object.entries(state.localStorage ?? {})) {
+      const existing = profile.context.pages().find((page) => {
+        try {
+          return new URL(page.url()).origin === origin;
+        } catch {
+          return false;
+        }
+      });
+      const page = existing ?? (await profile.context.newPage());
+      try {
+        if (!existing) {
+          // Use a local response to prevent a network request from the temporary page.
+          await page.route("**/*", (route) =>
+            route.fulfill({
+              status: 200,
+              contentType: "text/html",
+              body: "<!doctype html><title></title>",
+            }),
+          );
+          await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 5000 });
+        }
+        if (!this.hasProfile(name) || this.profiles.get(name) !== profile) return false;
+        await page.evaluate(
+          ({ expected, values }) => {
+            if (location.origin !== expected) throw new Error("profile_origin_changed");
+            for (const [key, value] of Object.entries(values)) localStorage.setItem(key, value);
+          },
+          { expected: origin, values: entries },
+        );
+      } finally {
+        if (!existing) await page.close().catch(() => {});
+      }
+    }
+    return true;
+  }
+
   /**
    * Save a profile's cookies + localStorage to disk as JSON.
    * localStorage is captured from all origins the profile has visited.
@@ -1702,7 +1758,7 @@ export class BrowserManager {
       const dir = this.env.PROFILES_DIR;
       const files = await fs.readdir(dir);
       for (const f of files) {
-        if (!f.endsWith(".json")) continue;
+        if (!f.endsWith(".json") || !isValidProfileName(f.slice(0, -5))) continue;
         const name = f.replace(".json", "");
         if (this.profiles.has(name)) {
           // Already in the active list — add savedAt

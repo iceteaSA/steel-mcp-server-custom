@@ -121,7 +121,7 @@ A stateful call without this value gives `no_caller` with a hint.
 Credential writes and deletes still require caller metadata. Each successful request records only its operation and caller on stderr.
 `list_profiles` shows active tab counts only for the caller. Anonymous calls show the saved catalogue without active usage.
 
-The first stateful call opens a new BrowserContext for its caller. The default context and Steel's primary tab stay with the operator.
+The first browser call opens a new BrowserContext for its caller. The default context and Steel's primary tab stay with the operator.
 Agents cannot address the operator's tabs. A popup stays in the lane of its context.
 
 Tab IDs are global numbers, but a caller can address only its own lane's tabs.
@@ -171,7 +171,7 @@ Concurrent calls share one new browser startup. `SESSION_TIMEOUT_MS` stays uncha
 Set `STEEL_LANES=off` to restore the legacy shared context, owner-based targeting, `force` override, tab sweeper, and whole-browser stop.
 Restart the MCP process to change this switch. The restart does not keep lanes from the previous process.
 
-## Tools (42 default, 44 with AI tools, legacy mode)
+## Tools (45 default, 47 with AI tools, legacy mode)
 
 This table lists the legacy tool set, which lane mode also includes. The lane rules above replace its shared-state behavior.
 
@@ -216,6 +216,9 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 | `export_har` | Export lane network events as HAR 1.2. In legacy mode, give an owner or tab ID. |
 | `intercept` | List, fulfill, abort, continue, or remove per-tab request routes in the caller's lane. |
 | **Sessions & Auth** | |
+| `request_signin` | Request operator approval for one site and `profile`. Optional `wait` is seconds, at most 120. |
+| `signin_status` | Read your request status and counts, not state values. |
+| `cancel_signin` | Cancel your pending request. Saved state stays unchanged. |
 | `create_profile` | Load a named profile in the lane. Legacy mode uses a different BrowserContext. |
 | `list_profiles` | Active + saved profiles |
 | `save_profile` | Persist cookies + localStorage to disk |
@@ -309,6 +312,24 @@ The interception regression uses a strict SDK client for success, empty, and err
 ## Cookie Push Extension
 
 A Manifest V3 extension sends selected site cookies and localStorage to saved Steel profiles. The popup shows domains and counts, not sign-in values. See [extension instructions](extension/README.md) for permissions, batch pushes, pinned sync, and limits.
+
+### Agent sign-in requests
+
+The three sign-in tools use one process store with the HTTP server.
+With `STEEL_LANES=on`, caller metadata is necessary, but a sign-in request does not open a browser lane.
+The caller comes from `params._meta["ai.opencode/sessionID"]`. A missing caller gets `no_caller`.
+The tools report `signin_unknown` for a request ID from a different caller.
+
+With `STEEL_LANES=off`, all sign-in calls use the same caller `single-process` and ignore supplied caller metadata.
+This mode is for one agent. It does not isolate sign-in requests between agents.
+
+Select `Approve` in the extension Review page. An approved push saves state before live apply.
+Only contexts that hold the requested `profile` get the live update.
+With no such context, the HTTP server reports `liveApplied=false`. The next `new_tab({profile, url})` loads the saved state.
+Manual `/push` does not apply state to live contexts.
+
+On SIGINT or SIGTERM, pending requests become `cancelled`, waiting tools get that status, and the store writes state before exit.
+The HTTP server closes its connections in the same shutdown interval.
 
 ### Setup
 

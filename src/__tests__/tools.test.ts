@@ -241,10 +241,10 @@ describe("non-browser tools", () => {
       const documented = [...section.matchAll(/^\| `([a-z_]+)` \|/gm)]
         .map((match) => match[1])
         .sort();
-      expect(names).toHaveLength(44);
+      expect(names).toHaveLength(47);
       expect(documented).toEqual(names);
       expect(new Set(documented).size).toBe(documented.length);
-      expect(readme).toContain("42 default, 44 with AI tools");
+      expect(readme).toContain("45 default, 47 with AI tools");
     } finally {
       allTools.kill();
     }
