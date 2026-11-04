@@ -9,12 +9,13 @@ import { register as extraction } from "../tools/extraction.js";
 import { register as interaction } from "../tools/interaction.js";
 import type { ToolSpec } from "../tools/shared.js";
 import { fenceToolResult } from "../untrusted.js";
+import { chromiumPath } from "./browser-processes.js";
 
 let browser: Browser;
 let page: Page;
 beforeAll(async () => {
   browser = await chromium.launch({
-    executablePath: "/home/icetea/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome",
+    executablePath: chromiumPath,
     headless: true,
     args: ["--no-sandbox"],
   });

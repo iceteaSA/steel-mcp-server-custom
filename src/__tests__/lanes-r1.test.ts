@@ -1,6 +1,6 @@
 import { expect, test, spyOn } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { spawn, spawnSync } from "node:child_process";
+import { spawnSync } from "node:child_process";
 import { EnvSchema } from "../env.js";
 import { BrowserManager } from "../manager.js";
 import { LaneRuntime } from "../lanes.js";
@@ -276,28 +276,26 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     const start = source.indexOf('process.on("SIGINT"');
     expect(start).toBeGreaterThan(0);
     const script = `const env = { STEEL_LANES: 'on', LANE_DRAIN_MS: 20 }; const closeLanes = () => new Promise(() => {}); const rootManager = { stop: async () => {} }; ${source.slice(start)}; console.log('ready'); setInterval(() => {}, 1000);`;
-    const child = spawn("node", ["--eval", script], {
+    const child = Bun.spawn(["node", "--eval", script], {
       env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
+      stdin: "ignore",
+      stdout: "pipe",
+      stderr: "inherit",
     });
-    const exited = new Promise<number | null>((resolve) => child.once("exit", resolve));
+    const output = child.stdout.getReader();
     try {
-      await bounded(
-        new Promise<void>((resolve, reject) => {
-          child.once("error", reject);
-          child.stdout.once("data", () => resolve());
-        }),
-        1000,
-      );
+      const ready = await bounded(output.read(), 1000);
+      expect(new TextDecoder().decode(ready.value)).toBe("ready\n");
       const at = performance.now();
       child.kill(signal);
-      expect(await bounded(exited, 2020)).toBe(0);
+      expect(await bounded(child.exited, 2020)).toBe(0);
       const elapsed = performance.now() - at;
       expect(elapsed).toBeLessThan(2020);
       console.error(`Measured ${signal} exit: ${elapsed.toFixed(2)} ms (bound 2020 ms)`);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      await exited;
+      await bounded(child.exited, 1000);
+      output.releaseLock();
     }
   }, 20000);
 }

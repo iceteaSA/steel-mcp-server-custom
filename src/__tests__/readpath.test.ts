@@ -11,12 +11,13 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { makeRegistrar } from "../tools/shared.js";
+import { chromiumPath } from "./browser-processes.js";
 
 let browser: Browser;
 let page: Page;
 beforeAll(async () => {
   browser = await chromium.launch({
-    executablePath: "/home/icetea/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome",
+    executablePath: chromiumPath,
     headless: true,
     args: ["--no-sandbox"],
   });

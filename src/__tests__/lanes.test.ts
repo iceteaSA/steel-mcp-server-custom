@@ -1,4 +1,4 @@
-import { afterAll, expect, test, spyOn } from "bun:test";
+import { expect, test, spyOn } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -7,36 +7,11 @@ import { z } from "zod";
 import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import childProcess, { type ChildProcess } from "node:child_process";
+import { chromiumPath, retainedBrowserCount } from "./browser-processes.js";
 import { EnvSchema } from "../env.js";
 import { BrowserManager } from "../manager.js";
 import { makeRegistrar, ALL_TOOLSETS } from "../tools/shared.js";
 import * as groups from "../tools/index.js";
-
-// Bun #34785 double-closes extra stdio fds after child GC.
-// Keep closed child references for this test process. Remove at Bun ≥ 1.4.0.
-const chromiumPath = "/home/icetea/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome";
-const retainedChildren: Array<{ child: ChildProcess; stdio: ChildProcess["stdio"] }> = [];
-const nativeSpawn = childProcess.spawn;
-const retainedSpawn = new Proxy(nativeSpawn, {
-  apply(target, receiver, args) {
-    const child: ChildProcess = Reflect.apply(target, receiver, args);
-    const options = args[2] ?? args[1];
-    if (
-      args[0] === chromiumPath &&
-      options &&
-      Array.isArray(options.stdio) &&
-      options.stdio.length > 3
-    ) {
-      retainedChildren.push({ child, stdio: child.stdio });
-    }
-    return child;
-  },
-});
-if (Bun.version.startsWith("1.3.")) childProcess.spawn = retainedSpawn;
-afterAll(() => {
-  if (childProcess.spawn === retainedSpawn) childProcess.spawn = nativeSpawn;
-});
 
 function barrier() {
   let release!: () => void;
@@ -53,9 +28,9 @@ async function fixture(mode = "on", overrides: Record<string, string> = {}) {
     args: ["--no-sandbox"],
   };
   const launch = async () => {
-    const retainedBefore = retainedChildren.length;
+    const retainedBefore = retainedBrowserCount();
     const browser = await chromium.launch(launchOptions);
-    if (Bun.version.startsWith("1.3.")) expect(retainedChildren.length).toBe(retainedBefore + 1);
+    if (Bun.version.startsWith("1.3.")) expect(retainedBrowserCount()).toBe(retainedBefore + 1);
     return browser;
   };
   let browser = await launch();

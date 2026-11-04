@@ -9,6 +9,7 @@ import { register as registerExtraction } from "../tools/extraction.js";
 import { register as registerInteraction } from "../tools/interaction.js";
 import type { ToolSpec } from "../tools/shared.js";
 import { clearSnapshot, getStoredSnapshot } from "../snapshot.js";
+import { systemChromiumPath } from "./browser-processes.js";
 
 test("settle injection on document load preserves page WebSocket upgrades", async () => {
   const server = Bun.serve({
@@ -31,7 +32,7 @@ test("settle injection on document load preserves page WebSocket upgrades", asyn
   });
   const profile = await mkdtemp(join(tmpdir(), "steel-websocket-"));
   const context = await chromium.launchPersistentContext(profile, {
-    executablePath: "/usr/bin/chromium",
+    executablePath: systemChromiumPath,
     headless: true,
     timeout: 5000,
     args: ["--no-sandbox"],
@@ -102,7 +103,7 @@ test("nested cross-origin iframe snapshots keep frame refs and the main baseline
   });
   const profile = await mkdtemp(join(tmpdir(), "steel-iframe-"));
   const context = await chromium.launchPersistentContext(profile, {
-    executablePath: "/usr/bin/chromium",
+    executablePath: systemChromiumPath,
     headless: true,
     args: ["--no-sandbox"],
     timeout: 5000,
@@ -184,7 +185,7 @@ test("fetch_urls browser mode can overwrite pre-existing shared cookies and loca
   });
   const profile = await mkdtemp(join(tmpdir(), "steel-fetch-state-"));
   const context = await chromium.launchPersistentContext(profile, {
-    executablePath: "/usr/bin/chromium",
+    executablePath: systemChromiumPath,
     headless: true,
     timeout: 5000,
     args: ["--no-sandbox"],
