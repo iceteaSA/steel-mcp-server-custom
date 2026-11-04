@@ -70,7 +70,9 @@ it("requires Bearer authentication before listing pending sign-in requests", asy
 
 it("audits a request push without HTTP authorization without recording supplied values", async () => {
   const response = await fetch(origin + "/signin/unknown/push", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(state),
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(state),
   });
   expect(response.status).toBe(401);
   const auditFile = path.join(directory, "profiles", ".signin-audit.jsonl");

@@ -169,7 +169,9 @@ it("uses remembered grants without a notification or duplicate push when a stale
   await client.update(stale);
   expect(notifications).toEqual([]);
   expect(fetches.filter((entry) => entry.url.endsWith("/push"))).toHaveLength(1);
-  expect(JSON.parse(fetches.find((entry) => entry.url.endsWith("/push")).options.body).useGrant).toBe(true);
+  expect(
+    JSON.parse(fetches.find((entry) => entry.url.endsWith("/push")).options.body).useGrant,
+  ).toBe(true);
   expect(badges.at(-1)).toBe("");
   expect(client.pending).toEqual([]);
   expect(JSON.stringify(session)).not.toContain("CANARY_PRIVATE");

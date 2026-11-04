@@ -13,6 +13,7 @@ import {
   revokeDiscoveryAccess,
   DISCOVERY_ORIGINS,
 } from "./core.js";
+import { startSigninWorker } from "./signin-worker.js";
 
 let running = false;
 const ALARM = "steel-pinned-sync";
@@ -68,13 +69,22 @@ async function initialize() {
     documentUrlPatterns: ["http://*/*", "https://*/*"],
   });
   await configureAlarm();
+  await signinWorker?.start();
 }
 
 async function setResults(results) {
   const failed = results.some((result) => !result.ok);
   const warning = results.some((result) => result.warning);
   await chrome.storage.local.set({ lastResults: results, lastSync: new Date().toISOString() });
-  await chrome.action.setBadgeText({ text: failed ? "ERR" : warning ? "!" : "OK" });
+  await chrome.action.setBadgeText({
+    text: signinWorker?.pending.length
+      ? String(signinWorker.pending.length)
+      : failed
+        ? "ERR"
+        : warning
+          ? "!"
+          : "OK",
+  });
   await chrome.action.setBadgeBackgroundColor({
     color: failed ? "#b42318" : warning ? "#805500" : "#167044",
   });
@@ -169,6 +179,13 @@ async function pushTab(tab) {
 
 async function handleMessage(message) {
   switch (message.type) {
+    case "signin-pending":
+      return relayRequest("/signin");
+    case "signin-deny":
+      return relayRequest(`/signin/${encodeURIComponent(message.id)}/deny`, {
+        method: "POST",
+        body: { note: message.note ?? "" },
+      });
     case "prepare-discovery":
       if (discovering) throw new Error("Discovery is already running. Wait for it to finish.");
       await beginDiscovery();
@@ -267,6 +284,7 @@ async function handleMessage(message) {
       return pushSites(message.sites, message.profile, message.includeStorage);
     case "alarm":
       await configureAlarm();
+      await signinWorker?.start();
       return true;
     default:
       throw new Error("Unknown extension action. Reload the extension.");
@@ -337,3 +355,5 @@ chrome.permissions.onAdded.addListener(async (permissions) => {
 export const discoveryReady = recoverDiscovery().catch(async () => {
   await chrome.alarms.create(DISCOVERY_ALARM, { when: Date.now() + DISCOVERY_LIMIT });
 });
+
+const signinWorker = chrome.notifications ? startSigninWorker() : null;

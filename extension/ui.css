@@ -41,6 +41,12 @@ body.options {
   max-width: 100vw;
   margin: 24px auto;
 }
+body.approval {
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
 header,
 .row {
   display: flex;

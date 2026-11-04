@@ -55,6 +55,15 @@
       </section>
     </form>
     <p id="status" role="status" class="notice" aria-live="polite"></p>
+    <section aria-labelledby="signinHeading">
+      <h2 id="signinHeading">Pending sign-in requests</h2>
+      <button id="refreshSignin" type="button">Refresh requests and grants</button>
+      <p id="signinError" role="status"></p>
+      <ul id="signinPending"></ul>
+      <h3>Remembered grants</h3>
+      <p>Off by default. Each grant allows only its site and profile, and expires after 7 days.</p>
+      <ul id="signinGrants"></ul>
+    </section>
     <section id="discovery" aria-labelledby="discoveryHeading">
       <h2 id="discoveryHeading">Temporary site discovery</h2>
       <p>

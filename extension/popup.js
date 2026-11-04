@@ -1,4 +1,5 @@
 import { getSettings, validProfile, sitePatterns, requestAccess, send } from "./core.js";
+import { mountSigninLists } from "./signin-ui.js";
 
 const $ = (id) => document.getElementById(id);
 let site = null;
@@ -102,6 +103,7 @@ function renderSites() {
   updateActions();
 }
 async function loadProfiles() {
+  $("secretSettings").hidden = Boolean((await getSettings()).serverSecret);
   try {
     const data = await send("profiles");
     const settings = await getSettings();
@@ -121,6 +123,8 @@ async function loadProfiles() {
   }
   updateActions();
 }
+
+mountSigninLists(document);
 async function loadSummary() {
   $("profileDomains").replaceChildren();
   if (!$("profilePicker").value) {

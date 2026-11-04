@@ -196,3 +196,80 @@ export async function send(type, data = {}) {
     );
   return response.data;
 }
+
+export function signinPatterns(request) {
+  return request.domains.map((domain) => `*://${domain}/*`);
+}
+
+async function signinData(request, countOnly) {
+  if (request.expires <= Date.now())
+    throw new Error("This request expired. Ask for a new request.");
+  const granted = [];
+  for (const domain of request.domains) {
+    if (await chrome.permissions.contains({ origins: [`*://${domain}/*`] })) granted.push(domain);
+  }
+  const cookies = (await chrome.cookies.getAll({})).filter((cookie) =>
+    granted.includes(normalizeDomain(cookie.domain)),
+  );
+  const host = siteUrl(
+    request.site.includes("://") ? request.site : `https://${request.site}`,
+  ).hostname;
+  const tab = (await chrome.tabs.query({})).find((candidate) => {
+    try {
+      const url = siteUrl(candidate.url);
+      return (
+        url.hostname === host && (!request.site.includes("://") || url.origin === request.site)
+      );
+    } catch {
+      return false;
+    }
+  });
+  const origin = tab ? siteUrl(tab.url).origin : null;
+  const storage =
+    tab && granted.includes(host)
+      ? await readStorage(tab.id, origin, countOnly)
+      : { available: false, keyCount: 0 };
+  return { cookies, origin, storage };
+}
+
+export async function previewSignin(request) {
+  const data = await signinData(request, true);
+  return {
+    cookies: data.cookies.map(({ name, domain }) => ({ name, domain })),
+    cookieCount: data.cookies.length,
+    storage: data.storage.available
+      ? [{ origin: data.origin, keyCount: data.storage.keyCount }]
+      : [],
+    storageAvailable: data.storage.available,
+  };
+}
+
+export async function pushSignin(request, remember = false, useGrant = false, note) {
+  if (!(await chrome.permissions.contains({ origins: signinPatterns(request) })))
+    throw new Error("Request site access was not granted. Open Review.");
+  const data = await signinData(request, false);
+  if (data.cookies.some((cookie) => cookie.partitionKey))
+    throw new Error("Partitioned cookies cannot be restored. Sign in directly in Steel.");
+  if (!data.cookies.length && !data.storage.keyCount)
+    throw new Error("No sign-in data found. Sign in on this site and keep its tab open.");
+  return relayRequest(`/signin/${encodeURIComponent(request.id)}/push`, {
+    method: "POST",
+    body: {
+      profile: validProfile(request.profile),
+      cookies: data.cookies.map(convertCookie),
+      ...(data.storage.available ? { localStorage: { [data.origin]: data.storage.entries } } : {}),
+      remember: remember === true,
+      ...(useGrant ? { useGrant: true } : {}),
+      ...(note !== undefined ? { note } : {}),
+    },
+  });
+}
+
+export function approveSignin(request, remember = false, note) {
+  // The Chrome permission API must run in the approval click, before an asynchronous read.
+  const permission = chrome.permissions.request({ origins: signinPatterns(request) });
+  return Promise.resolve(permission).then((allowed) => {
+    if (!allowed) throw new Error("Request site access was not granted. No data was sent.");
+    return pushSignin(request, remember, false, note);
+  });
+}

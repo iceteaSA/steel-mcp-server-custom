@@ -16,9 +16,12 @@ import crypto from "crypto";
 import http from "http";
 import fs from "fs/promises";
 import path from "path";
+import type { Socket } from "node:net";
 import { z } from "zod";
 import { encryptJSON, decryptJSON } from "./crypto.js";
 import { assertSafeProfilePath, isValidProfileName } from "./helpers.js";
+import { WebSocket, WebSocketServer } from "ws";
+import { SigninStore, type SigninRequest } from "./signin.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -64,6 +67,8 @@ export interface RelayConfig {
   profilesDir: string;
   credentialsFile: string;
   credentialsPassphrase?: string;
+  signinStore?: SigninStore;
+  onProfileUpdated?: (profile: string) => void | Promise<void>;
 }
 
 const domainSchema = z
@@ -329,6 +334,11 @@ function jsonResponse(res: http.ServerResponse, status: number, body: unknown): 
 }
 
 export function startRelayServer(config: RelayConfig): http.Server {
+  let signinStore: Promise<SigninStore> | undefined;
+  const getSigninStore = () =>
+    (signinStore ??= config.signinStore
+      ? Promise.resolve(config.signinStore)
+      : SigninStore.open({ profilesDir: config.profilesDir }));
   // Each update reads and writes a complete file. Concurrent updates can discard data.
   let mutations: Promise<unknown> = Promise.resolve();
   const mutate = <T>(operation: () => Promise<T>): Promise<T> => {
@@ -357,17 +367,136 @@ export function startRelayServer(config: RelayConfig): http.Server {
     }
 
     const profilesRoute = url.pathname === "/profiles" || url.pathname.startsWith("/profiles/");
-    if ((req.method === "POST" && url.pathname === "/push") || profilesRoute) {
+    const signinRoute = url.pathname === "/signin" || url.pathname.startsWith("/signin/");
+    if ((req.method === "POST" && url.pathname === "/push") || profilesRoute || signinRoute) {
       // Auth check — timing-safe to avoid leaking the expected secret length
       // or the position of the first mismatch byte.
       const authHeader = req.headers.authorization;
       const expected = `Bearer ${config.secret}`;
       if (!authHeader || !timingSafeCompare(authHeader, expected)) {
+        if (signinRoute && req.method !== "GET") {
+          try {
+            await (await getSigninStore()).audit(undefined, "rejected:unauthorized");
+          } catch {
+            console.error("[steel-mcp] Sign-in audit unavailable.");
+          }
+          req.resume();
+          res.setHeader("Connection", "close");
+        }
         jsonResponse(res, 401, { error: "Unauthorized. Set the correct RELAY_SECRET." });
         return;
       }
 
       try {
+        if (signinRoute) {
+          const store = await getSigninStore();
+          const segments = url.pathname.split("/").slice(1).map(decodeURIComponent);
+          if (req.method === "GET" && segments.length === 1) {
+            jsonResponse(res, 200, { requests: await store.pending() });
+            return;
+          }
+          if (segments[1] === "grants") {
+            if (req.method === "GET" && segments.length === 2) {
+              jsonResponse(res, 200, { grants: await store.grants() });
+              return;
+            }
+            if (req.method === "DELETE" && segments.length === 3) {
+              await store.revoke(segments[2]);
+              jsonResponse(res, 200, { ok: true });
+              return;
+            }
+          }
+          if (req.method === "POST" && segments.length === 3) {
+            let request: SigninRequest | undefined;
+            try {
+              const body: unknown = JSON.parse(await readBody(req));
+              request = await store.request(segments[1]);
+              if (segments[2] === "deny") {
+                const { note } = z
+                  .object({ note: z.string().max(1000).optional() })
+                  .strict()
+                  .parse(body);
+                const result = await mutate(() => store.deny(segments[1], note));
+                jsonResponse(res, 200, result);
+                return;
+              }
+              if (segments[2] === "push") {
+                const payload = pushSchema
+                  .omit({ credentials: true })
+                  .extend({
+                    remember: z.boolean().optional(),
+                    useGrant: z.boolean().optional(),
+                    note: z.string().max(1000).optional(),
+                  })
+                  .strict()
+                  .parse(body);
+                const counts = await mutate(() =>
+                  store.consume(segments[1], {
+                    validate: (pending) => {
+                      if (payload.useGrant && !pending.remembered)
+                        throw new Error("signin_grant_required");
+                      if (payload.profile !== pending.profile)
+                        throw new Error("signin_profile_mismatch");
+                      if (
+                        (payload.cookies ?? []).some(
+                          (cookie) => !pending.domains.includes(normalizeDomain(cookie.domain)),
+                        )
+                      )
+                        throw new Error("signin_site_mismatch");
+                      if (
+                        Object.keys(payload.localStorage ?? {}).some(
+                          (origin) =>
+                            !pending.domains.includes(new URL(origin).hostname) ||
+                            (pending.site.includes("://") && origin !== pending.site),
+                        )
+                      )
+                        throw new Error("signin_site_mismatch");
+                    },
+                    write: async () => {
+                      await handlePush(payload, config);
+                      return {
+                        cookieCount: payload.cookies?.length ?? 0,
+                        storageKeyCount: Object.values(payload.localStorage ?? {}).reduce(
+                          (sum, entries) => sum + Object.keys(entries).length,
+                          0,
+                        ),
+                      };
+                    },
+                    remember: payload.remember === true,
+                    note: payload.note,
+                  }),
+                );
+                // A live apply error must not cause a second state write.
+                let liveApplied = true;
+                try {
+                  await config.onProfileUpdated?.(counts.profile);
+                } catch {
+                  liveApplied = false;
+                }
+                jsonResponse(res, 200, {
+                  id: counts.id,
+                  status: counts.status,
+                  ...counts.counts,
+                  liveApplied,
+                });
+                return;
+              }
+            } catch (error) {
+              const code =
+                error instanceof Error &&
+                /^signin_(unknown|used|expired|cancelled|denied|site_mismatch|profile_mismatch|grant_required)$/.test(
+                  error.message,
+                )
+                  ? error.message
+                  : "signin_invalid";
+              await store.audit(request, `rejected:${code}`);
+              jsonResponse(res, code === "signin_used" ? 409 : 400, { error: code });
+              return;
+            }
+          }
+          jsonResponse(res, 404, { error: "Unknown sign-in endpoint." });
+          return;
+        }
         if (req.method === "POST" && url.pathname === "/push") {
           const payload = pushSchema.parse(JSON.parse(await readBody(req)));
           const result = await mutate(() => handlePush(payload, config));
@@ -440,6 +569,103 @@ export function startRelayServer(config: RelayConfig): http.Server {
     // 404
     jsonResponse(res, 404, { error: "Not found. Endpoints: GET /status, POST /push" });
   });
+
+  const sockets = new WebSocketServer({
+    noServer: true,
+    maxPayload: 4096,
+    perMessageDeflate: false,
+  });
+  const accepted = new Set<Socket>();
+  srv.on("connection", (socket: Socket) => {
+    accepted.add(socket);
+    socket.once("close", () => accepted.delete(socket));
+  });
+  srv.on("upgrade", (req, socket, head) => {
+    if (
+      !/^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i.test(req.headers.host ?? "") ||
+      req.url !== "/signin/events"
+    ) {
+      socket.destroy();
+      return;
+    }
+    sockets.handleUpgrade(req, socket, head, (ws) => sockets.emit("connection", ws));
+  });
+  sockets.on("connection", (ws) => {
+    let authenticated = false;
+    let unsubscribe: (() => void) | undefined;
+    const authExpires = Date.now() + 2000;
+    const deadline = setTimeout(() => ws.close(1008, "Authentication timeout"), 2000);
+    const keepalive = setInterval(() => {
+      if (authenticated && ws.readyState === WebSocket.OPEN)
+        ws.send(JSON.stringify({ type: "keepalive" }));
+    }, 20_000);
+    keepalive.unref();
+    ws.on("error", () => {});
+    ws.on("message", async (data, binary) => {
+      if (authenticated) return;
+      try {
+        if (Date.now() >= authExpires || ws.readyState !== WebSocket.OPEN) throw new Error();
+        const message: unknown = JSON.parse(data.toString());
+        const parsed = z
+          .object({ secret: z.string().max(4096) })
+          .strict()
+          .parse(message);
+        if (binary || !timingSafeCompare(parsed.secret, config.secret)) throw new Error();
+        // The store read is asynchronous. Set authentication first to prevent duplicate listeners.
+        authenticated = true;
+        clearTimeout(deadline);
+        const store = await getSigninStore();
+        if (ws.readyState !== WebSocket.OPEN) return;
+        const sendPending = () => {
+          void store
+            .pending()
+            .then((requests) => {
+              if (ws.readyState === WebSocket.OPEN)
+                ws.send(JSON.stringify({ type: "pending", requests }));
+            })
+            .catch(() => ws.close(1011, "Store unavailable"));
+        };
+        store.on("change", sendPending);
+        unsubscribe = () => store.removeListener("change", sendPending);
+        sendPending();
+      } catch {
+        ws.close(1008, "Authentication failed");
+      }
+    });
+    ws.on("close", () => {
+      clearTimeout(deadline);
+      clearInterval(keepalive);
+      unsubscribe?.();
+    });
+  });
+  const closeHttp = srv.close.bind(srv);
+  let closing: Promise<void> | undefined;
+  srv.close = (callback?: (error?: Error) => void): http.Server => {
+    closing ??= new Promise<void>((resolve) => {
+      for (const ws of sockets.clients) ws.terminate();
+      for (const socket of accepted) socket.destroy();
+      sockets.close();
+      if (!config.signinStore) void signinStore?.then((store) => store.close());
+      let finished = false;
+      // Bun does not always call the HTTP close callback after a WebSocket upgrade.
+      // Socket destruction does not prevent this.
+      const deadline = setTimeout(() => {
+        console.error(
+          "[steel-mcp] Relay close callback timed out; all accepted sockets were terminated.",
+        );
+        finish();
+      }, 500);
+      function finish() {
+        if (finished) return;
+        finished = true;
+        clearTimeout(deadline);
+        resolve();
+      }
+      closeHttp(() => finish());
+    });
+    if (callback) void closing.then(() => callback());
+    return srv;
+  };
 
   srv.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EADDRINUSE") {

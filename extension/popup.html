@@ -12,6 +12,15 @@
       <a href="options.html" target="_blank">Settings</a>
     </header>
     <p id="connection" class="notice muted" role="status">Checking relay connection…</p>
+    <p id="secretSettings" hidden>
+      <a href="options.html" target="_blank">Open Settings to save the relay secret</a>
+    </p>
+    <section aria-labelledby="signinHeading">
+      <h2 id="signinHeading">Pending sign-in requests</h2>
+      <button id="refreshSignin" class="small">Refresh requests</button>
+      <p id="signinError" role="status"></p>
+      <ul id="signinPending"></ul>
+    </section>
     <section aria-labelledby="siteHeading">
       <h2 id="siteHeading">Current site</h2>
       <div id="currentDomain" class="domain">Checking the active tab…</div>

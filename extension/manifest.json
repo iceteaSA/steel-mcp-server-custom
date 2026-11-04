@@ -3,7 +3,15 @@
   "name": "Steel Cookie Push",
   "version": "2.0.0",
   "description": "Move selected site sign-ins into Steel profiles with explicit site access",
-  "permissions": ["cookies", "activeTab", "storage", "scripting", "contextMenus", "alarms"],
+  "permissions": [
+    "cookies",
+    "activeTab",
+    "storage",
+    "scripting",
+    "contextMenus",
+    "alarms",
+    "notifications"
+  ],
   "optional_host_permissions": ["http://*/*", "https://*/*"],
   "background": { "service_worker": "background.js", "type": "module" },
   "options_page": "options.html",
