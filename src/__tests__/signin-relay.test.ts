@@ -68,6 +68,18 @@ it("requires Bearer authentication before listing pending sign-in requests", asy
   expect(response.status).toBe(401);
 });
 
+it("audits a request push without HTTP authorization without recording supplied values", async () => {
+  const response = await fetch(origin + "/signin/unknown/push", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(state),
+  });
+  expect(response.status).toBe(401);
+  const auditFile = path.join(directory, "profiles", ".signin-audit.jsonl");
+  expect(await fs.exists(auditFile)).toBe(true);
+  const audit = await fs.readFile(auditFile, "utf8");
+  expect(audit).toContain("rejected:unauthorized");
+  expect(audit).not.toContain("CANARY_PRIVATE");
+});
+
 it("lists pending sign-in requests without exposing saved state", async () => {
   const response = await fetch(origin + "/signin", {
     headers: { Authorization: "Bearer fake-signin-secret" },
@@ -201,7 +213,8 @@ it("rejects automatic approval after its remembered grant is revoked", async () 
   const request = await store.create(caller, input);
   await store.revoke((await store.grants())[0].id);
   const response = await fetch(origin + `/signin/${request.id}/push`, {
-    method: "POST", headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
+    method: "POST",
+    headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
     body: JSON.stringify({ ...state, useGrant: true }),
   });
   expect(response.status).toBe(400);
@@ -213,22 +226,29 @@ it("accepts automatic approval only while its exact site/profile grant is active
   await store.remember(input.site, input.profile);
   const request = await store.create(caller, input);
   const response = await fetch(origin + `/signin/${request.id}/push`, {
-    method: "POST", headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
+    method: "POST",
+    headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
     body: JSON.stringify({ ...state, useGrant: true }),
   });
   expect(response.status).toBe(200);
-  expect(await store.status(caller, request.id)).toMatchObject({ status: "approved", counts: { cookieCount: 1, storageKeyCount: 1 } });
+  expect(await store.status(caller, request.id)).toMatchObject({
+    status: "approved",
+    counts: { cookieCount: 1, storageKeyCount: 1 },
+  });
 });
 
 it("accepts an optional operator note on approval without putting it in the audit row", async () => {
   const request = await store.create(caller, input);
   const response = await fetch(origin + `/signin/${request.id}/push`, {
-    method: "POST", headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
+    method: "POST",
+    headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
     body: JSON.stringify({ ...state, note: "Approved for this task" }),
   });
   expect(response.status).toBe(200);
   expect((await store.status(caller, request.id)).note).toBe("Approved for this task");
-  expect(await fs.readFile(path.join(directory, "profiles", ".signin-audit.jsonl"), "utf8")).not.toContain("Approved for this task");
+  expect(
+    await fs.readFile(path.join(directory, "profiles", ".signin-audit.jsonl"), "utf8"),
+  ).not.toContain("Approved for this task");
 });
 
 it("authenticates a WebSocket through its first message and sends pending state", async () => {
