@@ -31,14 +31,23 @@ function captureSpecs(): {
 
 function makeMockPage(responses: unknown[]) {
   let evalCalls = 0;
+  const worlds: Array<boolean | undefined> = [];
   const page: {
     title: () => Promise<string>;
-    evaluate: () => Promise<unknown>;
+    evaluate: (
+      fn: unknown,
+      arg?: unknown,
+      options?: unknown,
+      isolated?: boolean,
+    ) => Promise<unknown>;
+    worlds: Array<boolean | undefined>;
     goto: () => Promise<void>;
     waitForFunction: () => Promise<void>;
   } = {
     title: async () => "Example Domain",
-    evaluate: async () => {
+    worlds,
+    evaluate: async (_fn, _arg, _options, isolated) => {
+      worlds.push(isolated);
       const value = responses[evalCalls];
       evalCalls += 1;
       return value;
@@ -59,6 +68,44 @@ function makeMockMgr(page: ReturnType<typeof makeMockPage>) {
 const dummyEnv = {} as Env;
 
 describe("smoke_test handler (mock page)", () => {
+  it.each([true, false])(
+    "checks Linux context coverage without a fake GPU (noMac=%s)",
+    async (noMac) => {
+      const captured = captureSpecs();
+      const identity = {
+        userAgent: "Mozilla/5.0 (X11; Linux x86_64) Chrome/156.0.0.0",
+        platform: "Linux x86_64",
+        userAgentData: {
+          platform: "Linux",
+          brands: [{ brand: "Chromium", version: "156" }],
+          mobile: false,
+        },
+        webdriver: false,
+        languages: ["en-ZA", "en"],
+        pluginsCount: 5,
+        timeZone: "Africa/Johannesburg",
+        screen: { width: 1920, height: 1080 },
+      };
+      const page = makeMockPage([
+        identity,
+        identity,
+        "ANGLE SwiftShader",
+        "ANGLE SwiftShader",
+        { sameWorker: true, sameFrame: true, noMac },
+        [],
+        true,
+        false,
+      ]);
+      register(captured.register, makeMockMgr(page), dummyEnv);
+      const result = await (captured.find("smoke_test")!.handler as () => Promise<HandlerResult>)();
+      const checks = result.structuredContent!.checks;
+      expect(checks.find((c) => c.check === "Linux WebGL consistency")?.pass).toBe(true);
+      expect(checks.find((c) => c.check === "Linux context identity")?.pass).toBe(noMac);
+      expect(checks.some((c) => c.check === "WebGL spoofed")).toBe(false);
+      expect(checks.find((c) => c.check === "isolated world: WebGL spoofed")?.pass).toBe(false);
+    },
+  );
+
   it("reports headless-detection probe unavailable when sannysoft cannot be reached", async () => {
     const captured = captureSpecs();
     const page = makeMockPage([
@@ -73,7 +120,19 @@ describe("smoke_test handler (mock page)", () => {
         timeZone: "America/New_York",
         screen: { width: 1920, height: 1080 },
       },
+      {
+        userAgent: "Mozilla/5.0 (X11; Linux x86_64) Chrome/147.0.0.0",
+        platform: "Linux x86_64",
+        webdriver: false,
+        languages: ["en-US"],
+        pluginsCount: 0,
+        timeZone: "Africa/Johannesburg",
+        screen: { width: 800, height: 600 },
+      },
       "Intel Iris Xe",
+      "SwiftShader",
+      true,
+      false,
     ]);
     page.goto = async () => {
       throw new Error("net::ERR_NAME_NOT_RESOLVED");
@@ -99,6 +158,21 @@ describe("smoke_test handler (mock page)", () => {
       (c) => c.check === "Headless detection probe",
     );
     expect(probeCheck?.pass).toBe(false);
+    expect(page.worlds).toEqual([false, undefined, false, undefined, false, undefined]);
+    expect(result.structuredContent!.checks.find((c) => c.check === "WebGL spoofed")?.pass).toBe(
+      true,
+    );
+    expect(
+      result.structuredContent!.checks.find((c) => c.check === "isolated world: WebGL spoofed")
+        ?.pass,
+    ).toBe(false);
+    expect(result.structuredContent!.checks.find((c) => c.check === "Canvas noise")?.pass).toBe(
+      true,
+    );
+    expect(
+      result.structuredContent!.checks.find((c) => c.check === "isolated world: Canvas noise")
+        ?.pass,
+    ).toBe(false);
   });
 
   it("reports probe ran with zero failures when sannysoft table is empty", async () => {
@@ -115,8 +189,19 @@ describe("smoke_test handler (mock page)", () => {
         timeZone: "America/New_York",
         screen: { width: 1920, height: 1080 },
       },
+      {
+        userAgent: "Mozilla/5.0 (X11; Linux x86_64) Chrome/147.0.0.0",
+        platform: "Linux x86_64",
+        webdriver: false,
+        languages: ["en-US"],
+        pluginsCount: 0,
+        timeZone: "Africa/Johannesburg",
+        screen: { width: 800, height: 600 },
+      },
       "Intel Iris Xe",
+      "SwiftShader",
       [],
+      false,
       false,
     ]);
 

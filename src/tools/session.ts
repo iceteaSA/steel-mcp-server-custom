@@ -101,7 +101,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
   register({
     name: "smoke_test",
     title: "Smoke Test",
-    description: `Self-test: navigates to example.com and bot.sannysoft.com, checks fingerprint consistency against the real browser identity, reports headless-detection failures, restores the WebGL spoofing check, and verifies CapSolver balance. Use after browser restarts or config changes to verify stealth posture. Creates and cleans up its own test tab — does not affect your active tabs.`,
+    description: `Self-test: navigates to example.com and bot.sannysoft.com, checks the site's MAIN-world fingerprint, checks Linux page/worker/iframe consistency or Mac WebGL spoofing, reports headless-detection failures, and verifies CapSolver balance. Isolated-world assertions are reported separately. Creates and cleans up its own test tab and does not affect your active tabs.`,
     toolset: "debug",
     inputSchema: {},
     outputSchema: {
@@ -163,7 +163,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         }
 
         try {
-          const raw = await page.evaluate(() => {
+          const readIdentity = () => {
             const uaData = (
               navigator as Navigator & {
                 userAgentData?: {
@@ -189,7 +189,9 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
               timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
               screen: { width: screen.width, height: screen.height },
             };
-          });
+          };
+          // Patchright uses an isolated world by default. Sites run in the main world.
+          const raw = await page.evaluate(readIdentity, undefined, undefined, false);
 
           identity.userAgent = raw.userAgent;
           identity.platform = raw.platform;
@@ -201,6 +203,14 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           for (const c of consistency) {
             results.push({ check: c.check, pass: c.pass, detail: c.observed });
           }
+          const isolated = await page.evaluate(readIdentity);
+          for (const c of checkFingerprintConsistency(isolated)) {
+            results.push({
+              check: `isolated world: ${c.check}`,
+              pass: c.pass,
+              detail: c.observed,
+            });
+          }
         } catch (e) {
           results.push({
             check: "Fingerprint consistency",
@@ -210,24 +220,132 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         }
 
         try {
-          const renderer = await page.evaluate(() => {
+          const readRenderer = () => {
             const c = document.createElement("canvas");
             const gl = c.getContext("webgl");
             if (!gl) return "none";
             const ext = gl.getExtension("WEBGL_debug_renderer_info");
             return ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : "no ext";
-          });
+          };
+          const renderer = await page.evaluate(readRenderer, undefined, undefined, false);
+          const linux =
+            identity.platform === "Linux x86_64" && identity.userAgent?.includes("Linux");
           const webglOk =
             renderer !== "none" &&
             typeof renderer === "string" &&
-            !renderer.includes("SwiftShader");
+            (linux
+              ? /SwiftShader|Mesa|AMD|Radeon|Intel|NVIDIA/i.test(renderer) &&
+                !/Apple|Metal|Mac/i.test(renderer)
+              : !renderer.includes("SwiftShader"));
           results.push({
-            check: "WebGL spoofed",
+            check: linux ? "Linux WebGL consistency" : "WebGL spoofed",
             pass: webglOk,
             detail: String(renderer).slice(0, 60),
           });
+          const isolatedRenderer = await page.evaluate(readRenderer);
+          results.push({
+            check: "isolated world: WebGL spoofed",
+            pass:
+              typeof isolatedRenderer === "string" &&
+              isolatedRenderer !== "none" &&
+              !isolatedRenderer.includes("SwiftShader"),
+            detail: String(isolatedRenderer).slice(0, 60),
+          });
         } catch (e) {
           results.push({ check: "WebGL spoofed", pass: false, detail: (e as Error).message });
+        }
+
+        if (identity.platform === "Linux x86_64") {
+          try {
+            const coverage = await page.evaluate(
+              async () => {
+                const read = () => {
+                  const hints = (
+                    navigator as Navigator & {
+                      userAgentData?: { toJSON(): unknown };
+                    }
+                  ).userAgentData?.toJSON();
+                  const canvas =
+                    typeof document === "undefined"
+                      ? new OffscreenCanvas(2, 2)
+                      : document.createElement("canvas");
+                  const gl = canvas.getContext("webgl") as WebGLRenderingContext | null;
+                  const ext = gl?.getExtension("WEBGL_debug_renderer_info");
+                  return {
+                    userAgent: navigator.userAgent,
+                    platform: navigator.platform,
+                    languages: Array.from(navigator.languages),
+                    hints,
+                    timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                    renderer: ext ? gl!.getParameter(ext.UNMASKED_RENDERER_WEBGL) : null,
+                  };
+                };
+                const expected = read();
+                const source = `postMessage((${read.toString()})())`;
+                const blob = URL.createObjectURL(new Blob([source], { type: "text/javascript" }));
+                const worker = new Worker(blob);
+                const frame = document.createElement("iframe");
+                try {
+                  const workerIdentity = await new Promise<unknown>((resolve, reject) => {
+                    const timer = setTimeout(
+                      () => reject(new Error("worker identity timed out")),
+                      15000,
+                    );
+                    worker.onmessage = (event) => {
+                      clearTimeout(timer);
+                      resolve(event.data);
+                    };
+                    worker.onerror = () => {
+                      clearTimeout(timer);
+                      reject(new Error("worker identity failed"));
+                    };
+                  });
+                  await new Promise<void>((resolve, reject) => {
+                    const timer = setTimeout(
+                      () => reject(new Error("iframe identity timed out")),
+                      15000,
+                    );
+                    frame.onload = () => {
+                      clearTimeout(timer);
+                      resolve();
+                    };
+                    frame.src = location.href;
+                    document.body.append(frame);
+                  });
+                  const frameWindow = frame.contentWindow as (Window & typeof globalThis) | null;
+                  if (!frameWindow) throw new Error("iframe window is unavailable");
+                  const frameIdentity = frameWindow.eval(`(${read.toString()})()`);
+                  const same = (value: unknown) =>
+                    JSON.stringify(value) === JSON.stringify(expected);
+                  return {
+                    sameWorker: same(workerIdentity),
+                    sameFrame: same(frameIdentity),
+                    noMac: !/MacIntel|Macintosh|macOS|Google Inc\. \(Apple\)|ANGLE Metal/.test(
+                      JSON.stringify([expected, workerIdentity, frameIdentity]),
+                    ),
+                  };
+                } finally {
+                  worker.terminate();
+                  URL.revokeObjectURL(blob);
+                  frame.remove();
+                }
+              },
+              undefined,
+              undefined,
+              false,
+            );
+            results.push({
+              check: "Linux context identity",
+              pass: coverage.sameWorker && coverage.sameFrame && coverage.noMac,
+              detail: `worker=page:${coverage.sameWorker}, iframe=page:${coverage.sameFrame}, no Mac leaks:${coverage.noMac}`,
+            });
+          } catch (e) {
+            results.push({
+              check: "Linux context identity",
+              pass: false,
+              detail: (e as Error).message,
+            });
+          }
         }
 
         try {
@@ -278,7 +396,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         });
 
         try {
-          const noised = await page.evaluate(() => {
+          const readCanvasNoise = () => {
             const c = document.createElement("canvas");
             c.width = 50;
             c.height = 50;
@@ -287,11 +405,18 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
             ctx.fillRect(0, 0, 25, 25);
             ctx.fillText("test", 5, 15);
             return c.toDataURL() !== c.toDataURL();
-          });
+          };
+          const noised = await page.evaluate(readCanvasNoise, undefined, undefined, false);
           results.push({
             check: "Canvas noise",
             pass: noised === true,
             detail: noised ? "active" : "NOT noised",
+          });
+          const isolatedNoised = await page.evaluate(readCanvasNoise);
+          results.push({
+            check: "isolated world: Canvas noise",
+            pass: isolatedNoised === true,
+            detail: isolatedNoised ? "active" : "NOT noised",
           });
         } catch (e) {
           results.push({ check: "Canvas noise", pass: false, detail: (e as Error).message });
@@ -357,12 +482,19 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
 
         lines.push("\nStealth checks:");
         for (const r of results.filter((r) =>
-          ["Canvas noise", "WebGL spoofed", "CapSolver"].includes(r.check),
+          [
+            "Canvas noise",
+            "WebGL spoofed",
+            "Linux WebGL consistency",
+            "Linux context identity",
+            "CapSolver",
+          ].includes(r.check),
         )) {
           lines.push(`${r.pass ? "✓" : "✗"} ${r.check}: ${r.detail}`);
         }
 
         lines.push("\nIdentity:");
+        lines.push("Main world (site-visible); isolated-world assertions are separate.");
         lines.push(`timeZone: ${identity.tz ?? "unknown"}`);
         lines.push(`locale: ${identity.locale ?? "unknown"}`);
         lines.push(
@@ -370,6 +502,10 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         );
         lines.push(`ua: ${identity.userAgent ?? "unknown"}`);
         lines.push(`platform: ${identity.platform ?? "unknown"}`);
+        lines.push("\nIsolated world (automation-only):");
+        for (const r of results.filter((r) => r.check.startsWith("isolated world:"))) {
+          lines.push(`${r.pass ? "✓" : "✗"} ${r.check}: ${r.detail}`);
+        }
         lines.push(
           `\nNote: browser tz/locale reflect the Steel container config, not the proxy geo. Mismatches vs proxy geo require Steel-side configuration.`,
         );
