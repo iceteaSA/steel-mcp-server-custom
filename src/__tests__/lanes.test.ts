@@ -738,3 +738,146 @@ test("owner labels do not restrict own-lane interception, response bodies, or HA
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test("R1 P2 real Chromium: a looping evaluate is interrupted by bounded lane closure", async () => {
+  const f = await fixture("on", { LANE_DRAIN_MS: "30", LANE_IDLE_MS: "100000" });
+  const entered = barrier();
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => {
+      entered.release();
+      return new Response("ready");
+    },
+  });
+  let running: ReturnType<typeof f.call> | undefined;
+  let closing: ReturnType<typeof f.call> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const a = tab(await f.call("a", "new_tab"));
+    const b = tab(await f.call("b", "new_tab"));
+    running = f.call("a", "evaluate", {
+      tabId: a,
+      expression: `(() => { fetch("http://127.0.0.1:${server.port}/entered"); while (true) {} })()`,
+    });
+    await Promise.race([
+      entered.promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("looping page did not enter the handler")), 1800);
+      }),
+    ]);
+    clearTimeout(timer);
+    closing = f.call("a", "close_lane");
+    const result = await Promise.race([
+      closing,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("looping page prevented lane closure")), 1800);
+      }),
+    ]);
+    expect(result.isError).not.toBe(true);
+    expect((await running).isError).toBe(true);
+    expect(f.primary.isClosed()).toBe(false);
+    expect((await f.call("b", "evaluate", { tabId: b, expression: "2" })).isError).not.toBe(true);
+    expect(tab(await f.call("a", "new_tab"))).not.toBe(a);
+  } finally {
+    clearTimeout(timer);
+    await f.endSession();
+    await Promise.allSettled([running, closing].filter((p) => p !== undefined));
+    server.stop(true);
+    await f.close();
+  }
+}, 20000);
+
+test("R1 security P8: list_profiles reports only the caller's active profile usage", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "steel-r1-profile-"));
+  const f = await fixture("on", { PROFILES_DIR: directory });
+  try {
+    await f.call("a", "create_profile", { name: "shared" });
+    await f.call("a", "save_profile", { name: "shared" });
+    const own = structured(await f.call("a", "list_profiles"))?.profiles as Array<{
+      name: string;
+      active: boolean;
+      tabCount: number;
+    }>;
+    expect(own.find((p) => p.name === "shared")).toMatchObject({ active: true, tabCount: 1 });
+    for (const caller of ["b", undefined]) {
+      const other = structured(await f.call(caller, "list_profiles"))?.profiles as Array<{
+        name: string;
+        active: boolean;
+        tabCount: number;
+      }>;
+      expect(other.find((p) => p.name === "shared")).toMatchObject({ active: false, tabCount: 0 });
+      expect(JSON.stringify(other)).not.toContain("holder");
+    }
+  } finally {
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("R1 security S2: credential mutations require identity and audit only operation and caller", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "steel-r1-credentials-"));
+  const f = await fixture("on", { CREDENTIALS_FILE: join(directory, "credentials.json") });
+  const audit = spyOn(console, "error").mockImplementation(() => {});
+  const canary = "R1-CANARY-NAME";
+  const value = "R1-CANARY-VALUE";
+  const write = {
+    name: canary,
+    username: "R1-CANARY-USER",
+    password: value,
+    url: "https://canary.invalid",
+  };
+  try {
+    expect(text(await f.call(undefined, "credentials", write))).toContain("no_caller");
+    expect(structured(await f.call(undefined, "credentials"))?.credentials).toEqual([]);
+    expect((await f.call("actor-a", "credentials", write)).isError).not.toBe(true);
+    expect(text(await f.call(undefined, "credentials", { name: canary, remove: true }))).toContain(
+      "no_caller",
+    );
+    expect(structured(await f.call(undefined, "credentials"))?.credentials).toHaveLength(1);
+    expect(
+      (await f.call("actor-a", "credentials", { name: canary, remove: true })).isError,
+    ).not.toBe(true);
+    const lines = audit.mock.calls
+      .map((args) => args.join(" "))
+      .filter((line) => line.includes("credentials."));
+    expect(lines).toHaveLength(2);
+    for (const line of lines) {
+      expect(JSON.parse(line)).toMatchObject({ caller: "actor-a" });
+      expect(Object.keys(JSON.parse(line)).sort()).toEqual(["caller", "event"]);
+      expect(line).not.toContain(canary);
+      expect(line).not.toContain(value);
+      expect(line).not.toContain("canary.invalid");
+      expect(line).not.toContain("R1-CANARY-USER");
+    }
+    expect(f.starts()).toBe(0);
+  } finally {
+    audit.mockRestore();
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("R1 security S3: another lane's request/response reference cannot fetch its body", async () => {
+  const f = await fixture();
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response("A-RESPONSE-CANARY"),
+  });
+  try {
+    await f.call("a", "new_tab", { url: `http://127.0.0.1:${server.port}/a-only` });
+    await f.call("b", "new_tab");
+    const response = structured(
+      await f.call("a", "get_network", { urlPattern: "/a-only", body: true }),
+    );
+    expect(response?.body).toBe("A-RESPONSE-CANARY");
+    expect(typeof response?.requestId).toBe("number");
+    const foreign = await f.call("b", "get_network", { requestId: response?.requestId });
+    expect(foreign.isError).toBe(true);
+    expect(text(foreign)).not.toContain("A-RESPONSE-CANARY");
+  } finally {
+    server.stop(true);
+    await f.close();
+  }
+});
