@@ -108,29 +108,41 @@ it("expires and cancels requests and maps terminal tool errors without exposing 
   });
 });
 
+async function remember(site: string, profile: string) {
+  const request = await store.create(caller, { ...input, site, profile });
+  await store.consume(request.id, {
+    validate: () => {},
+    write: async () => ({ cookieCount: 0, storageKeyCount: 0 }),
+    remember: true,
+  });
+}
+async function hasGrant(site: string, profile: string) {
+  return (await store.create(caller, { ...input, site, profile })).remembered ?? false;
+}
+
 it("keeps remembered grants off by default, bounds them to a site/profile, expires and revokes them", async () => {
   expect(await store.grants()).toEqual([]);
-  await store.remember(input.site, input.profile);
-  expect(await store.hasGrant(input.site, input.profile)).toBe(true);
-  expect(await store.hasGrant("https://sibling.example.com", input.profile)).toBe(false);
-  expect(await store.hasGrant(input.site, "other")).toBe(false);
+  await remember(input.site, input.profile);
+  expect(await hasGrant(input.site, input.profile)).toBe(true);
+  expect(await hasGrant("https://sibling.example.com", input.profile)).toBe(false);
+  expect(await hasGrant(input.site, "other")).toBe(false);
   const [grant] = await store.grants();
   expect(grant.expires - grant.created).toBe(7 * 86_400_000);
   await store.revoke(grant.id);
-  expect(await store.hasGrant(input.site, input.profile)).toBe(false);
-  await store.remember(input.site, input.profile);
+  expect(await hasGrant(input.site, input.profile)).toBe(false);
+  await remember(input.site, input.profile);
   now += 7 * 86_400_000;
   expect(await store.grants()).toEqual([]);
 });
 
 it("removes remembered authorization from pending requests when a grant is revoked or expires", async () => {
-  await store.remember(input.site, input.profile);
+  await remember(input.site, input.profile);
   const request = await store.create(caller, input);
   expect(request.remembered).toBe(true);
   await store.revoke((await store.grants())[0].id);
   expect((await store.pending())[0].remembered).toBe(false);
   await store.cancel(caller, request.id);
-  await store.remember(input.site, input.profile);
+  await remember(input.site, input.profile);
   now += 7 * 86_400_000 - 60_000;
   await store.create(caller, input);
   now += 60_000;

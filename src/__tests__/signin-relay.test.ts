@@ -258,8 +258,17 @@ it("requires explicit remember opt-in and supports listing and revocation", asyn
   expect(await store.grants()).toEqual([]);
 });
 
+async function rememberGrant() {
+  const request = await store.create(caller, input);
+  await store.consume(request.id, {
+    validate: () => {},
+    write: async () => ({ cookieCount: 0, storageKeyCount: 0 }),
+    remember: true,
+  });
+}
+
 it("rejects automatic approval after its remembered grant is revoked", async () => {
-  await store.remember(input.site, input.profile);
+  await rememberGrant();
   const request = await store.create(caller, input);
   await store.revoke((await store.grants())[0].id);
   const response = await fetch(origin + `/signin/${request.id}/push`, {
@@ -273,7 +282,7 @@ it("rejects automatic approval after its remembered grant is revoked", async () 
 });
 
 it("accepts automatic approval only while its exact site/profile grant is active", async () => {
-  await store.remember(input.site, input.profile);
+  await rememberGrant();
   const request = await store.create(caller, input);
   const response = await fetch(origin + `/signin/${request.id}/push`, {
     method: "POST",

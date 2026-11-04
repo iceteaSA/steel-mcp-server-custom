@@ -29,7 +29,6 @@ import {
   mergeProfileData,
   serialize,
   domainSchema,
-  originSchema,
   cookieSchema,
   storageSchema,
   type ProfileData as ProfileState,

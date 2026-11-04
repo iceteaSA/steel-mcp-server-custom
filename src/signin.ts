@@ -267,12 +267,6 @@ export class SigninStore extends EventEmitter {
       return this.copy(this.find(id));
     });
   }
-  async requirePending(id: string): Promise<SigninRequest> {
-    const request = await this.request(id);
-    if (request.status !== "pending")
-      throw new Error(`signin_${request.status === "approved" ? "used" : request.status}`);
-    return request;
-  }
   private async finish(
     id: string,
     status: SigninRequest["status"],
@@ -358,29 +352,6 @@ export class SigninStore extends EventEmitter {
       return this.copy(this.state.grants);
     });
   }
-  async hasGrant(site: string, profile: string): Promise<boolean> {
-    return (await this.grants()).some(
-      (grant) => grant.site === normalizeSite(site).site && grant.profile === profile,
-    );
-  }
-  async remember(site: string, profile: string): Promise<void> {
-    await this.serial(async () => {
-      const normalized = normalizeSite(site).site;
-      if (!isValidProfileName(profile)) throw new Error("invalid_request");
-      this.state.grants = this.state.grants.filter(
-        (grant) => grant.site !== normalized || grant.profile !== profile,
-      );
-      const created = this.now();
-      this.state.grants.push({
-        id: crypto.randomUUID(),
-        site: normalized,
-        profile,
-        created,
-        expires: created + 7 * 86_400_000,
-      });
-      await this.save();
-    });
-  }
   async revoke(id: string): Promise<void> {
     await this.serial(async () => {
       this.state.grants = this.state.grants.filter((grant) => grant.id !== id);
@@ -441,7 +412,7 @@ export class SigninStore extends EventEmitter {
     }
   }
   async tick(): Promise<void> {
-    const file = this.options.ntfyTopicFile ?? process.env.STEEL_NTFY_TOPIC_FILE;
+    const file = this.options.ntfyTopicFile;
     const due = await this.serial(async () => {
       await this.expire();
       const requests: SigninRequest[] = [];

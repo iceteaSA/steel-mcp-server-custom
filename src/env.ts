@@ -18,6 +18,7 @@ export const EnvSchema = z
     // When set, STEEL_API_KEY is optional.
     STEEL_BASE_URL: z.string().optional(),
     STEEL_LANES: z.enum(["on", "off"]).default("on"),
+    STEEL_NTFY_TOPIC_FILE: z.string().optional(),
     LANE_IDLE_MS: z.coerce.number().int().positive().default(900000),
     LANE_DRAIN_MS: z.coerce.number().int().nonnegative().default(5000),
     LANE_MAX: z.coerce.number().int().positive().default(8),

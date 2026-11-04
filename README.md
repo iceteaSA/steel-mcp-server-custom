@@ -84,6 +84,7 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 | `STEEL_BASE_URL` | Steel Cloud | Self-hosted Steel URL (e.g. `http://your-steel-host:3000`) |
 | `STEEL_LANES` | `on` | Isolated caller lanes. Set `off` for the legacy shared context, owner guard, and `force` override. |
 | `LANE_IDLE_MS` | `900000` | Close an idle lane after 15 minutes. Active calls keep the lane open. |
+| `STEEL_NTFY_TOPIC_FILE` | unset | Path to the `0600` file with the operator's ntfy topic. Unset means no push. |
 | `STEEL_PUBLIC_URL` | — | Public-facing Steel URL for debug/interactive URLs in `start_browser` output |
 | `SESSION_TIMEOUT_MS` | `300000` | Steel session auto-release timeout (ms) |
 | `SETTLE_TIMEOUT_MS` | `5000` | Max time to wait for network idle + DOM quiet after actions. `0` disables |

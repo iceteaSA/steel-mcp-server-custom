@@ -57,7 +57,10 @@ const server = new McpServer(
 );
 
 const rootManager = new BrowserManager(env);
-const signinStore = SigninStore.open({ profilesDir: env.PROFILES_DIR });
+const signinStore = SigninStore.open({
+  profilesDir: env.PROFILES_DIR,
+  ntfyTopicFile: env.STEEL_NTFY_TOPIC_FILE,
+});
 let relayServer: ReturnType<typeof startRelayServer> | undefined;
 let stopping = false;
 

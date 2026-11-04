@@ -15,6 +15,7 @@
     ],
     "scripts": {
         "build": "bun build src/index.ts --outdir dist --target=node --format=cjs --external patchright --external patchright-core && mv dist/index.js dist/index.cjs",
+        "check:relay-node": "bun build src/relay.ts --outfile dist/relay-node.cjs --target=node --format=cjs && /usr/bin/node scripts/signin-node-check.cjs",
         "dev": "bun --watch src/index.ts",
         "start": "node dist/index.cjs",
         "lint": "oxlint src/",
