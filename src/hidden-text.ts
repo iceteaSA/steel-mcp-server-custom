@@ -146,12 +146,54 @@ function guardDocument(mode: HiddenTextMode, stripControls: (text: string) => st
     let clipHeight = Infinity;
     let scrollableX = false;
     let scrollableY = false;
+    const clips: {
+      axis: "x" | "y";
+      low: number;
+      high: number;
+      minShift: number;
+      maxShift: number;
+    }[] = [];
     for (let el: Element | null = parent; el; el = el.parentElement) {
       const style = getComputedStyle(el);
       const box = el.getBoundingClientRect();
       if (isReader(el, style, box)) return false;
       scrollableX ||= /(auto|scroll)/.test(style.overflowX) && el.scrollWidth > el.clientWidth;
       scrollableY ||= /(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight;
+      const scaleX = box.width / ((el as HTMLElement).offsetWidth || box.width || 1);
+      const scaleY = box.height / ((el as HTMLElement).offsetHeight || box.height || 1);
+      for (const [axis, overflow, origin, viewport, content, position, scale] of [
+        [
+          "x",
+          style.overflowX,
+          box.left + el.clientLeft * scaleX,
+          el.clientWidth,
+          el.scrollWidth,
+          el.scrollLeft,
+          scaleX,
+        ],
+        [
+          "y",
+          style.overflowY,
+          box.top + el.clientTop * scaleY,
+          el.clientHeight,
+          el.scrollHeight,
+          el.scrollTop,
+          scaleY,
+        ],
+      ] as const) {
+        if (!/^(hidden|clip|scroll|auto)$/.test(overflow)) continue;
+        const scrolling = /^(scroll|auto)$/.test(overflow);
+        const travel = scrolling ? Math.max(0, content - viewport) * scale : 0;
+        const shift = scrolling ? position * scale : 0;
+        const reverse = position < 0 || (axis === "x" && style.direction === "rtl");
+        clips.push({
+          axis,
+          low: origin,
+          high: origin + viewport * scale,
+          minShift: reverse ? shift : shift - travel,
+          maxShift: reverse ? shift + travel : shift,
+        });
+      }
       const shape = /^(circle|ellipse)\(([^)]+)\)/.exec(style.clipPath);
       if (shape) {
         const radii = shape[2]
@@ -169,17 +211,31 @@ function guardDocument(mode: HiddenTextMode, stripControls: (text: string) => st
         if (Number.isFinite(height)) clipHeight = Math.min(clipHeight, height);
       }
     }
-    return !rects.some(
-      (rect) =>
-        Math.min(rect.height, clipHeight) >= 2 &&
-        rect.width > 0 &&
+    return !rects.some((rect) => {
+      let left = rect.left;
+      let right = rect.right;
+      let top = rect.top;
+      let bottom = rect.bottom;
+      for (const clip of clips) {
+        if (clip.axis === "x") {
+          left = Math.max(left + clip.minShift, clip.low);
+          right = Math.min(right + clip.maxShift, clip.high);
+        } else {
+          top = Math.max(top + clip.minShift, clip.low);
+          bottom = Math.min(bottom + clip.maxShift, clip.high);
+        }
+        if (right <= left || bottom <= top) return false;
+      }
+      return (
+        Math.min(rect.height, bottom - top, clipHeight) >= 2 &&
+        right > left &&
         (scrollableX ||
           (rect.right + scrollX > 0 &&
             rect.left + scrollX < document.documentElement.scrollWidth)) &&
         (scrollableY ||
-          (rect.bottom + scrollY > 0 &&
-            rect.top + scrollY < document.documentElement.scrollHeight)),
-    );
+          (rect.bottom + scrollY > 0 && rect.top + scrollY < document.documentElement.scrollHeight))
+      );
+    });
   };
   const textHidden = (text: Node): boolean => {
     const range = document.createRange();

@@ -95,6 +95,37 @@ for (const name of ["get_page_text", "extract", "snapshot"]) {
 
 const frameHtml = (html: string) =>
   `<iframe srcdoc="${html.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}"></iframe>`;
+
+for (const name of ["get_page_text", "extract", "snapshot"]) {
+  test(`M3 overflow ${name} clips ancestor-hidden text but keeps sr-only names and scrollable content`, async () => {
+    await page.setContent(`<article id="fixture">
+      <div style="height:0;overflow:hidden"><p>zeroh-token</p></div>
+      <div style="width:0;overflow:clip"><p>zerow-token</p></div>
+      <div style="height:0;overflow:auto"><p>zeroauto-token</p></div>
+      <div style="height:0;overflow:hidden"><div style="height:40px;overflow:auto"><p>nestedclip-token</p></div></div>
+      <button style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap">reader-kept-token</button>
+      <div id="list" style="height:32px;overflow:auto"><p>first-kept-token</p><div style="height:1000px"></div><p>last-kept-token</p></div>
+      </article>`);
+    await page.locator("#list").evaluate((el) => {
+      el.scrollTop = 500;
+    });
+    const before = await page.content();
+    const result = await tool(name).handler({
+      selector: "#fixture",
+      fields: { text: "." },
+      filter: "all",
+      maxChars: 64000,
+    });
+    expect(result.isError).not.toBe(true);
+    const text = JSON.stringify(result);
+    for (const token of ["zeroh-token", "zerow-token", "zeroauto-token", "nestedclip-token"])
+      expect(text).not.toContain(token);
+    for (const token of ["reader-kept-token", "first-kept-token", "last-kept-token"])
+      expect(text).toContain(token);
+    expect(await page.content()).toBe(before);
+  });
+}
+
 for (const kind of ["same-origin", "cross-origin", "nested"]) {
   test(`M2 snapshot guards ${kind} frames with independent visible-string exemptions`, async () => {
     const child =
