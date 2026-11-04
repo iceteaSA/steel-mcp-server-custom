@@ -15,13 +15,21 @@ let now: number;
 let updates: string[];
 const caller = { sessionID: "session-test", agent: "tester" };
 const input = { site: "https://login.example.com", profile: "work", reason: "Read account" };
-const state = { profile: "work", cookies: [{ name: "sid", value: "CANARY_PRIVATE", domain: ".example.com", path: "/" }], localStorage: { "https://login.example.com": { token: "CANARY_PRIVATE" } } };
+const state = {
+  profile: "work",
+  cookies: [{ name: "sid", value: "CANARY_PRIVATE", domain: ".example.com", path: "/" }],
+  localStorage: { "https://login.example.com": { token: "CANARY_PRIVATE" } },
+};
 
 beforeEach(async () => {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), "signin-relay-"));
   now = 1_000_000;
   updates = [];
-  store = await SigninStore.open({ profilesDir: path.join(directory, "profiles"), now: () => now, automaticTimers: false });
+  store = await SigninStore.open({
+    profilesDir: path.join(directory, "profiles"),
+    now: () => now,
+    automaticTimers: false,
+  });
   server = startRelayServer({
     port: 0,
     bindAddr: "127.0.0.1",
@@ -29,7 +37,9 @@ beforeEach(async () => {
     profilesDir: path.join(directory, "profiles"),
     credentialsFile: path.join(directory, "credentials.json"),
     signinStore: store,
-    onProfileUpdated: (profile) => { updates.push(profile); },
+    onProfileUpdated: (profile) => {
+      updates.push(profile);
+    },
   });
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const address = server.address();
@@ -40,13 +50,17 @@ beforeEach(async () => {
 afterEach(async () => {
   store.close();
   await new Promise<void>((resolve, reject) => {
-    server.close((error) => error ? reject(error) : resolve());
+    server.close((error) => (error ? reject(error) : resolve()));
   });
   await fs.rm(directory, { recursive: true, force: true });
 });
 
 function post(id: string, body: PushPayload = state) {
-  return fetch(origin + `/signin/${id}/push`, { method: "POST", headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  return fetch(origin + `/signin/${id}/push`, {
+    method: "POST",
+    headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 it("requires Bearer authentication before listing pending sign-in requests", async () => {
@@ -66,7 +80,10 @@ it("rejects an unknown request id instead of writing a profile", async () => {
   const response = await fetch(origin + "/signin/unknown/push", {
     method: "POST",
     headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
-    body: JSON.stringify({ profile: "work", cookies: [{ name: "sid", value: "CANARY_PRIVATE", domain: "example.com", path: "/" }] }),
+    body: JSON.stringify({
+      profile: "work",
+      cookies: [{ name: "sid", value: "CANARY_PRIVATE", domain: "example.com", path: "/" }],
+    }),
   });
   expect(response.status).toBe(400);
   expect(await response.json()).toEqual({ error: "signin_unknown" });
@@ -77,15 +94,27 @@ it("accepts only a pending request, writes counts, applies live once, and audits
   const request = await store.create(caller, input);
   const responses = await Promise.all([post(request.id), post(request.id)]);
   expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
-  expect(await store.status(caller, request.id)).toMatchObject({ status: "approved", counts: { cookieCount: 1, storageKeyCount: 1 } });
+  expect(await store.status(caller, request.id)).toMatchObject({
+    status: "approved",
+    counts: { cookieCount: 1, storageKeyCount: 1 },
+  });
   expect(updates).toEqual(["work"]);
-  const saved = JSON.parse(await fs.readFile(path.join(directory, "profiles", "work.json"), "utf8"));
+  const saved = JSON.parse(
+    await fs.readFile(path.join(directory, "profiles", "work.json"), "utf8"),
+  );
   expect(saved.cookies[0].value).toBe("CANARY_PRIVATE");
   expect(saved.localStorage["https://login.example.com"].token).toBe("CANARY_PRIVATE");
   const audit = await fs.readFile(path.join(directory, "profiles", ".signin-audit.jsonl"), "utf8");
   expect(audit).not.toContain("CANARY_PRIVATE");
-  const rows = audit.trim().split("\n").map((line) => JSON.parse(line));
-  expect(rows.some((row) => row.decision === "approved" && row.cookieCount === 1 && row.storageKeyCount === 1)).toBe(true);
+  const rows = audit
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line));
+  expect(
+    rows.some(
+      (row) => row.decision === "approved" && row.cookieCount === 1 && row.storageKeyCount === 1,
+    ),
+  ).toBe(true);
   expect(rows.some((row) => row.decision === "rejected:signin_used")).toBe(true);
 });
 
@@ -99,14 +128,19 @@ for (const status of ["expired", "cancelled", "denied"] as const) {
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: `signin_${status}` });
     expect(await fs.exists(path.join(directory, "profiles", "work.json"))).toBe(false);
-    expect(await fs.readFile(path.join(directory, "profiles", ".signin-audit.jsonl"), "utf8")).toContain(`rejected:signin_${status}`);
+    expect(
+      await fs.readFile(path.join(directory, "profiles", ".signin-audit.jsonl"), "utf8"),
+    ).toContain(`rejected:signin_${status}`);
   });
 }
 
 for (const domain of ["other.test", "sibling.example.com", "com", "example.com.evil.test"]) {
   it(`rejects out-of-scope cookie domain ${domain}`, async () => {
     const request = await store.create(caller, input);
-    const response = await post(request.id, { ...state, cookies: [{ ...state.cookies[0], domain }] });
+    const response = await post(request.id, {
+      ...state,
+      cookies: [{ ...state.cookies[0], domain }],
+    });
     expect(response.status).toBe(400);
     expect(await response.json()).toEqual({ error: "signin_site_mismatch" });
     expect(await fs.exists(path.join(directory, "profiles", "work.json"))).toBe(false);
@@ -119,7 +153,10 @@ it("rejects another profile and another storage origin", async () => {
   expect(mismatch.status).toBe(400);
   expect(await mismatch.json()).toEqual({ error: "signin_profile_mismatch" });
   const second = await store.create(caller, input);
-  const storage = await post(second.id, { ...state, localStorage: { "https://sibling.example.com": { token: "CANARY_PRIVATE" } } });
+  const storage = await post(second.id, {
+    ...state,
+    localStorage: { "https://sibling.example.com": { token: "CANARY_PRIVATE" } },
+  });
   expect(storage.status).toBe(400);
   expect(await storage.json()).toEqual({ error: "signin_site_mismatch" });
   expect(updates).toEqual([]);
@@ -130,13 +167,50 @@ it("requires explicit remember opt-in and supports listing and revocation", asyn
   expect((await post(request.id)).status).toBe(200);
   expect(await store.grants()).toEqual([]);
   const remembered = await store.create(caller, input);
-  const response = await fetch(origin + `/signin/${remembered.id}/push`, { method: "POST", headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" }, body: JSON.stringify({ ...state, remember: true }) });
+  const response = await fetch(origin + `/signin/${remembered.id}/push`, {
+    method: "POST",
+    headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
+    body: JSON.stringify({ ...state, remember: true }),
+  });
   expect(response.status).toBe(200);
-  const grants = await fetch(origin + "/signin/grants", { headers: { Authorization: "Bearer fake-signin-secret" } });
+  const grants = await fetch(origin + "/signin/grants", {
+    headers: { Authorization: "Bearer fake-signin-secret" },
+  });
   const body = await grants.json();
   expect(body.grants).toHaveLength(1);
-  expect((await fetch(origin + `/signin/grants/${body.grants[0].id}`, { method: "DELETE", headers: { Authorization: "Bearer fake-signin-secret" } })).status).toBe(200);
+  expect(
+    (
+      await fetch(origin + `/signin/grants/${body.grants[0].id}`, {
+        method: "DELETE",
+        headers: { Authorization: "Bearer fake-signin-secret" },
+      })
+    ).status,
+  ).toBe(200);
   expect(await store.grants()).toEqual([]);
+});
+
+it("rejects automatic approval after its remembered grant is revoked", async () => {
+  await store.remember(input.site, input.profile);
+  const request = await store.create(caller, input);
+  await store.revoke((await store.grants())[0].id);
+  const response = await fetch(origin + `/signin/${request.id}/push`, {
+    method: "POST", headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
+    body: JSON.stringify({ ...state, useGrant: true }),
+  });
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({ error: "signin_grant_required" });
+  expect(await fs.exists(path.join(directory, "profiles", "work.json"))).toBe(false);
+});
+
+it("accepts automatic approval only while its exact site/profile grant is active", async () => {
+  await store.remember(input.site, input.profile);
+  const request = await store.create(caller, input);
+  const response = await fetch(origin + `/signin/${request.id}/push`, {
+    method: "POST", headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
+    body: JSON.stringify({ ...state, useGrant: true }),
+  });
+  expect(response.status).toBe(200);
+  expect(await store.status(caller, request.id)).toMatchObject({ status: "approved", counts: { cookieCount: 1, storageKeyCount: 1 } });
 });
 
 it("authenticates a WebSocket through its first message and sends pending state", async () => {
@@ -147,7 +221,10 @@ it("authenticates a WebSocket through its first message and sends pending state"
     socket.once("message", (data) => resolve(data.toString()));
   });
   socket.once("open", () => socket.send(JSON.stringify({ secret: "fake-signin-secret" })));
-  expect(JSON.parse(await message)).toMatchObject({ type: "pending", requests: [{ id: request.id }] });
+  expect(JSON.parse(await message)).toMatchObject({
+    type: "pending",
+    requests: [{ id: request.id }],
+  });
   socket.terminate();
 });
 
@@ -164,8 +241,12 @@ it("rejects a correct first secret when the authentication deadline already elap
     Date.now = () => originalNow() + 2100;
     socket.send(JSON.stringify({ secret: "fake-signin-secret" }));
   });
-  try { expect(await outcome).toBe(1008); }
-  finally { Date.now = originalNow; socket.terminate(); }
+  try {
+    expect(await outcome).toBe(1008);
+  } finally {
+    Date.now = originalNow;
+    socket.terminate();
+  }
 });
 
 for (const secret of [undefined, "wrong-secret"]) {
@@ -174,8 +255,13 @@ for (const secret of [undefined, "wrong-secret"]) {
     const socket = new WebSocket(origin.replace("http:", "ws:") + "/signin/events");
     const messages: string[] = [];
     socket.on("message", (data) => messages.push(data.toString()));
-    const closed = new Promise<number>((resolve, reject) => { socket.once("close", resolve); socket.once("error", reject); });
-    socket.once("open", () => { if (secret) socket.send(JSON.stringify({ secret })); });
+    const closed = new Promise<number>((resolve, reject) => {
+      socket.once("close", resolve);
+      socket.once("error", reject);
+    });
+    socket.once("open", () => {
+      if (secret) socket.send(JSON.stringify({ secret }));
+    });
     expect(await closed).toBe(1008);
     expect(messages).toEqual([]);
   });
@@ -183,16 +269,26 @@ for (const secret of [undefined, "wrong-secret"]) {
 
 it("closes within one second with authenticated, unauthenticated and idle HTTP connections", async () => {
   const authenticated = new WebSocket(origin.replace("http:", "ws:") + "/signin/events");
-  const snapshot = new Promise<void>((resolve, reject) => { authenticated.once("message", () => resolve()); authenticated.once("error", reject); });
-  authenticated.once("open", () => authenticated.send(JSON.stringify({ secret: "fake-signin-secret" })));
+  const snapshot = new Promise<void>((resolve, reject) => {
+    authenticated.once("message", () => resolve());
+    authenticated.once("error", reject);
+  });
+  authenticated.once("open", () =>
+    authenticated.send(JSON.stringify({ secret: "fake-signin-secret" })),
+  );
   await snapshot;
   const unauthenticated = new WebSocket(origin.replace("http:", "ws:") + "/signin/events");
-  await new Promise<void>((resolve, reject) => { unauthenticated.once("open", resolve); unauthenticated.once("error", reject); });
+  await new Promise<void>((resolve, reject) => {
+    unauthenticated.once("open", resolve);
+    unauthenticated.once("error", reject);
+  });
   expect((await fetch(origin + "/status")).status).toBe(200);
   let deadline: ReturnType<typeof setTimeout> | undefined;
   try {
     const closed = new Promise<boolean>((resolve) => server.close(() => resolve(true)));
-    const timedOut = new Promise<boolean>((resolve) => { deadline = setTimeout(() => resolve(false), 1000); });
+    const timedOut = new Promise<boolean>((resolve) => {
+      deadline = setTimeout(() => resolve(false), 1000);
+    });
     expect(await Promise.race([closed, timedOut])).toBe(true);
     expect(server.listening).toBe(false);
     expect(authenticated.readyState).not.toBe(WebSocket.OPEN);
