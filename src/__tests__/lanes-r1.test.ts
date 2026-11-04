@@ -292,12 +292,14 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
       const at = performance.now();
       child.kill(signal);
       expect(await bounded(exited, 2020)).toBe(0);
-      expect(performance.now() - at).toBeLessThan(2020);
+      const elapsed = performance.now() - at;
+      expect(elapsed).toBeLessThan(2020);
+      console.error(`Measured ${signal} exit: ${elapsed.toFixed(2)} ms (bound 2020 ms)`);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       await exited;
     }
-  });
+  }, 20000);
 }
 
 test("R1 validates bounded lifecycle defaults", () => {
