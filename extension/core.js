@@ -10,6 +10,19 @@ export const DEFAULTS = {
 
 export const getSettings = () => chrome.storage.local.get(DEFAULTS);
 
+export const DISCOVERY_ORIGINS = ["http://*/*", "https://*/*"];
+
+export async function revokeDiscoveryAccess() {
+  await chrome.permissions.remove({ origins: DISCOVERY_ORIGINS });
+  for (const origin of DISCOVERY_ORIGINS) {
+    if (await chrome.permissions.contains({ origins: [origin] })) {
+      throw new Error(
+        "Discovery access remains enabled. Remove all-site access in Chrome extension settings.",
+      );
+    }
+  }
+}
+
 export async function requestAccess(origins) {
   if (await chrome.permissions.contains({ origins })) return true;
   return chrome.permissions.request({ origins });

@@ -10,6 +10,7 @@ import {
   currentTab,
   readStorage,
   parentDomains,
+  revokeDiscoveryAccess,
 } from "./core.js";
 
 let running = false;
@@ -136,6 +137,12 @@ async function pushTab(tab) {
 
 async function handleMessage(message) {
   switch (message.type) {
+    case "discover":
+      try {
+        return await handleMessage({ type: "sites" });
+      } finally {
+        await revokeDiscoveryAccess();
+      }
     case "profiles":
       return relayRequest("/profiles");
     case "summary":

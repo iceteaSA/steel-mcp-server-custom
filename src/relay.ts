@@ -319,9 +319,6 @@ function jsonResponse(res: http.ServerResponse, status: number, body: unknown): 
   const json = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
     "Cache-Control": "no-store",
   });
   res.end(json);
@@ -336,14 +333,9 @@ export function startRelayServer(config: RelayConfig): http.Server {
     return next;
   };
   const srv = http.createServer(async (req, res) => {
-    // CORS preflight
+    // Extension host permissions give access without CORS.
     if (req.method === "OPTIONS") {
-      res.writeHead(204, {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-        "Access-Control-Max-Age": "86400",
-      });
+      res.writeHead(204);
       res.end();
       return;
     }

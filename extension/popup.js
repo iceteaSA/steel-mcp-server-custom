@@ -1,4 +1,12 @@
-import { getSettings, validProfile, sitePatterns, requestAccess, send } from "./core.js";
+import {
+  getSettings,
+  validProfile,
+  sitePatterns,
+  requestAccess,
+  DISCOVERY_ORIGINS,
+  revokeDiscoveryAccess,
+  send,
+} from "./core.js";
 
 const $ = (id) => document.getElementById(id);
 let site = null;
@@ -90,7 +98,7 @@ function renderSites() {
   }
   if (!$("siteList").children.length) {
     const li = document.createElement("li");
-    li.textContent = "No matching granted cookie domains. Grant access to a signed-in site first.";
+    li.textContent = "No matching cookie domains. Grant site access or use temporary discovery.";
     $("siteList").append(li);
   }
   updateActions();
@@ -166,6 +174,11 @@ async function push(items) {
   status("Transfer in progress. You can close this popup; the worker will continue.");
   try {
     const profile = destination();
+    const granted = await requestAccess([
+      ...new Set(items.flatMap((item) => sitePatterns(item.url))),
+    ]);
+    if (!granted)
+      throw new Error("Selected-site access was not granted. No sign-in data was sent.");
     await chrome.storage.local.set({
       profileName: profile,
       includeStorage: $("includeStorage").checked,
@@ -226,14 +239,26 @@ $("grantParent").addEventListener("click", async () => {
   }
 });
 $("discoverSites").addEventListener("click", async () => {
+  $("discoverSites").disabled = true;
   try {
-    const granted = await requestAccess(["http://*/*", "https://*/*"]);
+    const granted = await requestAccess(DISCOVERY_ORIGINS);
     if (!granted)
       throw new Error("All-site discovery was not granted. Individual site access still works.");
+    sites = await send("discover");
+    renderSites();
     await loadSite();
-    await loadSites();
+    status(
+      "Discovery complete. Temporary all-site access removed. Push requests access only for selected sites.",
+    );
   } catch (error) {
     status(error.message, true);
+  } finally {
+    try {
+      await revokeDiscoveryAccess();
+    } catch (error) {
+      status(error.message, true);
+    }
+    $("discoverSites").disabled = false;
   }
 });
 $("profilePicker").addEventListener("change", async () => {

@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import http from "node:http";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { chromium } from "patchright";
@@ -48,11 +49,7 @@ try {
   const extension = path.join(scratch, "test-extension");
   await fs.cp(path.join(root, "extension"), extension, { recursive: true });
   const manifest = JSON.parse(await fs.readFile(path.join(extension, "manifest.json"), "utf8"));
-  manifest.host_permissions = [
-    "http://127.0.0.1/*",
-    "http://localhost/*",
-    "http://app.fixture.test/*",
-  ];
+  manifest.host_permissions = ["*://127.0.0.1/*", "*://localhost/*", "*://app.fixture.test/*"];
   await fs.writeFile(path.join(extension, "manifest.json"), JSON.stringify(manifest));
   const browserOptions = {
     executablePath: "/home/icetea/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome",
@@ -78,9 +75,21 @@ try {
   await site.goto("http://127.0.0.1:3922");
   await site.evaluate(() => localStorage.clear());
   await site.reload();
+  assert.equal(
+    await site.evaluate(async () => {
+      try {
+        await fetch("http://127.0.0.1:3921/status");
+        return false;
+      } catch {
+        return true;
+      }
+    }),
+    true,
+  );
   const options = await context.newPage();
   await options.setViewportSize({ width: 800, height: 1000 });
   await options.goto(`chrome-extension://${id}/options.html`);
+  await options.locator("#pins").filter({ hasText: "No pinned sites" }).waitFor();
   await options.locator("#serverUrl").fill("http://127.0.0.1:3921");
   await options.locator("#serverSecret").fill(secret);
   assert.equal(await options.locator("#serverUrl").inputValue(), "http://127.0.0.1:3921");
@@ -148,6 +157,20 @@ try {
   assert.equal(/fixture-(cookie|storage|path|theme)-value/.test(body), false);
   await popup.screenshot({ path: path.join(scratch, "screens/popup.png"), fullPage: true });
   await options.screenshot({ path: path.join(scratch, "screens/options.png"), fullPage: true });
+  const discoverySession = await context.newCDPSession(options);
+  const discovery = await discoverySession.send("Runtime.evaluate", {
+    expression: 'chrome.runtime.sendMessage({type:"discover"})',
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  assert.equal(discovery.result.value.ok, true);
+  const exactAccess = await discoverySession.send("Runtime.evaluate", {
+    expression: 'chrome.permissions.contains({origins:["*://127.0.0.1/*"]})',
+    awaitPromise: true,
+    returnByValue: true,
+  });
+  assert.equal(exactAccess.result.value, true);
+  await discoverySession.detach();
 
   const secondSite = await context.newPage();
   await secondSite.goto("http://localhost:3922");
@@ -279,9 +302,70 @@ try {
     { domain: "app.fixture.test", cookieCount: 2, storageKeyCount: 2 },
     { domain: "fixture.test", cookieCount: 1, storageKeyCount: 0 },
   ]);
+  await parentWorker.evaluate(() => chrome.storage.local.clear());
+  await context.close();
+  const legacyExtension = path.join(scratch, "legacy-extension");
+  await fs.mkdir(legacyExtension, { recursive: true });
+  for (const file of ["manifest.json", "popup.html", "popup.js"]) {
+    const source = execFileSync("git", ["show", `6e7fb1:extension/${file}`], { cwd: root });
+    await fs.writeFile(path.join(legacyExtension, file), source);
+  }
+  await fs.cp(path.join(root, "extension/icons"), path.join(legacyExtension, "icons"), {
+    recursive: true,
+  });
+  const legacyManifest = JSON.parse(
+    await fs.readFile(path.join(legacyExtension, "manifest.json"), "utf8"),
+  );
+  assert.equal(legacyManifest.version, "1.0.0");
+  legacyManifest.host_permissions = ["http://127.0.0.1/*"];
+  await fs.writeFile(path.join(legacyExtension, "manifest.json"), JSON.stringify(legacyManifest));
+  const legacyOptions = {
+    ...browserOptions,
+    args: browserOptions.args.map((arg) => arg.replace(extension, legacyExtension)),
+  };
+  await fs.rm(path.join(scratch, "legacy-profile"), { recursive: true, force: true });
+  context = await chromium.launchPersistentContext(
+    path.join(scratch, "legacy-profile"),
+    legacyOptions,
+  );
+  const legacyId = createHash("sha256")
+    .update(legacyExtension)
+    .digest("hex")
+    .slice(0, 32)
+    .replace(/[0-9a-f]/g, (digit) => String.fromCharCode(97 + parseInt(digit, 16)));
+  const legacySite = await context.newPage();
+  await legacySite.goto("http://127.0.0.1:3922");
+  const setup = await context.newPage();
+  await setup.goto(`chrome-extension://${legacyId}/popup.html`);
+  const setupSession = await context.newCDPSession(setup);
+  await setupSession.send("Runtime.evaluate", {
+    expression: `chrome.storage.local.set(${JSON.stringify({ serverUrl: "http://127.0.0.1:3921", serverSecret: secret, profileName: "legacy-fixture" })})`,
+    awaitPromise: true,
+  });
+  await setup.close();
+  await legacySite.bringToFront();
+  const legacySession = await context.newCDPSession(legacySite);
+  const legacyPageReady = context.waitForEvent("page");
+  await legacySession.send("Target.createTarget", {
+    url: `chrome-extension://${legacyId}/popup.html`,
+    background: true,
+  });
+  const legacyPopup = await legacyPageReady;
+  await legacyPopup.locator("#currentDomain").filter({ hasText: "127.0.0.1" }).waitFor();
+  await legacyPopup.locator("#pushBtn").click();
+  await legacyPopup.locator("#status.success").waitFor();
+  const legacySummary = await (
+    await fetch("http://127.0.0.1:3921/profiles/legacy-fixture", {
+      headers: { Authorization: `Bearer ${secret}` },
+    })
+  ).json();
+  assert.deepEqual(legacySummary.domains, [
+    { domain: "127.0.0.1", cookieCount: 2, storageKeyCount: 2 },
+  ]);
+  await setupSession.detach().catch(() => {});
   assert.deepEqual(errors, []);
   console.log(
-    "PASS: test-only local-fixture grants; extension loads; auth rejection and recovery; fixture push; count-only summary; two-site searchable batch; badge; pin/unpin and alarms; confirmed domain removal; parent-cookie access boundary and transfer; no values in UI; default sync off; light/dark screenshots.",
+    "PASS: extension 1.0.0 and 2.0.0 fixture pushes without CORS; auth rejection and recovery; count-only summaries; searchable batch; badge; pins and alarms; domain removal; parent-cookie access; no values in UI; light/dark screenshots.",
   );
 } finally {
   for (const worker of context?.serviceWorkers() ?? [])
@@ -290,7 +374,13 @@ try {
   await new Promise((resolve) => fixture.close(resolve));
   await new Promise((resolve) => relay.close(resolve));
   await fs.rm(run, { recursive: true, force: true });
-  for (const directory of ["profile", "parent-profile", "test-extension"]) {
+  for (const directory of [
+    "profile",
+    "parent-profile",
+    "test-extension",
+    "legacy-profile",
+    "legacy-extension",
+  ]) {
     await fs.rm(path.join(scratch, directory), { recursive: true, force: true });
   }
 }

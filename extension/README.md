@@ -19,7 +19,7 @@ The extension has no permanent host permissions. It requests relay access when y
 
 For a subdomain, open **Parent-domain cookie access** and grant each parent hostname that holds shared sign-in cookies. Chrome can ignore parent cookies when only the current hostname has access. Each grant includes one hostname, not all its subdomains. The list shows parent hostnames, not a guessed public-suffix boundary.
 
-`Push several sites` lists cookie domains with granted access. Search the list, select a maximum of 100 domains, then select **Push selected sites**. The optional **Grant all-site discovery** control requests access to all HTTP and HTTPS sites. It does not send data until you select sites and start a push. Revoke access in Chrome extension settings.
+`Push several sites` lists cookie domains with granted access. Search the list, select a maximum of 100 domains, then select **Push selected sites**. The optional **Discover sites with temporary access** control reads cookie domains on all HTTP and HTTPS sites. The worker removes that broad access immediately after the read, also on error. Push requests access only for selected hostnames. Your exact-host grants stay unchanged.
 
 Site pushes include cookies for the hostname and its parent domains, at all cookie paths. Site pushes do not include other sibling domains. Domain rows show raw cookie-domain counts. Parent cookies can be necessary for sign-in.
 
@@ -46,6 +46,8 @@ Pushes and removals do not update active Steel contexts. Recreate the profile wi
 Run `bun test` from the repository root for relay and extension unit tests. Run `bun run build`, `bun x tsc --noEmit`, `bun run lint`, and `bun run format:check` for server gates. Check extension code with `bun x oxlint extension/` and `bun x oxfmt --check extension/`.
 
 The headless fixture harness is `extension/tests/browser.mjs`. First bundle `src/relay.ts` as a Node CommonJS module named `relay.cjs` in a scratch directory in `/tmp/opencode/`. Then run `node extension/tests/browser.mjs <scratch-directory>`. It starts a throwaway relay on 127.0.0.1:3921 and a fixture site on 127.0.0.1:3922. It uses no Steel connection or operator browser.
+
+Run the harness in a Git checkout with baseline commit `6e7fb1`. It loads extension 1.0.0 from that commit and checks its push with the current relay, without CORS response headers. It also checks that an ordinary web page cannot read the relay status.
 
 Native optional-permission prompts do not complete in the headless test environment. The harness copies the on-disk extension into scratch. It adds grants for the local fixture hosts to that test manifest. Those hosts are 127.0.0.1, localhost, app.fixture.test, and fixture.test. Chrome maps the fixture.test names to 127.0.0.1.
 

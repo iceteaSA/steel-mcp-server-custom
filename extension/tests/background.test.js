@@ -109,6 +109,34 @@ afterEach(() => {
 });
 
 describe("MV3 transfer worker", () => {
+  for (const failure of [false, true]) {
+    it(`revokes only wildcard discovery access after ${failure ? "failure" : "success"}`, async () => {
+      const origins = new Set([
+        "https://example.com/*",
+        "http://localhost/*",
+        "http://*/*",
+        "https://*/*",
+      ]);
+      const removals = [];
+      chrome.permissions.remove = async (input) => {
+        removals.push(input);
+        for (const origin of input.origins) origins.delete(origin);
+        return true;
+      };
+      chrome.permissions.contains = async (input) =>
+        input.origins.every((origin) => origins.has(origin));
+      if (failure)
+        chrome.cookies.getAll = async () => {
+          throw new Error("fixture cookie read failed");
+        };
+      const response = await message({ type: "discover" });
+      expect(removals).toEqual([{ origins: ["http://*/*", "https://*/*"] }]);
+      expect([...origins]).toEqual(["https://example.com/*", "http://localhost/*"]);
+      expect(response.ok).toBe(!failure);
+      if (!failure) expect(response.data.map((entry) => entry.domain)).toEqual(["example.com"]);
+    });
+  }
+
   it("returns site counts without cookie or storage entries", async () => {
     const response = await message({ type: "site" });
     expect(response.ok).toBe(true);

@@ -63,16 +63,17 @@
     <details id="batchPanel">
       <summary>Push several sites</summary>
       <p class="muted">
-        This list contains cookie domains with granted access only. Select up to 100. Storage needs
-        an open tab at the same origin.
+        This list starts with granted cookie domains. Temporary discovery can list more. Select up
+        to 100; push requests access to selected hosts. Storage needs an open tab at the same
+        origin.
       </p>
       <label for="siteSearch">Search domains</label
       ><input id="siteSearch" type="search" placeholder="Filter domains" />
       <ul id="siteList"></ul>
-      <button id="discoverSites" class="small">Grant all-site discovery…</button>
+      <button id="discoverSites" class="small">Discover sites with temporary access…</button>
       <p class="muted">
-        Optional: grants access to cookies on all HTTP and HTTPS sites. Revoke access in Chrome
-        extension settings.
+        Optional: reads cookie domains with temporary all-site access, then removes that access
+        immediately. Push requests exact-host access only for sites you select.
       </p>
       <button id="pushSelected">Push selected sites (0)</button>
     </details>

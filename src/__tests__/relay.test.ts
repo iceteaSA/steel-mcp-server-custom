@@ -343,12 +343,31 @@ describe("404", () => {
 });
 
 describe("CORS", () => {
-  it("handles OPTIONS preflight", async () => {
+  it("answers OPTIONS without permitting web-origin access", async () => {
     const res = await fetch_(`http://127.0.0.1:${config.port}/push`, {
       method: "OPTIONS",
+      headers: {
+        Origin: "https://evil.example",
+        "Access-Control-Request-Method": "POST",
+        "Access-Control-Request-Headers": "authorization, content-type",
+      },
     });
     expect(res.status).toBe(204);
-    expect(res.headers.get("access-control-allow-origin")).toBe("*");
+    expect(
+      [...res.headers.keys()].filter((header) => header.startsWith("access-control-allow-")),
+    ).toEqual([]);
+  });
+
+  it("does not expose GET replies to a web origin even with the secret", async () => {
+    for (const route of ["/status", "/profiles"]) {
+      const res = await fetch_(`http://127.0.0.1:${config.port}${route}`, {
+        headers: { Origin: "https://evil.example", Authorization: "Bearer test-secret" },
+      });
+      expect(res.status).toBe(200);
+      expect(
+        [...res.headers.keys()].filter((header) => header.startsWith("access-control-allow-")),
+      ).toEqual([]);
+    }
   });
 });
 
@@ -522,9 +541,11 @@ describe("profile management", () => {
     expect((await profileRequest("/profiles/link")).status).toBe(400);
   });
 
-  it("allows DELETE preflight", async () => {
+  it("does not authorize DELETE preflight", async () => {
     const response = await profileRequest("/profiles/work/domains/example.com", "OPTIONS", null);
     expect(response.status).toBe(204);
-    expect(response.headers.get("access-control-allow-methods")).toContain("DELETE");
+    expect(
+      [...response.headers.keys()].filter((header) => header.startsWith("access-control-allow-")),
+    ).toEqual([]);
   });
 });
