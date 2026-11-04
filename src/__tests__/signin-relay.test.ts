@@ -213,6 +213,17 @@ it("accepts automatic approval only while its exact site/profile grant is active
   expect(await store.status(caller, request.id)).toMatchObject({ status: "approved", counts: { cookieCount: 1, storageKeyCount: 1 } });
 });
 
+it("accepts an optional operator note on approval without putting it in the audit row", async () => {
+  const request = await store.create(caller, input);
+  const response = await fetch(origin + `/signin/${request.id}/push`, {
+    method: "POST", headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
+    body: JSON.stringify({ ...state, note: "Approved for this task" }),
+  });
+  expect(response.status).toBe(200);
+  expect((await store.status(caller, request.id)).note).toBe("Approved for this task");
+  expect(await fs.readFile(path.join(directory, "profiles", ".signin-audit.jsonl"), "utf8")).not.toContain("Approved for this task");
+});
+
 it("authenticates a WebSocket through its first message and sends pending state", async () => {
   const request = await store.create(caller, input);
   const socket = new WebSocket(origin.replace("http:", "ws:") + "/signin/events");
