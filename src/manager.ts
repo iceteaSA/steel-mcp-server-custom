@@ -474,12 +474,13 @@ export class BrowserManager {
     // route('**/*') document-interception (installInjectRoute), which breaks
     // EVERY page-context WebSocket upgrade (ws:// and wss://) — patchright
     // issue #31, upstream wontfix. Instead we (re)inject SETTLE_INIT_SCRIPT via
-    // page.evaluate on each document load: it runs in an isolated context,
-    // installs no route, so WebSockets work AND the counter lands. The script
+    // page.evaluate on each document load. Use the main world because
+    // waitForFunction polls there. Evaluation installs no request route.
+    // WebSockets work and the counter is visible to the poll. The script
     // is idempotent (early-returns if window.__steelSettle already exists).
     page.on("domcontentloaded", () => {
       if (this.tabs.get(id) !== page) return;
-      page.evaluate(SETTLE_INIT_SCRIPT).catch(() => {
+      page.evaluate(SETTLE_INIT_SCRIPT, undefined, undefined, false).catch(() => {
         // best-effort: navigation may destroy the context mid-eval; settle is
         // a nicety and waitForSettled no-ops when the counter is absent.
       });

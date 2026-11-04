@@ -105,7 +105,12 @@ export async function waitForSettled(page: Page, env: SettleEnv): Promise<void> 
 
   try {
     // Probe: did the init script run on this page?
-    let hasCounter = await page.evaluate(() => typeof (window as any).__steelSettle);
+    let hasCounter = await page.evaluate(
+      () => typeof (window as any).__steelSettle,
+      undefined,
+      undefined,
+      false,
+    );
     if (hasCounter === "undefined") {
       // Counter absent — the per-page domcontentloaded injection (see
       // attachPageListeners) hasn't landed yet. This happens on the
@@ -115,8 +120,13 @@ export async function waitForSettled(page: Page, env: SettleEnv): Promise<void> 
       // double-installs when the listener also fires. NOTE: we do NOT use
       // addInitScript here — under patchright that breaks WebSockets
       // (see attachPageListeners for the full rationale).
-      await page.evaluate(SETTLE_INIT_SCRIPT);
-      hasCounter = await page.evaluate(() => typeof (window as any).__steelSettle);
+      await page.evaluate(SETTLE_INIT_SCRIPT, undefined, undefined, false);
+      hasCounter = await page.evaluate(
+        () => typeof (window as any).__steelSettle,
+        undefined,
+        undefined,
+        false,
+      );
       // Still absent (e.g. the page navigated out from under us) → no-op.
       if (hasCounter === "undefined") return;
     }
