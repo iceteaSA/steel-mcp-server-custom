@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Use caller lanes by default, with isolated browser contexts and bounded closure. Set `STEEL_LANES=off` for compatibility mode.
+- Add `list_lanes`, `close_lane`, `request_signin`, `signin_status`, and `cancel_signin`.
+- Guard hidden text with `STEEL_HIDDEN_TEXT=drop` by default. Keep unsafe-control removal and output fences in each mode.
+- Get operator approval for site-scoped state through Cookie Push. Apply approved state only to lanes that hold the target `profile`.
+- Share one saved-state queue, schema, merge, and atomic JSON writer. Keep newer pushed values when a browser snapshot is stale.
+- Configure lanes with `STEEL_LANES`, `LANE_IDLE_MS`, `LANE_DRAIN_MS`, and `LANE_MAX`.
+- Configure optional notifications through `STEEL_NTFY_TOPIC_FILE`. The topic file must have mode `0600`.
+- Add `bun run check:relay-node` to build and check the Node HTTP server.
+
 ## [0.8.0] — 2026-07-07
 
 Toolchain switch to bun, accessibility-snapshot interaction model with `[ref=eN]` element targeting, Patchright instead of Playwright, MCP `registerTool` + `structuredContent` modernization, `--toolsets` filtering, and new tools (`snapshot`, `handle_dialog`, `upload_file`, `press_key`, `get_network`, `act`, `extract_ai`).

@@ -4,9 +4,27 @@
 
 The server supplies MCP tools through stdio. `src/index.ts` parses the environment, makes `BrowserManager`, and connects the tools and transport.
 
-`BrowserManager` owns tabs, browser profiles, dialog policy, network capture, console messages, request routes, and crash recovery. Tabs have integer IDs and optional owners. Page tools resolve these IDs through the ownership guard. Browser profiles use isolated browser contexts.
+`BrowserManager` owns tabs, named state, dialog policy, network capture, console messages, request routes, and crash recovery.
+`LaneRuntime` selects a caller context from `params._meta["ai.opencode/sessionID"]`. Lane mode is the default.
+Tabs have global integer IDs. IDs from different lanes give an error before page access. Named `profile` values share the caller's context.
+Compatibility mode (`STEEL_LANES=off`) keeps owner-tagged tabs and isolated contexts for named state.
 
 `src/tools/shared.ts` controls toolset registration and shared targeting. The `core` toolset is always active. An LLM endpoint and model are necessary for the two AI tools.
+
+`src/lanes.ts` orders calls for each tab and serializes named-state changes on queue key `0`.
+Automatic and explicit closure use a bounded drain. Lane closure does not stop the shared browser or operator context.
+Caller identity is necessary for credential mutations. `list_profiles` reports active use only for the caller.
+
+## Sign-in state
+
+`src/index.ts` makes one `SigninStore` for the MCP tools and HTTP server.
+The caller uses `request_signin` when site sign-in state is necessary for a permitted task. The operator gives approval through Cookie Push.
+The extension pushes only the approved request's site scope into its target `profile`. Results contain status and counts, not state values.
+
+`src/profile-store.ts` owns the file schema, queue for each file, merge, and atomic JSON writer.
+All saved-state writers use that queue. A stale browser snapshot cannot replace newer pushed values.
+After persistence, live apply selects only lanes that hold the target `profile`. If none hold it, the next load reads the file.
+Shutdown cancels pending requests, flushes state, and closes HTTP and WebSocket connections in the drain bound.
 
 ## Settle path
 
@@ -31,6 +49,10 @@ The settle check is best-effort. It does not guarantee application readiness or 
 `PageTextStore` supplies opt-in literal search and cursor continuation for snapshots and text. Each token has a tool, tab, owner, URL, frame, selector, and query scope. Continuation uses a stored capture, so page changes do not move the text between chunks. The cache has a five-minute lifetime, a 32-token limit, and a 1,000,000-character limit for each capture.
 
 The registrar fences each MCP text block through `fenceToolResult`. It removes invisible control characters and changes forged fence delimiters to text. Text and serialized structured data share one budget, with fences and truncation notices. Structured data keeps its schema and has untrusted provenance in `_meta`.
+
+`src/hidden-text.ts` checks document and frame visibility for the read path.
+`STEEL_HIDDEN_TEXT=drop` removes hidden text, `flag` marks it, and `off` disables that filter.
+The guard does not change the page. `src/untrusted.ts` fences output and calls `stripUnsafeControls` in each mode.
 
 All JSON-producing tools declare output schemas. The SDK validates structured results. Interception tests also check error shapes and send a malformed transport result to prove that the client rejects a schema mismatch. Arbitrary JSON from `evaluate` and `extract_ai` uses a `result` field. File mode reports a path without duplicating the large value inline.
 

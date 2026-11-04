@@ -39,10 +39,11 @@ bun run format:check   # or `bun run format` to write
 bun run test
 ```
 
-**Tests:** `bun test` runs over `src/__tests__/*.test.ts` only (18 files; 465 passed
-+ 12 skipped). The root `test/` directory has been deleted (stale leftover from an
-earlier version). Full browser flows are still validated manually via mcporter or
-the MCP inspector.
+**Tests:** Run `bun run test` for the 34 source test files. Run `cd extension && bun test tests/`
+for the extension tests. Local browser tests launch Chromium. Read the runner output for current case counts.
+
+Use `STEEL_TEST_CHROMIUM` to select a test browser. If unset, tests use the Playwright path or system Chromium.
+Run `bun run check:relay-node` to build and check the Node HTTP server.
 
 **Deploy (homelab):**
 
@@ -95,6 +96,12 @@ Invalid values cause the process to exit with a descriptive error.
 | `BROWSER_MODE` | `"steel"` | `"steel"` for Steel Cloud/self-hosted; `"local"` for plain Chromium |
 | `STEEL_API_KEY` | — | Required when `BROWSER_MODE=steel` AND `STEEL_BASE_URL` is not set (Steel Cloud). Optional for self-hosted. |
 | `STEEL_BASE_URL` | Steel Cloud | Override for self-hosted Steel (e.g. `http://your-steel-host:3000`). When set, `STEEL_API_KEY` is optional. |
+| `STEEL_LANES` | `on` | Per-caller browser contexts. Use `off` for compatibility mode. |
+| `LANE_IDLE_MS` | `900000` | Time without calls in ms before lane closure. Active calls keep the lane open. |
+| `LANE_DRAIN_MS` | `5000` | Maximum drain time in ms before context closure. |
+| `LANE_MAX` | `8` | Maximum number of open or pending lanes. |
+| `STEEL_HIDDEN_TEXT` | `drop` | Hidden-text policy: `drop`, `flag`, or `off`. |
+| `STEEL_NTFY_TOPIC_FILE` | unset | Path to the `0600` file with the operator's ntfy topic. Unset means no push. |
 | `MAX_INLINE_BYTES` | `512000` (500 KB) | Threshold above which inline output auto-downgrades to file mode |
 | `OUTPUT_DIR` | `/tmp/steel-mcp` | Directory for file-mode outputs (screenshots, page text) |
 | `OUTPUT_ROOT` | `$OUTPUT_DIR` | Containment root for `outputPath` args (get_screenshot, evaluate, get_network, download_file, get_page_text file mode). Realpath-resolved; paths outside this root are rejected. Set to `*` to disable the check (escape hatch — service account can write anywhere). |
@@ -129,12 +136,12 @@ context-budget-constrained agents:
 
 | Group    | Includes                                                          |
 |----------|-------------------------------------------------------------------|
-| `core`   | Always active. `go_to_url`, `history`, `click`, `click_at`, `fill`, `scroll`, `wait_for`, `press_key`, `handle_dialog`, `upload_file`, `snapshot`, `page_state`, `get_page_text`, `mouse_move`, `mouse_down`, `mouse_up`, `start_browser`, `stop_browser`. |
+| `core`   | Always active. `go_to_url`, `history`, `click`, `click_at`, `fill`, `scroll`, `wait_for`, `press_key`, `handle_dialog`, `upload_file`, `snapshot`, `page_state`, `get_page_text`, `mouse_move`, `mouse_down`, `mouse_up`, `start_browser`, `stop_browser`, `solve_captcha`. Lane mode adds `list_lanes` and `close_lane`. |
 | `tabs`   | `list_tabs`, `new_tab`, `close_tabs`.                              |
 | `extract`| `get_links`, `get_attrs`, `evaluate`, `extract`, `fetch_urls`.     |
 | `media`  | `get_screenshot`, `download_file`.                                 |
 | `network`| `cookies`, `get_network`, `export_har`.                           |
-| `auth`   | `create_profile`, `list_profiles`, `save_profile`, `delete_profile`, `credentials`, `use_credential`. |
+| `auth`   | `create_profile`, `list_profiles`, `save_profile`, `delete_profile`, `credentials`, `use_credential`, `request_signin`, `signin_status`, `cancel_signin`. |
 | `debug`  | `smoke_test`, `get_console`, `captcha_status`.                     |
 | `ai`     | `act`, `extract_ai` — only registered when `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` are set. |
 | `intercept` | `intercept` — network request interception (fulfill/abort/continue). |
@@ -142,31 +149,29 @@ context-budget-constrained agents:
 Precedence: `--toolsets a,b` CLI flag > `TOOLSETS` env var > all toolsets.
 Unknown names fail startup with a list of valid values.
 
-By default all 9 toolsets are active (41 tools); the `ai` toolset is gated on
-`ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` — without those env vars, `act` and
-`extract_ai` are not registered, even if `--toolsets=ai` is passed.
+All 9 toolsets are active by default. Lane mode has 47 tools, or 49 with AI tools.
+Compatibility mode (`STEEL_LANES=off`) has 45 tools, or 47 with AI tools.
+The `ai` toolset operates only with `ACT_LLM_BASE_URL` and `ACT_LLM_MODEL`.
+Without these values, the server has no `act` or `extract_ai`, with or without `--toolsets=ai`.
 
 ### Concurrency — multi-agent sessions
 
-This server is safe for multiple concurrent agents sharing one browser session.
-The design principles:
+`STEEL_LANES=on` is the default concurrency design.
 
-- **Owner-tagged tabs.** `new_tab(url, owner)` records an owner string on the
-  tab. Agents use their own unique owner (e.g. `agent:<id>-<timestamp>`).
-- **Tab-scoped operations.** All page-interacting tools accept an optional
-  `tabId`. Agents pass their own tab ID on every call so another agent's tab
-  activity doesn't pull the active-tab pointer out from under them.
-- **Scoped cleanup.** `close_tabs({ owner })` closes only that agent's tabs.
-  `stop_browser` destroys the whole session — do not use for per-agent
-  cleanup.
-- **Idle sweeper.** Every page-targeted call refreshes the tab's
-  `lastActivity` timestamp. Tabs untouched for `TAB_IDLE_TIMEOUT_MS` are
-  auto-closed. Safety net for abandoned tabs — not a substitute for
-  `close_tabs({ owner })`.
-- **Browser-closed retry.** `newTab` / `getPage` catch Playwright
-  "Target/context/browser has been closed" errors, soft-reset, wait 2 s,
-  retry once. Fixes the race between `start_browser` returning and the
-  context becoming ready.
+- Send `params._meta["ai.opencode/sessionID"]` on each stateful call. Missing identity gives `no_caller`, not a shared lane.
+- Use the caller's isolated BrowserContext. Keep it isolated from the operator context and different caller contexts.
+- Keep each `tabId` and give it on page calls. An ID from a different lane gives `not_in_lane`. A closed or unknown ID gives `lane_closed`.
+- Use `owner` only as a tab name. Do not use `force` for access to a different caller's context.
+- Use `close_tabs` for selected tabs, or `close_lane` for the caller's context. Use `list_lanes` for ages and tab counts.
+- Do not use `stop_browser` for shared cleanup. It refuses while a different lane is active.
+- Respect `LANE_IDLE_MS`, `LANE_DRAIN_MS`, and `LANE_MAX`. Active calls prevent closure until the bounded drain condition applies.
+- Use the same context for all named `profile` values in one lane. There is no lease between processes.
+
+For compatibility mode (`STEEL_LANES=off`):
+
+- Use unique `owner` names and explicit `tabId` values in the shared context.
+- Use `close_tabs({owner})` for scoped cleanup. The owner guard, `force` override, and `TAB_IDLE_TIMEOUT_MS` sweeper apply only in this mode.
+- Let browser-closed recovery clear state, wait 2 s, and retry one time.
 
 ### mcporter config (self-hosted Steel)
 
@@ -204,6 +209,12 @@ src/
   env.ts                 # Zod env schema
   helpers.ts             # Pure functions — bot-wall, ErrorTracker, dedup, etc.
   relay.ts               # Cookie push relay server
+  lanes.ts               # Caller contexts, queues, and bounded closure
+  hidden-text.ts         # Hidden-text policy and frame checks
+  signin.ts              # Request status, grants, audit, and notifications
+  profile-store.ts       # Shared file queue, schema, merge, and atomic writes
+  untrusted.ts           # Output fences and unsafe-control removal
+  page-output.ts         # Shared text clipping
   snapshot.ts            # captureSnapshot + per-tab snapshot baselines (snapshot-diff feedback)
   settle.ts              # SETTLE_INIT_SCRIPT — network-idle + DOM-quiet detection
   llm.ts                 # OpenAI-compatible JSON client (used by act / extract_ai)
@@ -219,8 +230,11 @@ src/
     credentials.ts       # credentials, use_credential
     tabs.ts              # list_tabs, new_tab, close_tabs
     profiles.ts          # create_profile, list_profiles, save_profile, delete_profile
+    signin.ts            # request_signin, signin_status, cancel_signin
+    captcha.ts           # solve_captcha
+    intercept.ts         # intercept
     act.ts               # act, extract_ai (gated on ACT_LLM_BASE_URL + ACT_LLM_MODEL)
-  __tests__/             # 17 test files, 146+ passed
+  __tests__/             # 34 test files; shared local-browser helpers
 ```
 
 **Key class — `BrowserManager`** (in `src/manager.ts`):
@@ -261,7 +275,7 @@ Each call goes through the gated registrar in `src/tools/shared.ts`:
 - `core` is always registered; other toolsets are gated by `--toolsets` / `TOOLSETS`.
 - Annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) per MCP best practice.
 - JSON-returning tools include `outputSchema` → `structuredContent` for typed clients.
-Every handler calls `await mgr.getPage()` (which auto-initialises) then works with the page.
+Page handlers use `await mgr.getPage()`. Sign-in requests, lane controls, and other metadata operations can run without a page.
 
 **Available tools:**
 
@@ -296,14 +310,20 @@ current-active-tab behaviour; pass for concurrent-agent safety).
 | `get_network` | Inspect request/response traffic (filter by urlPattern/resourceType/status). `body: true` or `requestId` fetches a single response body. Default limit: 30 |
 | `credentials` | List/store/update/delete credentials (no args = list) |
 | `use_credential` | Retrieve or auto-fill login form with stored credential |
+| `request_signin` | Request the operator's site state in a named `profile`. The operator gives approval in the extension. |
+| `signin_status` | Read the caller's request status and counts, not state values. |
+| `cancel_signin` | Cancel the caller's pending request, or read its current terminal status. |
+| `list_lanes` | List caller names, ages, and tab counts in lane mode. |
+| `close_lane` | Close the caller's tabs and context in lane mode. |
 | `captcha_status` | CapSolver balance + availability |
-| `create_profile` | Create isolated BrowserContext. Auto-restores saved state |
+| `solve_captcha` | Run a permitted CapSolver API call for the target tab. |
+| `create_profile` | Load saved state into the caller's lane context. Compatibility mode uses an isolated context. |
 | `list_profiles` | Active + saved profiles |
 | `save_profile` | Persist cookies + localStorage to disk |
-| `delete_profile` | Close profile context + tabs |
+| `delete_profile` | Close named `profile` tabs. Keep a lane context open. Optionally remove the saved file. |
 | `smoke_test` | Self-test: navigate, fingerprint, stealth, CapSolver checks. Headless-detection probe (sannysoft) |
 | `start_browser` | Start browser, get Session Viewer + Interactive + Relay URLs |
-| `stop_browser` | Stop browser (kills all tabs/profiles). `owner`+`force` override the multi-agent safety check |
+| `stop_browser` | Refuse while a different lane is active. Compatibility mode keeps the `owner` guard and `force` override. |
 | `act` | LLM-driven bounded micro-loop over a snapshot (1–5 steps). `useVision` sends screenshots alongside the a11y tree. Gated on `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` |
 | `extract_ai` | LLM structured extraction from the current page (text or html, optional JSON Schema). Gated on `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` |
 | `page_state` | Lightweight page observation (url, title, scroll%, element counts) — ~48 tokens, no full snapshot. Use to check "did the page change?" cheaply |

@@ -4,6 +4,11 @@
 |---|---|
 | `src/index.ts` | Environment, registration, transport, and process lifecycle |
 | `src/manager.ts` | Browser lifecycle, owner-tagged tabs, profiles, listeners, and recovery |
+| `src/lanes.ts` | Caller contexts, queues for each tab, and bounded closure |
+| `src/hidden-text.ts` | Read-path visibility policy and frame checks |
+| `src/signin.ts` | Sign-in requests, grants, audit, and notifications |
+| `src/profile-store.ts` | Shared schema, queue for each file, merge, and atomic JSON writes |
+| `src/untrusted.ts` | Output fences and unsafe-control removal |
 | `src/env.ts` | Validated environment schema and derived paths |
 | `src/tools/` | Tool groups and the shared registrar, ref resolver, and frame resolver |
 | `src/snapshot.ts` | Accessibility capture, filtering, baseline storage, and diffs |
@@ -21,6 +26,7 @@
 | `docker/` | Container configuration and browser patches |
 | `dist/` | Ignored build output with native sidecars |
 
-Local TypeScript imports use `.js` extensions. Tool modules export registration functions through `src/tools/index.ts`. New tools use the shared registrar.
+Local TypeScript imports use `.js` extensions. Tool modules export `register` through `src/tools/index.ts`. This also applies to sign-in tools.
+New tools use the shared registrar. The lane runtime adds its two control tools through that same registrar.
 
 See [ARCHITECTURE.md](ARCHITECTURE.md) for the settle path and ownership model.

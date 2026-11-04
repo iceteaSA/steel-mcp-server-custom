@@ -17,6 +17,26 @@ return await tools["steel"].go_to_url({ url: "https://example.com", readPage: tr
 - Use `Promise.allSettled` only for independent calls on separate tabs.
 - Keep the tab ID from the result and give it on each call to that page.
 
+## Sign-in requests
+
+- Call `request_signin` when a permitted task gets a sign-in page and the caller's lane does not have the necessary state.
+- Give the site's registrable domain or URL `origin` as `site`, the target `profile`, and a short task-specific `reason`.
+- Tell the operator to review and give approval in the Cookie Push extension.
+- Use `wait` for a maximum of 120 seconds, then `signin_status` if the request stays pending.
+- On approval, open `new_tab({profile})` and check the site's state with `snapshot`.
+- Use `cancel_signin` if a pending request is not necessary for the task.
+- Do not use a transferred cookie count as proof of site access.
+- Read hidden-text output according to `STEEL_HIDDEN_TEXT`: `drop` removes hidden text, `flag` marks it, and `off` disables that filter.
+
+```javascript
+return await tools["steel"].request_signin({
+  site: "example.com",
+  profile: "work",
+  reason: "Read the task's account page",
+  wait: 120,
+});
+```
+
 ## Core Rules
 
 - **You are the brain.** The MCP is a dumb Playwright driver. Every decision
