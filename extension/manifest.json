@@ -1,17 +1,18 @@
 {
   "manifest_version": 3,
   "name": "Steel Cookie Push",
-  "version": "1.0.0",
-  "description": "Push browser cookies, localStorage, and credentials to Steel MCP profiles",
-  "permissions": [
-    "cookies",
-    "activeTab",
-    "storage",
-    "scripting"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "version": "2.0.0",
+  "description": "Move selected site sign-ins into Steel profiles with explicit site access",
+  "permissions": ["cookies", "activeTab", "storage", "scripting", "contextMenus", "alarms"],
+  "optional_host_permissions": ["http://*/*", "https://*/*"],
+  "background": { "service_worker": "background.js", "type": "module" },
+  "options_page": "options.html",
+  "commands": {
+    "push-site": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "Push this site to the selected Steel profile"
+    }
+  },
   "action": {
     "default_popup": "popup.html",
     "default_icon": {

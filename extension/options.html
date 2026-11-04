@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Steel transfer settings</title>
+    <link rel="stylesheet" href="ui.css" />
+  </head>
+  <body class="options">
+    <header>
+      <h1>Steel transfer settings</h1>
+      <a href="popup.html">Open transfer panel</a>
+    </header>
+    <p class="muted">
+      Sign-in data goes only to your configured relay. Use a trusted relay and HTTPS for remote
+      connections.
+    </p>
+    <form id="settingsForm">
+      <section aria-labelledby="relayHeading">
+        <h2 id="relayHeading">Relay connection</h2>
+        <label for="serverUrl">Relay URL</label
+        ><input
+          id="serverUrl"
+          type="url"
+          required
+          placeholder="http://localhost:3001"
+          autocomplete="off"
+        />
+        <p class="muted">Use the relay origin, with no path. HTTP is allowed for localhost only.</p>
+        <label for="serverSecret">Relay secret</label
+        ><input id="serverSecret" type="password" required autocomplete="off" spellcheck="false" />
+        <p class="muted">
+          Must match RELAY_SECRET. Stored in this browser only, not Chrome Sync. The secret stays
+          masked.
+        </p>
+        <button type="submit" class="primary">Save settings and grant relay access</button>
+        <button type="button" id="testConnection">Test connection</button>
+        <p class="muted">
+          The test uses the current fields and checks Bearer authentication. Save to apply changes.
+        </p>
+      </section>
+      <section aria-labelledby="syncHeading">
+        <h2 id="syncHeading">Pinned site sync</h2>
+        <label class="check"
+          ><input id="syncEnabled" type="checkbox" /> Automatically push pinned sites</label
+        >
+        <label for="syncMinutes">Interval in minutes (5–1440)</label
+        ><input id="syncMinutes" type="number" min="5" max="1440" required value="30" />
+        <p class="muted">
+          Off by default. Chrome must be running. Alarm timing can be delayed. Only granted sites
+          sync; localStorage needs an already-open tab at the pinned origin. No tabs are opened
+          automatically.
+        </p>
+        <ul id="pins"></ul>
+      </section>
+    </form>
+    <p id="status" role="status" class="notice" aria-live="polite"></p>
+    <section>
+      <h2>Privacy and limits</h2>
+      <p>
+        Only domains and counts appear in transfer results. Cookie and storage values are sent to
+        the relay, never displayed. Manual credential entry is not supported.
+      </p>
+      <p>
+        Saved Steel profiles contain plaintext session data on the relay host. Domain removal
+        changes saved cookies and localStorage only. It does not sign out active Steel sessions or
+        remove the separate credential store.
+      </p>
+      <p>
+        Revoke site or relay access in Chrome extension settings. The context menu and Alt+Shift+S
+        shortcut use your last selected profile and granted site access. Change the shortcut at
+        chrome://extensions/shortcuts.
+      </p>
+    </section>
+    <script type="module" src="options.js"></script>
+  </body>
+</html>

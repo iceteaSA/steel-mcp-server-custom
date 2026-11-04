@@ -351,3 +351,180 @@ describe("CORS", () => {
     expect(res.headers.get("access-control-allow-origin")).toBe("*");
   });
 });
+
+function profileRequest(route: string, method = "GET", secret: string | null = "test-secret") {
+  return fetch_(`http://127.0.0.1:${config.port}${route}`, {
+    method,
+    headers: secret === null ? {} : { Authorization: `Bearer ${secret}` },
+  });
+}
+
+describe("profile management", () => {
+  it("accepts the 1.0.0 extension SameSite mapping", async () => {
+    const response = await fetch_(`http://127.0.0.1:${config.port}/push`, {
+      method: "POST",
+      headers: { Authorization: "Bearer test-secret" },
+      body: JSON.stringify({
+        profile: "legacy",
+        cookies: [
+          {
+            name: "session",
+            value: "fixture-only",
+            domain: "example.com",
+            path: "/",
+            sameSite: "No_restriction",
+            secure: true,
+          },
+        ],
+      }),
+    });
+    expect(response.status).toBe(200);
+    const state = JSON.parse(
+      await fs.readFile(path.join(config.profilesDir, "legacy.json"), "utf8"),
+    );
+    expect(state.cookies[0].sameSite).toBe("None");
+  });
+  for (const [method, route] of [
+    ["GET", "/profiles"],
+    ["GET", "/profiles/work"],
+    ["DELETE", "/profiles/work/domains/example.com"],
+  ]) {
+    it(`${method} ${route} requires correct Bearer auth`, async () => {
+      expect((await profileRequest(route, method, null)).status).toBe(401);
+      expect((await profileRequest(route, method, "wrong")).status).toBe(401);
+    });
+  }
+
+  it("lists an empty directory", async () => {
+    const response = await profileRequest("/profiles");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ profiles: [] });
+    expect(response.headers.get("cache-control")).toBe("no-store");
+  });
+
+  async function seedProfile() {
+    await postPush({
+      profile: "work",
+      cookies: [
+        {
+          name: "private-cookie-name",
+          value: "private-cookie-value",
+          domain: ".example.com",
+          path: "/",
+        },
+        { name: "other", value: "private-cookie-value", domain: "sub.example.com", path: "/" },
+      ],
+      localStorage: {
+        "https://example.com": { "private-storage-key": "private-storage-value" },
+        "http://example.com:8080": { another: "private-storage-value" },
+        "https://sub.example.com": { another: "private-storage-value" },
+      },
+      credentials: {
+        name: "private-credential-name",
+        url: "example.com",
+        username: "private-user",
+        password: "private-password",
+      },
+    });
+  }
+
+  it("returns only names, domains, and counts in list and detail", async () => {
+    await seedProfile();
+    const expected = {
+      name: "work",
+      domains: [
+        { domain: "example.com", cookieCount: 1, storageKeyCount: 2 },
+        { domain: "sub.example.com", cookieCount: 1, storageKeyCount: 1 },
+      ],
+    };
+    const list = await profileRequest("/profiles");
+    expect(await list.json()).toEqual({ profiles: [expected] });
+    const detail = await profileRequest("/profiles/work");
+    expect(await detail.json()).toEqual(expected);
+  });
+
+  it("removes an exact normalized domain and preserves subdomains and credentials", async () => {
+    await seedProfile();
+    const response = await profileRequest("/profiles/work/domains/.EXAMPLE.com", "DELETE");
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      name: "work",
+      domains: [{ domain: "sub.example.com", cookieCount: 1, storageKeyCount: 1 }],
+    });
+    const state = JSON.parse(await fs.readFile(path.join(config.profilesDir, "work.json"), "utf8"));
+    expect(state.cookies.length).toBe(1);
+    expect(Object.keys(state.localStorage)).toEqual(["https://sub.example.com"]);
+    expect(JSON.parse(await fs.readFile(config.credentialsFile, "utf8")).length).toBe(1);
+    expect((await profileRequest("/profiles/work/domains/example.com", "DELETE")).status).toBe(200);
+  });
+
+  it("returns 404 for missing profiles", async () => {
+    expect((await profileRequest("/profiles/missing")).status).toBe(404);
+    expect((await profileRequest("/profiles/missing/domains/example.com", "DELETE")).status).toBe(
+      404,
+    );
+  });
+
+  it("rejects encoded traversal and invalid domains", async () => {
+    expect((await profileRequest("/profiles/a%2Fb")).status).toBe(400);
+    expect((await profileRequest("/profiles/work/domains/a%2Fb", "DELETE")).status).toBe(400);
+  });
+
+  it("does not expose malformed JSON content in errors", async () => {
+    const response = await fetch_(`http://127.0.0.1:${config.port}/push`, {
+      method: "POST",
+      headers: { Authorization: "Bearer test-secret" },
+      body: '{"password":"private-marker"',
+    });
+    expect(response.status).toBe(400);
+    expect((await response.text()).includes("private-marker")).toBe(false);
+  });
+
+  it("does not expose credentials in push responses", async () => {
+    const response = await postPush({
+      profile: "safe",
+      credentials: {
+        name: "private-marker",
+        url: "example.com",
+        username: "private-marker",
+        password: "private-marker",
+      },
+    });
+    expect(response.status).toBe(200);
+    expect((await response.text()).includes("private-marker")).toBe(false);
+  });
+
+  it("preserves all concurrent pushes to a profile", async () => {
+    const responses = await Promise.all(
+      Array.from({ length: 12 }, (_, i) =>
+        postPush({
+          profile: "concurrent",
+          cookies: [
+            { name: `cookie-${i}`, value: "fixture-only", domain: "example.com", path: "/" },
+          ],
+        }),
+      ),
+    );
+    expect(responses.every((response) => response.ok)).toBe(true);
+    const detail = await profileRequest("/profiles/concurrent");
+    expect((await detail.json()).domains[0].cookieCount).toBe(12);
+  });
+
+  it("does not overwrite corrupt profiles or follow symlinks", async () => {
+    await fs.mkdir(config.profilesDir, { recursive: true });
+    const file = path.join(config.profilesDir, "broken.json");
+    await fs.writeFile(file, "not-json-private-marker");
+    const response = await postPush({ profile: "broken" });
+    expect(response.status).toBe(400);
+    expect((await response.text()).includes("private-marker")).toBe(false);
+    expect((await fs.readFile(file, "utf8")) === "not-json-private-marker").toBe(true);
+    await fs.symlink(file, path.join(config.profilesDir, "link.json"));
+    expect((await profileRequest("/profiles/link")).status).toBe(400);
+  });
+
+  it("allows DELETE preflight", async () => {
+    const response = await profileRequest("/profiles/work/domains/example.com", "OPTIONS", null);
+    expect(response.status).toBe(204);
+    expect(response.headers.get("access-control-allow-methods")).toContain("DELETE");
+  });
+});

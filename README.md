@@ -163,7 +163,7 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 
 ## Cookie Push Extension
 
-A Chrome/Vivaldi/Edge extension that pushes your real browser cookies, localStorage, and credentials to Steel profiles in one click.
+A Manifest V3 extension sends selected site cookies and localStorage to saved Steel profiles. The popup shows domains and counts, not sign-in values. See [extension instructions](extension/README.md) for permissions, batch pushes, pinned sync, and limits.
 
 ### Setup
 
@@ -171,15 +171,17 @@ A Chrome/Vivaldi/Edge extension that pushes your real browser cookies, localStor
 
 2. **Configure the relay** — Set `RELAY_PORT` and `RELAY_SECRET` env vars on the MCP server. The relay starts automatically alongside the stdio transport.
 
-3. **Configure the extension** — Click the extension icon → Server settings → enter the relay URL and shared secret → Save Settings → Test Connection.
+3. **Configure the extension**: Open Settings from the popup. Set the relay URL and shared secret, save settings, grant relay access, then select Test connection. Use HTTPS for remote relays. Use HTTP for loopback connections only.
 
 ### Usage
 
-1. Navigate to a site you're logged into in your browser
-2. Click the extension icon
-3. Set a profile name (e.g. "github")
-4. Click "Push to Steel"
-5. In your agent, use `create_profile(name: "github")` — cookies are restored automatically
+1. Open a site and sign in, then open the extension popup.
+2. Grant access to that site if prompted. Check its cookie and storage-key counts.
+3. Select an existing profile or set a new profile name.
+4. Select **Push this site** and check the per-site results.
+5. Use `create_profile(name: "github", url: "https://github.com")` with the selected profile name and initial site URL. Cookies load automatically. localStorage loads for that initial URL origin only, after navigation. Recreate an active Steel profile to load new saved data.
+
+Push merges cookies and storage keys into saved state. It does not remove stale data or update active Steel contexts. Use the saved profile contents panel to remove a domain before a clean replacement. Manual credential entry is not part of the extension UI. The relay keeps credential support for existing clients.
 
 ### Relay API
 
@@ -187,6 +189,11 @@ A Chrome/Vivaldi/Edge extension that pushes your real browser cookies, localStor
 |---|---|---|
 | `GET /status` | No | Health check |
 | `POST /push` | Bearer token | Receive cookies/localStorage/credentials → profile |
+| `GET /profiles` | Bearer token | List saved profile names, domains, and counts |
+| `GET /profiles/:name` | Bearer token | Show saved domains and counts without values |
+| `DELETE /profiles/:name/domains/:domain` | Bearer token | Remove one exact domain from saved cookies and localStorage |
+
+Domain removal ignores the first cookie dot and hostname case. Subdomains, active contexts, and the global credential store stay unchanged. The original `GET /status` and `POST /push` stay compatible with extension 1.0.0.
 
 ---
 

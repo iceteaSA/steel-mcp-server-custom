@@ -1,269 +1,294 @@
-// Steel Cookie Push — popup logic
+import { getSettings, validProfile, sitePatterns, requestAccess, send } from "./core.js";
 
 const $ = (id) => document.getElementById(id);
+let site = null;
+let sites = [];
+const selected = new Set();
+let connected = false;
+let busy = false;
 
-// ---------------------------------------------------------------------------
-// Settings persistence
-// ---------------------------------------------------------------------------
-
-const DEFAULTS = {
-  serverUrl: "http://localhost:3001",
-  serverSecret: "",
-  profileName: "vivaldi",
-};
-
-async function loadSettings() {
-  return new Promise((resolve) => {
-    chrome.storage.local.get(DEFAULTS, (items) => resolve(items));
-  });
+function status(text, error = false) {
+  $("status").textContent = text;
+  $("status").className = `notice ${error ? "error" : "success"}`;
 }
-
-async function saveSettings(settings) {
-  return new Promise((resolve) => {
-    chrome.storage.local.set(settings, resolve);
-  });
+function destination() {
+  return validProfile($("profilePicker").value || $("profileName").value.trim());
 }
-
-// ---------------------------------------------------------------------------
-// Cookie helpers
-// ---------------------------------------------------------------------------
-
-/** Get all cookies for a specific domain (and its subdomains). */
-function getCookiesForDomain(domain) {
-  return new Promise((resolve) => {
-    chrome.cookies.getAll({ domain }, (cookies) => resolve(cookies || []));
-  });
+function updateActions() {
+  $("profilePicker").disabled = busy;
+  $("profileName").disabled = busy;
+  $("includeStorage").disabled = busy;
+  $("grantParent").disabled =
+    busy ||
+    !site?.parents?.some((parent) => parent.domain === $("parentDomain").value && !parent.granted);
+  $("pushBtn").disabled = busy || !connected || !site?.granted;
+  $("pinSite").disabled = busy || !site?.granted;
+  $("pushSelected").disabled = busy || !connected || !selected.size;
+  $("pushSelected").textContent = `Push selected sites (${selected.size})`;
+  $("newProfileFields").hidden = Boolean($("profilePicker").value);
 }
-
-/** Get ALL cookies from the browser. */
-function getAllCookies() {
-  return new Promise((resolve) => {
-    chrome.cookies.getAll({}, (cookies) => resolve(cookies || []));
-  });
-}
-
-/** Convert chrome.cookies format → relay format. */
-function convertCookie(c) {
-  const cookie = {
-    name: c.name,
-    value: c.value,
-    domain: c.domain,
-    path: c.path,
-  };
-  // expirationDate is epoch seconds; session cookies have no expirationDate
-  if (c.expirationDate) {
-    cookie.expires = c.expirationDate;
+function renderResults(results = []) {
+  $("results").replaceChildren();
+  for (const result of results) {
+    const li = document.createElement("li");
+    li.className = result.ok ? (result.warning ? "" : "success") : "error";
+    li.textContent = `${result.ok ? (result.warning ? "NOTE" : "✓") : "✗"} ${result.domain}${result.profile ? ` → ${result.profile}` : ""}: ${result.ok ? `${result.cookieCount} cookies · ${result.storageKeyCount} storage keys${result.warning ? `. ${result.warning}` : ""}` : result.error}`;
+    $("results").append(li);
   }
-  if (c.httpOnly) cookie.httpOnly = true;
-  if (c.secure) cookie.secure = true;
-  if (c.sameSite && c.sameSite !== "unspecified") {
-    // Chrome uses lowercase; Playwright wants Title Case
-    cookie.sameSite = c.sameSite.charAt(0).toUpperCase() + c.sameSite.slice(1);
-  }
-  return cookie;
 }
-
-// ---------------------------------------------------------------------------
-// localStorage extraction via scripting API
-// ---------------------------------------------------------------------------
-
-async function getLocalStorage(tabId) {
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => {
-        const entries = {};
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i);
-          if (key) entries[key] = localStorage.getItem(key) ?? "";
-        }
-        return { origin: location.origin, entries };
-      },
+async function loadResults() {
+  const { lastResults, lastSync } = await chrome.storage.local.get(["lastResults", "lastSync"]);
+  renderResults(lastResults);
+  $("lastSync").textContent = lastSync
+    ? `Last transfer: ${new Date(lastSync).toLocaleString()}`
+    : "";
+}
+async function loadSite() {
+  site = await send("site");
+  $("currentDomain").textContent = site?.domain || "No supported site open";
+  $("siteCounts").textContent = site
+    ? site.granted
+      ? `${site.cookieCount} cookies · ${site.storageKeyCount ?? "unavailable"} storage keys · granted domains only`
+      : "Grant site access to count and transfer its sign-in data."
+    : "Open an HTTP or HTTPS tab, then reopen this popup.";
+  $("grantSite").hidden = !site || site.granted;
+  const previousParent = $("parentDomain").value;
+  $("parentDomain").replaceChildren();
+  $("parentPanel").hidden = !site?.parents?.length;
+  for (const parent of site?.parents ?? [])
+    $("parentDomain").add(
+      new Option(`${parent.domain}${parent.granted ? " (granted)" : ""}`, parent.domain),
+    );
+  if (site?.parents?.some((parent) => parent.domain === previousParent))
+    $("parentDomain").value = previousParent;
+  updateActions();
+}
+async function loadSites() {
+  sites = await send("sites");
+  const available = new Set(sites.map((entry) => entry.domain));
+  for (const domain of selected) if (!available.has(domain)) selected.delete(domain);
+  renderSites();
+}
+function renderSites() {
+  $("siteList").replaceChildren();
+  const query = $("siteSearch").value.toLowerCase();
+  for (const entry of sites.filter((entry) => entry.domain.includes(query))) {
+    const li = document.createElement("li");
+    const label = document.createElement("label");
+    label.className = "check";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = selected.has(entry.domain);
+    input.addEventListener("change", () => {
+      if (input.checked) selected.add(entry.domain);
+      else selected.delete(entry.domain);
+      updateActions();
     });
-    if (results && results[0] && results[0].result) {
-      const { origin, entries } = results[0].result;
-      if (Object.keys(entries).length > 0) {
-        return { [origin]: entries };
-      }
-    }
-  } catch (err) {
-    console.warn("Failed to extract localStorage:", err);
+    label.append(input, document.createTextNode(`${entry.domain} · ${entry.cookieCount} cookies`));
+    li.append(label);
+    $("siteList").append(li);
   }
-  return null;
-}
-
-// ---------------------------------------------------------------------------
-// Push to relay
-// ---------------------------------------------------------------------------
-
-async function pushToRelay(payload, serverUrl, secret) {
-  const url = serverUrl.replace(/\/$/, "") + "/push";
-  const res = await fetch(url, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${secret}`,
-    },
-    body: JSON.stringify(payload),
-  });
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || `HTTP ${res.status}`);
+  if (!$("siteList").children.length) {
+    const li = document.createElement("li");
+    li.textContent = "No matching granted cookie domains. Grant access to a signed-in site first.";
+    $("siteList").append(li);
   }
-  return data;
+  updateActions();
 }
-
-async function testConnection(serverUrl) {
-  const url = serverUrl.replace(/\/$/, "") + "/status";
-  const res = await fetch(url);
-  return res.json();
-}
-
-// ---------------------------------------------------------------------------
-// Status display
-// ---------------------------------------------------------------------------
-
-function showStatus(msg, type) {
-  const el = $("status");
-  el.textContent = msg;
-  el.className = `status ${type}`;
-}
-
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
-
-document.addEventListener("DOMContentLoaded", async () => {
-  const settings = await loadSettings();
-
-  // Populate settings fields
-  $("serverUrl").value = settings.serverUrl;
-  $("serverSecret").value = settings.serverSecret;
-  $("profileName").value = settings.profileName;
-
-  // Get current tab info
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.url) {
-    $("currentDomain").textContent = "No active tab";
-    return;
-  }
-
-  let domain;
+async function loadProfiles() {
   try {
-    const u = new URL(tab.url);
-    domain = u.hostname;
-  } catch {
-    $("currentDomain").textContent = "Invalid URL";
+    const data = await send("profiles");
+    const settings = await getSettings();
+    const previous = $("profilePicker").value || settings.profileName;
+    $("profilePicker").replaceChildren(new Option("Create a new profile", ""));
+    for (const profile of data.profiles)
+      $("profilePicker").add(new Option(profile.name, profile.name));
+    if (data.profiles.some((profile) => profile.name === previous))
+      $("profilePicker").value = previous;
+    connected = true;
+    $("connection").textContent = "✓ Relay connected · secret accepted";
+    $("connection").className = "notice success";
+  } catch (error) {
+    connected = false;
+    $("connection").textContent = error.message;
+    $("connection").className = "notice error";
+  }
+  updateActions();
+}
+async function loadSummary() {
+  $("profileDomains").replaceChildren();
+  if (!$("profilePicker").value) {
+    const li = document.createElement("li");
+    li.textContent = "Choose an existing profile to inspect its saved data.";
+    $("profileDomains").append(li);
     return;
   }
-
-  $("currentDomain").textContent = domain;
-
-  // Count cookies for this domain
-  const domainCookies = await getCookiesForDomain(domain);
-  $("cookieCount").textContent = `${domainCookies.length} cookie(s)`;
-
-  // Enable push button if server is configured
-  if (settings.serverSecret) {
-    $("pushBtn").disabled = false;
+  const profile = $("profilePicker").value;
+  const summary = await send("summary", { profile });
+  for (const entry of summary.domains) {
+    const li = document.createElement("li");
+    li.className = "profile-domain";
+    const text = document.createElement("span");
+    text.textContent = `${entry.domain} · ${entry.cookieCount} cookies · ${entry.storageKeyCount} storage keys`;
+    const remove = document.createElement("button");
+    remove.className = "small";
+    remove.textContent = "Remove";
+    remove.setAttribute("aria-label", `Remove ${entry.domain} from ${profile}`);
+    remove.addEventListener("click", async () => {
+      if (
+        !confirm(
+          `Remove saved cookies and localStorage for ${entry.domain} from ${profile}? Subdomains and credentials will remain. Active Steel sessions are not changed.`,
+        )
+      )
+        return;
+      remove.disabled = true;
+      try {
+        await send("remove", { profile, domain: entry.domain });
+        await loadSummary();
+        status(`Removed ${entry.domain} from saved profile ${profile}.`);
+      } catch (error) {
+        status(error.message, true);
+        remove.disabled = false;
+      }
+    });
+    li.append(text, remove);
+    $("profileDomains").append(li);
   }
+  if (!summary.domains.length) {
+    const li = document.createElement("li");
+    li.textContent = "This saved profile has no domains.";
+    $("profileDomains").append(li);
+  }
+}
+async function push(items) {
+  busy = true;
+  updateActions();
+  status("Transfer in progress. You can close this popup; the worker will continue.");
+  try {
+    const profile = destination();
+    await chrome.storage.local.set({
+      profileName: profile,
+      includeStorage: $("includeStorage").checked,
+    });
+    const results = await send("push", {
+      sites: items,
+      profile,
+      includeStorage: $("includeStorage").checked,
+    });
+    renderResults(results);
+    status(
+      results.some((result) => !result.ok)
+        ? "Some sites failed. Follow the steps listed below and retry those sites."
+        : results.some((result) => result.warning)
+          ? "Transfer complete with storage warnings. Check each result before using the profile."
+          : "Transfer complete. Recreate the Steel profile to load its saved data.",
+      results.some((result) => !result.ok),
+    );
+    await loadProfiles();
+    await loadSummary();
+  } catch (error) {
+    status(error.message, true);
+  } finally {
+    busy = false;
+    updateActions();
+  }
+}
 
-  // Auto-set credential name to domain
-  $("credName").value = domain.replace(/^www\./, "");
-
-  // ---------------------------------------------------------------------------
-  // Event handlers
-  // ---------------------------------------------------------------------------
-
-  // Toggle credentials section
-  $("includeCredentials").addEventListener("change", (e) => {
-    $("credentialFields").style.display = e.target.checked ? "block" : "none";
-  });
-
-  // Toggle settings
-  $("settingsToggle").addEventListener("click", () => {
-    $("settingsPanel").classList.toggle("visible");
-  });
-
-  // Save settings
-  $("saveSettings").addEventListener("click", async () => {
-    const newSettings = {
-      serverUrl: $("serverUrl").value.trim() || DEFAULTS.serverUrl,
-      serverSecret: $("serverSecret").value.trim(),
-      profileName: $("profileName").value.trim() || DEFAULTS.profileName,
-    };
-    await saveSettings(newSettings);
-    $("pushBtn").disabled = !newSettings.serverSecret;
-    showStatus("Settings saved", "success");
-  });
-
-  // Test connection
-  $("testConnection").addEventListener("click", async () => {
-    try {
-      const url = $("serverUrl").value.trim() || DEFAULTS.serverUrl;
-      const data = await testConnection(url);
-      showStatus(`Connected: ${data.server} v${data.version}`, "success");
-    } catch (err) {
-      showStatus(`Connection failed: ${err.message}`, "error");
-    }
-  });
-
-  // PUSH button
-  $("pushBtn").addEventListener("click", async () => {
-    const btn = $("pushBtn");
-    btn.disabled = true;
-    btn.textContent = "Pushing...";
-
-    try {
-      const currentSettings = await loadSettings();
-      const profileName = $("profileName").value.trim() || currentSettings.profileName;
-
-      // Save profile name for next time
-      await saveSettings({ ...currentSettings, profileName });
-
-      // Collect cookies
-      const allCookies = $("includeAllCookies").checked;
-      const rawCookies = allCookies
-        ? await getAllCookies()
-        : await getCookiesForDomain(domain);
-      const cookies = rawCookies.map(convertCookie);
-
-      // Collect localStorage
-      let localStorage = null;
-      if ($("includeLocalStorage").checked) {
-        localStorage = await getLocalStorage(tab.id);
-      }
-
-      // Collect credentials
-      let credentials = null;
-      if ($("includeCredentials").checked) {
-        const name = $("credName").value.trim();
-        const username = $("credUsername").value.trim();
-        const password = $("credPassword").value;
-        if (name && username && password) {
-          credentials = { name, url: domain, username, password };
-        }
-      }
-
-      // Build payload
-      const payload = { profile: profileName };
-      if (cookies.length > 0) payload.cookies = cookies;
-      if (localStorage) payload.localStorage = localStorage;
-      if (credentials) payload.credentials = credentials;
-
-      // Send
-      const result = await pushToRelay(
-        payload,
-        currentSettings.serverUrl,
-        currentSettings.serverSecret
+$("grantSite").addEventListener("click", async () => {
+  try {
+    if (!site) return;
+    const granted = await requestAccess(sitePatterns(site.url));
+    if (!granted)
+      throw new Error(
+        "Access was not granted. No data was sent. Grant access to enable this site.",
       );
-
-      showStatus(result.message, "success");
-    } catch (err) {
-      showStatus(`Push failed: ${err.message}`, "error");
-    } finally {
-      btn.disabled = false;
-      btn.textContent = "Push to Steel";
-    }
-  });
+    await loadSite();
+    await loadSites();
+  } catch (error) {
+    status(error.message, true);
+  }
 });
+$("parentDomain").addEventListener("change", updateActions);
+$("grantParent").addEventListener("click", async () => {
+  try {
+    const domain = $("parentDomain").value;
+    if (!site?.parents?.some((parent) => parent.domain === domain)) return;
+    const granted = await requestAccess([`*://${domain}/*`]);
+    if (!granted)
+      throw new Error(
+        "Parent cookie access was not granted. Counts can omit shared sign-in cookies.",
+      );
+    await loadSite();
+    await loadSites();
+    status(`Parent cookie access granted for ${domain}. Check the updated counts before pushing.`);
+  } catch (error) {
+    status(error.message, true);
+  }
+});
+$("discoverSites").addEventListener("click", async () => {
+  try {
+    const granted = await requestAccess(["http://*/*", "https://*/*"]);
+    if (!granted)
+      throw new Error("All-site discovery was not granted. Individual site access still works.");
+    await loadSite();
+    await loadSites();
+  } catch (error) {
+    status(error.message, true);
+  }
+});
+$("profilePicker").addEventListener("change", async () => {
+  updateActions();
+  try {
+    await chrome.storage.local.set({ profileName: destination() });
+    await loadSummary();
+  } catch (error) {
+    status(error.message, true);
+  }
+});
+$("includeStorage").addEventListener("change", () => {
+  void chrome.storage.local.set({ includeStorage: $("includeStorage").checked });
+});
+$("pushBtn").addEventListener("click", () => {
+  if (site) void push([site]);
+});
+$("pushSelected").addEventListener("click", () => {
+  void push(sites.filter((entry) => selected.has(entry.domain)));
+});
+$("siteSearch").addEventListener("input", renderSites);
+$("refreshSummary").addEventListener("click", () => {
+  void loadSummary().catch((error) => status(error.message, true));
+});
+$("pinSite").addEventListener("click", async () => {
+  try {
+    const profile = destination();
+    const settings = await getSettings();
+    const pin = {
+      url: site.url,
+      domain: site.domain,
+      profile,
+      includeStorage: $("includeStorage").checked,
+    };
+    const pins = settings.pinnedSites.filter(
+      (entry) => !(entry.url === pin.url && entry.profile === profile),
+    );
+    if (pins.length >= 100) throw new Error("Pin limit reached. Remove a pin in Settings first.");
+    await chrome.storage.local.set({ pinnedSites: [...pins, pin] });
+    status(
+      `Pinned ${site.domain} → ${profile}. ${settings.syncEnabled ? "Scheduled sync is enabled." : "Enable scheduled sync in Settings when ready."}`,
+    );
+  } catch (error) {
+    status(error.message, true);
+  }
+});
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && (changes.lastResults || changes.lastSync)) void loadResults();
+});
+
+async function init() {
+  const settings = await getSettings();
+  $("profileName").value = settings.profileName;
+  $("includeStorage").checked = settings.includeStorage;
+  await Promise.all([loadResults(), loadSite(), loadSites(), loadProfiles()]);
+  await loadSummary();
+}
+void init().catch((error) => status(error.message, true));
