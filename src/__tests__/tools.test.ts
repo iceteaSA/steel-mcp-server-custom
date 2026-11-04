@@ -133,8 +133,9 @@ describe("non-browser tools", () => {
   it("tools/list returns expected tools with correct names", async () => {
     const r = await client.call(100, "tools/list");
     const names = r.result?.tools?.map((t) => t.name).sort() || [];
-    expect(names.length).toBe(42);
+    expect(names.length).toBe(45);
     expect(names).toEqual([
+      "cancel_signin",
       "captcha_status",
       "click",
       "click_at",
@@ -167,8 +168,10 @@ describe("non-browser tools", () => {
       "new_tab",
       "page_state",
       "press_key",
+      "request_signin",
       "save_profile",
       "scroll",
+      "signin_status",
       "smoke_test",
       "snapshot",
       "solve_captcha",

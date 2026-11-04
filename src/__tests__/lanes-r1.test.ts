@@ -275,7 +275,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
     const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
     const start = source.indexOf('process.on("SIGINT"');
     expect(start).toBeGreaterThan(0);
-    const script = `const env = { STEEL_LANES: 'on', LANE_DRAIN_MS: 20 }; const closeLanes = () => new Promise(() => {}); const rootManager = { stop: async () => {} }; ${source.slice(start)}; console.log('ready'); setInterval(() => {}, 1000);`;
+    const script = `const env = { STEEL_LANES: 'on', LANE_DRAIN_MS: 20 }; let stopping = false; const signinStore = Promise.resolve({ shutdown: async () => console.log('store-flushed') }); const relayServer = { close: callback => { console.log('relay-closed'); callback(); } }; const closeLanes = () => new Promise(() => {}); const rootManager = { stop: async () => {} }; ${source.slice(start)}; console.log('ready'); setInterval(() => {}, 1000);`;
     const child = Bun.spawn(["node", "--eval", script], {
       env: process.env,
       stdin: "ignore",
@@ -291,6 +291,14 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
       expect(await bounded(child.exited, 2020)).toBe(0);
       const elapsed = performance.now() - at;
       expect(elapsed).toBeLessThan(2020);
+      let cleanup = "";
+      while (true) {
+        const chunk = await bounded(output.read(), 1000);
+        if (chunk.done) break;
+        cleanup += new TextDecoder().decode(chunk.value);
+      }
+      expect(cleanup).toContain("store-flushed");
+      expect(cleanup).toContain("relay-closed");
       console.error(`Measured ${signal} exit: ${elapsed.toFixed(2)} ms (bound 2020 ms)`);
     } finally {
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
