@@ -4,7 +4,11 @@ import { EnvSchema } from "../env.js";
 import type { BrowserManager } from "../manager.js";
 import * as groups from "../tools/index.js";
 import type { ToolSpec } from "../tools/shared.js";
-import { registerSignin } from "../tools/signin.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { makeRegistrar, ALL_TOOLSETS } from "../tools/shared.js";
+import { BrowserManager as Manager } from "../manager.js";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -69,20 +73,32 @@ function specs(mgr: Partial<BrowserManager> = {}, overrides: Record<string, stri
   });
   for (const register of Object.values(groups))
     register((tool) => tools.push(tool), mgr as BrowserManager, env);
-  registerSignin(
-    (tool) => tools.push(tool),
-    async () => {
-      throw new Error("specs only");
-    },
-    () => "single-process",
-  );
   return tools;
 }
 
-test("every tool explicitly declares all four MCP safety hints", () => {
-  const tools = specs();
-  expect(tools).toHaveLength(47);
-  expect(tools.map((tool) => tool.name).sort()).toEqual(expectedToolNames);
+test("every tool explicitly declares all four MCP safety hints", async () => {
+  const env = EnvSchema.parse({ STEEL_LANES: "on", BROWSER_MODE: "local" });
+  const manager = new Manager(env);
+  const server = new McpServer({ name: "annotation-policy", version: "1" });
+  const handle = makeRegistrar(server, new Set(ALL_TOOLSETS), { manager, env });
+  for (const register of Object.values(groups))
+    register(handle.register, handle.manager ?? manager, env);
+  const client = new Client({ name: "annotation-policy", version: "1" });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await server.connect(a);
+  await client.connect(b);
+  const listed = await client.listTools();
+  const tools = listed.tools.map((tool) => {
+    const { title: _title, ...annotations } = tool.annotations ?? {};
+    return { ...tool, annotations };
+  });
+  await client.close();
+  await server.close();
+  await handle.close?.();
+  expect(tools).toHaveLength(49);
+  expect(tools.map((tool) => tool.name).sort()).toEqual(
+    [...expectedToolNames, "list_lanes", "close_lane"].sort(),
+  );
   expect(tools.find((tool) => tool.name === "solve_captcha")?.annotations).toEqual({
     readOnlyHint: false,
     destructiveHint: true,
@@ -96,7 +112,7 @@ test("every tool explicitly declares all four MCP safety hints", () => {
       "idempotentHint",
       "openWorldHint",
     ] as const) {
-      expect(typeof tool.annotations[hint], `${tool.name}.${hint}`).toBe("boolean");
+      expect(typeof tool.annotations?.[hint], `${tool.name}.${hint}`).toBe("boolean");
     }
   }
 });

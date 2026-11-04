@@ -179,6 +179,40 @@ export class LaneRuntime {
     return results.some(Boolean);
   }
 
+  async control(name: "list_lanes" | "close_lane"): Promise<CallToolResult> {
+    const caller = this.getCaller()!;
+    try {
+      await this.sweep();
+      if (name === "list_lanes") {
+        const lanes = [...this.lanes.values()].map((lane) => ({
+          caller: lane.caller,
+          ageSeconds: Math.max(0, (this.now() - lane.created) / 1000),
+          tabCount: lane.manager.tabIds.length,
+        }));
+        return {
+          content: [{ type: "text", text: JSON.stringify(lanes) }],
+          structuredContent: { lanes },
+        };
+      }
+      const pending = this.opening.get(caller);
+      const lane = pending ? await pending : this.lanes.get(caller);
+      if (lane) await this.dispose(lane, "close_lane");
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Lane closed; the shared browser and operator context remain open.",
+          },
+        ],
+      };
+    } catch (error) {
+      return {
+        isError: true,
+        content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      };
+    }
+  }
+
   private async open(caller: string, mayWait = true): Promise<Lane> {
     const existing = this.lanes.get(caller);
     if (existing && !existing.closing) return existing;
@@ -356,7 +390,8 @@ export class LaneRuntime {
         );
       return result;
     }
-    if (SIGNIN_TOOLS.has(name)) return this.profileCaller.run(caller, handler);
+    if (SIGNIN_TOOLS.has(name) || name === "list_lanes" || name === "close_lane")
+      return this.profileCaller.run(caller, handler);
     const notes: string[] = [];
     if (args.force !== undefined) notes.push("NOTE: force is accepted and ignored in lane mode.");
     const finish = (result: CallToolResult): CallToolResult =>
@@ -366,18 +401,7 @@ export class LaneRuntime {
     try {
       await this.sweep();
       if (typeof args.tabId === "number") this.checkTab(caller, args.tabId);
-      if (name === "list_lanes") {
-        const lanes = [...this.lanes.values()].map((lane) => ({
-          caller: lane.caller,
-          ageSeconds: Math.max(0, (this.now() - lane.created) / 1000),
-          tabCount: lane.manager.tabIds.length,
-        }));
-        return finish({
-          content: [{ type: "text", text: JSON.stringify(lanes) }],
-          structuredContent: { lanes },
-        });
-      }
-      if (name === "close_lane" || name === "stop_browser") {
+      if (name === "stop_browser") {
         if (
           name === "stop_browser" &&
           [...this.lanes.keys(), ...this.opening.keys()].some((key) => key !== caller)

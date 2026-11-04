@@ -28,10 +28,10 @@ import {
   registerIntercept,
   registerAct,
   registerCaptcha,
+  registerSignin,
 } from "./tools/index.js";
 import { llmConfigured } from "./llm.js";
 import { SigninStore } from "./signin.js";
-import { registerSignin } from "./tools/signin.js";
 
 // -----------------------------------------------------------------------------
 // Parse environment + CLI flags
@@ -85,7 +85,8 @@ registerCredentials(register, mgr, env);
 registerProfiles(register, mgr, env);
 registerIntercept(register, mgr, env);
 registerCaptcha(register, mgr);
-registerSignin(register, () => signinStore, getCaller);
+register.signin = { store: signinStore, getCaller };
+registerSignin(register, mgr, env);
 if (llmConfigured(env)) {
   registerAct(register, mgr, env);
 }

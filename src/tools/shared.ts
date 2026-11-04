@@ -84,7 +84,9 @@ export interface ToolSpec {
 // makeRegistrar — build a gated registration function from server + active set
 // -----------------------------------------------------------------------------
 
-export type ToolRegistrar = (spec: ToolSpec) => void;
+export type ToolRegistrar = ((spec: ToolSpec) => void) & {
+  signin?: { store: Promise<import("../signin.js").SigninStore>; getCaller: () => string };
+};
 
 export interface RegistrarHandle {
   register: ToolRegistrar;
@@ -165,7 +167,7 @@ export function makeRegistrar(
   };
 
   if (runtime) {
-    for (const name of ["list_lanes", "close_lane"]) {
+    for (const name of ["list_lanes", "close_lane"] as const) {
       register({
         name,
         title: name === "list_lanes" ? "List Lanes" : "Close Lane",
@@ -190,7 +192,7 @@ export function makeRegistrar(
           idempotentHint: true,
           openWorldHint: false,
         },
-        handler: async () => ({ content: [] }),
+        handler: () => runtime.control(name),
       });
     }
   }
@@ -200,8 +202,7 @@ export function makeRegistrar(
     getCaller: () => {
       if (!runtime) return "single-process";
       const caller = runtime.getCaller();
-      if (!caller) throw new Error("no_caller");
-      return caller;
+      return caller ?? "";
     },
     applyProfileUpdated: (profile) =>
       runtime

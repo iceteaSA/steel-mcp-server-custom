@@ -54,7 +54,12 @@ function fixture(overrides: Record<string, string> = {}) {
     lanes: Map<string, { manager: BrowserManager; closing: boolean }>;
   };
   const call = (caller: string, name = "new_tab", handler = async () => ({ content: [] })) =>
-    runtime.run(name, {}, { "ai.opencode/sessionID": caller }, handler);
+    runtime.run(
+      name,
+      {},
+      { "ai.opencode/sessionID": caller },
+      name === "close_lane" || name === "list_lanes" ? () => runtime.control(name) : handler,
+    );
   return {
     runtime,
     state,

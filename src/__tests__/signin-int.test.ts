@@ -16,7 +16,6 @@ import { SigninStore } from "../signin.js";
 import { startRelayServer } from "../relay.js";
 import { makeRegistrar, ALL_TOOLSETS } from "../tools/shared.js";
 import * as groups from "../tools/index.js";
-import { registerSignin } from "../tools/signin.js";
 
 function data(result: Awaited<ReturnType<Client["callTool"]>>) {
   return result.structuredContent as Record<string, unknown> | undefined;
@@ -337,11 +336,7 @@ test("INT live profile pushes update only holding lane contexts; absent membersh
   for (const register of Object.values(groups))
     register(handle.register, handle.manager ?? root, env);
   const store = await SigninStore.open({ profilesDir: directory, automaticTimers: false });
-  registerSignin(
-    handle.register,
-    () => Promise.resolve(store),
-    () => handle.getCaller(),
-  );
+  handle.register.signin = { store: Promise.resolve(store), getCaller: () => handle.getCaller() };
   const relay = startRelayServer({
     port: 0,
     bindAddr: "127.0.0.1",
