@@ -1,22 +1,35 @@
-import { afterAll, beforeAll, expect, it } from "bun:test";
+import { afterEach, beforeEach, expect, it } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type http from "node:http";
 import { startRelayServer } from "../relay";
+import { SigninStore } from "../signin";
+import { WebSocket } from "ws";
 
 let server: http.Server;
 let directory: string;
 let origin: string;
+let store: SigninStore;
+let now: number;
+let updates: string[];
+const caller = { sessionID: "session-test", agent: "tester" };
+const input = { site: "https://login.example.com", profile: "work", reason: "Read account" };
+const state = { profile: "work", cookies: [{ name: "sid", value: "CANARY_PRIVATE", domain: ".example.com", path: "/" }], localStorage: { "https://login.example.com": { token: "CANARY_PRIVATE" } } };
 
-beforeAll(async () => {
+beforeEach(async () => {
   directory = await fs.mkdtemp(path.join(os.tmpdir(), "signin-relay-"));
+  now = 1_000_000;
+  updates = [];
+  store = await SigninStore.open({ profilesDir: path.join(directory, "profiles"), now: () => now, automaticTimers: false });
   server = startRelayServer({
     port: 0,
     bindAddr: "127.0.0.1",
     secret: "fake-signin-secret",
     profilesDir: path.join(directory, "profiles"),
     credentialsFile: path.join(directory, "credentials.json"),
+    signinStore: store,
+    onProfileUpdated: (profile) => { updates.push(profile); },
   });
   await new Promise<void>((resolve) => server.once("listening", resolve));
   const address = server.address();
@@ -24,10 +37,18 @@ beforeAll(async () => {
   origin = `http://127.0.0.1:${address.port}`;
 });
 
-afterAll(async () => {
-  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+afterEach(async () => {
+  store.close();
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => error ? reject(error) : resolve());
+    server.closeAllConnections();
+  });
   await fs.rm(directory, { recursive: true, force: true });
 });
+
+function post(id: string, body = state) {
+  return fetch(origin + `/signin/${id}/push`, { method: "POST", headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" }, body: JSON.stringify(body) });
+}
 
 it("requires Bearer authentication before listing pending sign-in requests", async () => {
   const response = await fetch(origin + "/signin");
@@ -52,3 +73,94 @@ it("rejects an unknown request id instead of writing a profile", async () => {
   expect(await response.json()).toEqual({ error: "signin_unknown" });
   expect(await fs.exists(path.join(directory, "profiles", "work.json"))).toBe(false);
 });
+
+it("accepts only a pending request, writes counts, applies live once, and audits no values", async () => {
+  const request = await store.create(caller, input);
+  const responses = await Promise.all([post(request.id), post(request.id)]);
+  expect(responses.map((response) => response.status).sort()).toEqual([200, 409]);
+  expect(await store.status(caller, request.id)).toMatchObject({ status: "approved", counts: { cookieCount: 1, storageKeyCount: 1 } });
+  expect(updates).toEqual(["work"]);
+  const saved = JSON.parse(await fs.readFile(path.join(directory, "profiles", "work.json"), "utf8"));
+  expect(saved.cookies[0].value).toBe("CANARY_PRIVATE");
+  expect(saved.localStorage["https://login.example.com"].token).toBe("CANARY_PRIVATE");
+  const audit = await fs.readFile(path.join(directory, "profiles", ".signin-audit.jsonl"), "utf8");
+  expect(audit).not.toContain("CANARY_PRIVATE");
+  const rows = audit.trim().split("\n").map((line) => JSON.parse(line));
+  expect(rows.some((row) => row.decision === "approved" && row.cookieCount === 1 && row.storageKeyCount === 1)).toBe(true);
+  expect(rows.some((row) => row.decision === "rejected:signin_used")).toBe(true);
+});
+
+for (const status of ["expired", "cancelled", "denied"] as const) {
+  it(`rejects a ${status} request with an audit row and no profile write`, async () => {
+    const request = await store.create(caller, input);
+    if (status === "expired") now += 300_000;
+    if (status === "cancelled") await store.cancel(caller, request.id);
+    if (status === "denied") await store.deny(request.id, "No");
+    const response = await post(request.id);
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: `signin_${status}` });
+    expect(await fs.exists(path.join(directory, "profiles", "work.json"))).toBe(false);
+    expect(await fs.readFile(path.join(directory, "profiles", ".signin-audit.jsonl"), "utf8")).toContain(`rejected:signin_${status}`);
+  });
+}
+
+for (const domain of ["other.test", "sibling.example.com", "com", "example.com.evil.test"]) {
+  it(`rejects out-of-scope cookie domain ${domain}`, async () => {
+    const request = await store.create(caller, input);
+    const response = await post(request.id, { ...state, cookies: [{ ...state.cookies[0], domain }] });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "signin_site_mismatch" });
+    expect(await fs.exists(path.join(directory, "profiles", "work.json"))).toBe(false);
+  });
+}
+
+it("rejects another profile and another storage origin", async () => {
+  const request = await store.create(caller, input);
+  const mismatch = await post(request.id, { ...state, profile: "other" });
+  expect(mismatch.status).toBe(400);
+  expect(await mismatch.json()).toEqual({ error: "signin_profile_mismatch" });
+  const second = await store.create(caller, input);
+  const storage = await post(second.id, { ...state, localStorage: { "https://sibling.example.com": { token: "CANARY_PRIVATE" } } });
+  expect(storage.status).toBe(400);
+  expect(await storage.json()).toEqual({ error: "signin_site_mismatch" });
+  expect(updates).toEqual([]);
+});
+
+it("requires explicit remember opt-in and supports listing and revocation", async () => {
+  const request = await store.create(caller, input);
+  expect((await post(request.id)).status).toBe(200);
+  expect(await store.grants()).toEqual([]);
+  const remembered = await store.create(caller, input);
+  const response = await fetch(origin + `/signin/${remembered.id}/push`, { method: "POST", headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" }, body: JSON.stringify({ ...state, remember: true }) });
+  expect(response.status).toBe(200);
+  const grants = await fetch(origin + "/signin/grants", { headers: { Authorization: "Bearer fake-signin-secret" } });
+  const body = await grants.json();
+  expect(body.grants).toHaveLength(1);
+  expect((await fetch(origin + `/signin/grants/${body.grants[0].id}`, { method: "DELETE", headers: { Authorization: "Bearer fake-signin-secret" } })).status).toBe(200);
+  expect(await store.grants()).toEqual([]);
+});
+
+it("authenticates a WebSocket through its first message and sends pending state", async () => {
+  const request = await store.create(caller, input);
+  const socket = new WebSocket(origin.replace("http:", "ws:") + "/signin/events");
+  const message = new Promise<string>((resolve, reject) => {
+    socket.once("error", reject);
+    socket.once("message", (data) => resolve(data.toString()));
+  });
+  socket.once("open", () => socket.send(JSON.stringify({ secret: "fake-signin-secret" })));
+  expect(JSON.parse(await message)).toMatchObject({ type: "pending", requests: [{ id: request.id }] });
+  socket.terminate();
+});
+
+for (const secret of [undefined, "wrong-secret"]) {
+  it(`closes WebSocket ${secret === undefined ? "without authentication after two seconds" : "with a wrong secret"} without disclosing requests`, async () => {
+    await store.create(caller, input);
+    const socket = new WebSocket(origin.replace("http:", "ws:") + "/signin/events");
+    const messages: string[] = [];
+    socket.on("message", (data) => messages.push(data.toString()));
+    const closed = new Promise<number>((resolve, reject) => { socket.once("close", resolve); socket.once("error", reject); });
+    socket.once("open", () => { if (secret) socket.send(JSON.stringify({ secret })); });
+    expect(await closed).toBe(1008);
+    expect(messages).toEqual([]);
+  });
+}
