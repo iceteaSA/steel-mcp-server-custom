@@ -16,6 +16,8 @@ export const EnvSchema = z
     // Override to point at a self-hosted Steel instance (e.g. http://steel.local:3000).
     // When set, STEEL_API_KEY is optional.
     STEEL_BASE_URL: z.string().optional(),
+    STEEL_LANES: z.enum(["on", "off"]).default("on"),
+    LANE_IDLE_MS: z.coerce.number().int().positive().default(900000),
     // Maximum bytes before auto-switching inline output to file mode (default 500 KB).
     MAX_INLINE_BYTES: z.coerce.number().default(512000),
     // Directory for file-mode outputs (screenshots, page text, etc.).

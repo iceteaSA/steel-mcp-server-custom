@@ -119,6 +119,15 @@ export class BrowserManager {
   public sessionViewerUrl: string | undefined;
   public consoleLogs: ConsoleMessage[] = [];
   public initialized = false;
+  private initializing: Promise<void> | undefined;
+  private laneContext = false;
+  private laneClosed = false;
+  private lanesEnabled = false;
+  private allocateId: (() => number) | undefined;
+  private onTabCreated: ((tabId: number) => void) | undefined;
+  private sessionEnded = false;
+  private sessionEndListeners = new Set<() => void>();
+  private watchedBrowsers = new WeakSet<Browser>();
 
   // Tab management — integer IDs starting at 1.
   // Concurrency: multiple agents can share one browser. Tabs carry an
@@ -200,6 +209,89 @@ export class BrowserManager {
   private recoveryNotices = new Map<number, string>();
 
   constructor(private readonly env: Env) {}
+
+  enableLanes(): void {
+    this.lanesEnabled = true;
+  }
+
+  onSessionEnded(listener: () => void): () => void {
+    this.sessionEndListeners.add(listener);
+    return () => {
+      this.sessionEndListeners.delete(listener);
+    };
+  }
+
+  private watchBrowser(): void {
+    const browser = this.browser;
+    if (!this.lanesEnabled || !browser || this.watchedBrowsers.has(browser)) return;
+    this.watchedBrowsers.add(browser);
+    const disconnected = () => {
+      if (this.browser !== browser) return;
+      this.sessionEnded = true;
+      this.initialized = false;
+      this.browser = undefined;
+      this.browserContext = undefined;
+      this.primaryTabId = undefined;
+      for (const id of this.tabIds) this.clearTabState(id);
+      this.consoleLogs = [];
+      this.networkEvents = [];
+      this.responsesById.clear();
+      for (const listener of this.sessionEndListeners) listener();
+    };
+    browser.once("disconnected", disconnected);
+    if (!browser.isConnected()) disconnected();
+  }
+
+  hasTab(id: number): boolean {
+    return this.tabs.has(id);
+  }
+
+  get tabIds(): number[] {
+    return [...this.tabs.keys()];
+  }
+
+  async createLane(
+    allocateId: () => number,
+    onTabCreated?: (tabId: number) => void,
+  ): Promise<BrowserManager> {
+    await this.initialize();
+    const browser = this.browser;
+    if (!browser?.isConnected()) throw new Error("lane_closed: shared browser session ended.");
+    const context = await browser.newContext({
+      viewport: {
+        width: this.env.DEFAULT_VIEWPORT_WIDTH,
+        height: this.env.DEFAULT_VIEWPORT_HEIGHT,
+      },
+    });
+    if (browser !== this.browser || !browser.isConnected()) {
+      await context.close().catch(() => {});
+      throw new Error("lane_closed: shared browser session ended during lane startup.");
+    }
+    const lane = new BrowserManager(this.env);
+    lane.browser = this.browser;
+    lane.browserContext = context;
+    lane.laneContext = true;
+    lane.allocateId = allocateId;
+    lane.onTabCreated = onTabCreated;
+    lane.currentTabId = 0;
+    lane.initialized = true;
+    lane.debugUrl = this.debugUrl;
+    lane.sessionViewerUrl = this.sessionViewerUrl;
+    lane._wireNetworkCapture(context);
+    lane._wirePopupCapture(context);
+    context.on("close", () => {
+      lane.laneClosed = true;
+    });
+    return lane;
+  }
+
+  get isLaneClosed(): boolean {
+    return this.laneClosed;
+  }
+
+  get isLaneContext(): boolean {
+    return this.laneContext;
+  }
 
   /** Expose the default BrowserContext for tools that need direct cookie/request access. */
   get context(): BrowserContext | undefined {
@@ -297,6 +389,13 @@ export class BrowserManager {
    * 4. neither → return currentTabId (global active tab pointer)
    */
   resolveTab(opts: { tabId?: number; owner?: string; force?: boolean }): number {
+    if (this.laneContext) {
+      if (this.laneClosed)
+        throw new Error("lane_closed: context closed; open a fresh lane without a tabId.");
+      const id = opts.tabId ?? this.currentTabId;
+      if (!this.tabs.has(id)) throw new Error("lane_closed: tab is no longer available.");
+      return id;
+    }
     // Explicit tabId + ownership enforcement
     if (opts.tabId !== undefined) {
       const tabOwner = this.tabOwners.get(opts.tabId);
@@ -370,7 +469,7 @@ export class BrowserManager {
       return existing;
     }
 
-    const id = this.nextTabId++;
+    const id = this.allocateId ? this.allocateId() : this.nextTabId++;
     this.tabs.set(id, page);
     if (owner) this.tabOwners.set(id, owner);
     this.tabLastActivity.set(id, Date.now());
@@ -624,6 +723,7 @@ export class BrowserManager {
 
   /** Start the idle sweeper. Idempotent; no-op if TAB_IDLE_TIMEOUT_MS=0. */
   private startIdleSweeper(): void {
+    if (this.lanesEnabled || this.laneContext) return;
     if (this.idleSweeperHandle) return;
     if (this.env.TAB_IDLE_TIMEOUT_MS <= 0) return;
     this.idleSweeperHandle = setInterval(() => {
@@ -642,6 +742,7 @@ export class BrowserManager {
    * "Failed to refresh primary page" 500 on subsequent connects.
    */
   async sweepIdleTabs(): Promise<number[]> {
+    if (this.lanesEnabled || this.laneContext) return [];
     if (this.env.TAB_IDLE_TIMEOUT_MS <= 0) return [];
     const cutoff = Date.now() - this.env.TAB_IDLE_TIMEOUT_MS;
     const stale: number[] = [];
@@ -773,7 +874,29 @@ export class BrowserManager {
   }
 
   async initialize() {
+    if (this.laneClosed)
+      throw new Error("lane_closed: context closed; open a fresh lane without a tabId.");
+    if (this.initializing) return this.initializing;
     if (this.initialized) return;
+    if (!this.initializing) {
+      this.initializing = this.initializeBrowser().finally(() => {
+        this.initializing = undefined;
+      });
+    }
+    return this.initializing;
+  }
+
+  private async initializeBrowser(): Promise<void> {
+    if (this.sessionEnded) {
+      if (this.steelClient && this.sessionId) {
+        await this.steelClient.sessions.release(this.sessionId).catch(() => {});
+      }
+      this.steelClient = undefined;
+      this.sessionId = undefined;
+      this.debugUrl = undefined;
+      this.sessionViewerUrl = undefined;
+      this.sessionEnded = false;
+    }
 
     if (this.env.BROWSER_MODE === "steel") {
       try {
@@ -821,6 +944,9 @@ export class BrowserManager {
     }
 
     this.initialized = true;
+    this.watchBrowser();
+    if (this.lanesEnabled && !this.browser)
+      throw new Error("lane_closed: session ended during browser startup.");
 
     // Wire network capture before popup capture so requests made by the
     // initial page are recorded from the start.
@@ -1082,6 +1208,13 @@ export class BrowserManager {
   async getPage(opts: { tabId?: number; owner?: string; force?: boolean }): Promise<Page>;
   async getPage(arg?: number | { tabId?: number; owner?: string; force?: boolean }): Promise<Page> {
     await this.initialize();
+    if (
+      this.laneContext &&
+      this.tabs.size === 0 &&
+      (arg === undefined || (typeof arg === "object" && arg.tabId === undefined))
+    ) {
+      return (await this.newTab()).page;
+    }
 
     let tabId: number | undefined;
     let owner: string | undefined;
@@ -1170,6 +1303,14 @@ export class BrowserManager {
     // If a profile is specified, open the tab in that profile's context
     let context = this.browserContext!;
     if (profileName) {
+      if (this.laneContext && !this.profiles.has(profileName)) {
+        const previousTab = this.currentTabId;
+        const { tabId } = await this.createProfile(profileName, url);
+        if (!activate) this.currentTabId = previousTab;
+        const page = this.tabs.get(tabId)!;
+        if (owner) this.tabOwners.set(tabId, owner);
+        return { tabId, page };
+      }
       const profile = this.profiles.get(profileName);
       if (!profile)
         throw new Error(`Profile "${profileName}" not found. Create it with create_profile first.`);
@@ -1177,6 +1318,7 @@ export class BrowserManager {
     }
     const page = await context.newPage();
     const tabId = this.allocateTab(page, owner);
+    this.onTabCreated?.(tabId);
     if (activate) {
       this.currentTabId = tabId;
       // Track per-owner active tab so owner-only resolveTab works
@@ -1239,6 +1381,10 @@ export class BrowserManager {
 
   /** Drop all state without trying to close a browser that may already be gone. */
   private async softReset(): Promise<void> {
+    if (this.laneContext) {
+      this.laneClosed = true;
+      throw new Error("lane_closed: browser context lost; open a fresh lane without a tabId.");
+    }
     if (this.idleSweeperHandle) {
       clearInterval(this.idleSweeperHandle);
       this.idleSweeperHandle = undefined;
@@ -1404,12 +1550,14 @@ export class BrowserManager {
     }
     // The Steel image enables extension access in incognito contexts.
     // A second init script would conflict with that fingerprint and break WebSockets.
-    const context = await this.browser!.newContext({
-      viewport: {
-        width: this.env.DEFAULT_VIEWPORT_WIDTH,
-        height: this.env.DEFAULT_VIEWPORT_HEIGHT,
-      },
-    });
+    const context = this.laneContext
+      ? this.browserContext!
+      : await this.browser!.newContext({
+          viewport: {
+            width: this.env.DEFAULT_VIEWPORT_WIDTH,
+            height: this.env.DEFAULT_VIEWPORT_HEIGHT,
+          },
+        });
 
     // Settle detection for profile pages is injected per-page via the
     // domcontentloaded listener in attachPageListeners (NOT addInitScript —
@@ -1417,12 +1565,15 @@ export class BrowserManager {
 
     // Wire network + popup capture on profile contexts so profile tabs get
     // the same request/response and new-page tracking as the default context.
-    this._wireNetworkCapture(context);
-    this._wirePopupCapture(context);
+    if (!this.laneContext) {
+      this._wireNetworkCapture(context);
+      this._wirePopupCapture(context);
+    }
 
     const page = await context.newPage();
 
     const tabId = this.allocateTab(page);
+    this.onTabCreated?.(tabId);
     this.currentTabId = tabId;
 
     const profile = { context, tabIds: new Set([tabId]) };
@@ -1615,7 +1766,7 @@ export class BrowserManager {
         }
       }
       // Close the context
-      await profile.context.close().catch(() => {});
+      if (!this.laneContext) await profile.context.close().catch(() => {});
       this.profiles.delete(name);
     }
 
@@ -1686,6 +1837,20 @@ export class BrowserManager {
   }
 
   async stop() {
+    if (this.laneContext) {
+      this.laneClosed = true;
+      await this.browserContext?.close().catch(() => {});
+      for (const id of this.tabIds) this.clearTabState(id);
+      this.profiles.clear();
+      this.tabToProfile.clear();
+      this.consoleLogs = [];
+      this.networkEvents = [];
+      this.responsesById.clear();
+      this.browserContext = undefined;
+      this.browser = undefined;
+      this.initialized = false;
+      return;
+    }
     if (this.steelClient && this.sessionId) {
       try {
         await this.steelClient.sessions.release(this.sessionId);

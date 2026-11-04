@@ -1,16 +1,42 @@
-import { expect, test } from "bun:test";
+import { afterAll, expect, test, spyOn } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { chromium } from "patchright";
 import { z } from "zod";
-import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import childProcess, { type ChildProcess } from "node:child_process";
 import { EnvSchema } from "../env.js";
 import { BrowserManager } from "../manager.js";
 import { makeRegistrar, ALL_TOOLSETS } from "../tools/shared.js";
 import * as groups from "../tools/index.js";
+
+// Bun #34785 double-closes extra stdio fds after child GC.
+// Keep closed child references for this test process. Remove at Bun ≥ 1.4.0.
+const chromiumPath = "/home/icetea/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome";
+const retainedChildren: Array<{ child: ChildProcess; stdio: ChildProcess["stdio"] }> = [];
+const nativeSpawn = childProcess.spawn;
+const retainedSpawn = new Proxy(nativeSpawn, {
+  apply(target, receiver, args) {
+    const child: ChildProcess = Reflect.apply(target, receiver, args);
+    const options = args[2] ?? args[1];
+    if (
+      args[0] === chromiumPath &&
+      options &&
+      Array.isArray(options.stdio) &&
+      options.stdio.length > 3
+    ) {
+      retainedChildren.push({ child, stdio: child.stdio });
+    }
+    return child;
+  },
+});
+if (Bun.version.startsWith("1.3.")) childProcess.spawn = retainedSpawn;
+afterAll(() => {
+  if (childProcess.spawn === retainedSpawn) childProcess.spawn = nativeSpawn;
+});
 
 function barrier() {
   let release!: () => void;
@@ -22,11 +48,17 @@ function barrier() {
 
 async function fixture(mode = "on", overrides: Record<string, string> = {}) {
   const launchOptions = {
-    executablePath: "/home/icetea/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome",
+    executablePath: chromiumPath,
     headless: true,
     args: ["--no-sandbox"],
   };
-  let browser = await chromium.launch(launchOptions);
+  const launch = async () => {
+    const retainedBefore = retainedChildren.length;
+    const browser = await chromium.launch(launchOptions);
+    if (Bun.version.startsWith("1.3.")) expect(retainedChildren.length).toBe(retainedBefore + 1);
+    return browser;
+  };
+  let browser = await launch();
   let now = 1000;
   let starts = 0;
   const env = EnvSchema.parse({
@@ -48,7 +80,7 @@ async function fixture(mode = "on", overrides: Record<string, string> = {}) {
       starts++;
       await startGate.promise;
       if (!browser.isConnected()) {
-        browser = await chromium.launch(launchOptions);
+        browser = await launch();
         operator = await browser.newContext();
         primary = await operator.newPage();
       }
@@ -154,6 +186,9 @@ test("two callers isolate cookies, current tabs, labels, and foreign tab access"
       (await f.call("a", "evaluate", { tabId: a, owner: "different", expression: "1" })).isError,
     ).not.toBe(true);
     expect(f.primary.isClosed()).toBe(false);
+    expect(
+      text(await f.call("a", "evaluate", { tabId: f.root.activeTabId, expression: "1" })),
+    ).toContain("not_in_lane");
   } finally {
     await f.close();
   }
@@ -650,5 +685,56 @@ test("browser disconnect closes every lane and single-flights a fresh session wi
     expect(f.contexts()).toHaveLength(3);
   } finally {
     await f.close();
+  }
+}, 20000);
+
+test("a new MCP registry cannot alias an old tab ID even when wall-clock time is unchanged", async () => {
+  const clock = spyOn(Date, "now").mockReturnValue(1800000000000);
+  let first: Awaited<ReturnType<typeof fixture>> | undefined;
+  let second: Awaited<ReturnType<typeof fixture>> | undefined;
+  try {
+    first = await fixture();
+    const previous = tab(await first.call("a", "new_tab"));
+    await first.close();
+    first = undefined;
+    second = await fixture();
+    const current = tab(await second.call("a", "new_tab"));
+    expect(current).toBeGreaterThan(previous);
+    expect(
+      text(await second.call("a", "evaluate", { tabId: previous, expression: "1" })),
+    ).toContain("lane_closed");
+  } finally {
+    await first?.close();
+    await second?.close();
+    clock.mockRestore();
+  }
+}, 20000);
+
+test("owner labels do not restrict own-lane interception, response bodies, or HAR export", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "steel-lane-har-"));
+  const f = await fixture("on", { OUTPUT_DIR: directory });
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response("lane-response"),
+  });
+  try {
+    const id = tab(
+      await f.call("a", "new_tab", {
+        url: `http://127.0.0.1:${server.port}/lane-body`,
+        owner: "label-only",
+      }),
+    );
+    expect((await f.call("a", "intercept", { tabId: id, action: "list" })).isError).not.toBe(true);
+    const body = await f.call("a", "get_network", { urlPattern: "/lane-body", body: true });
+    expect(body.isError).not.toBe(true);
+    expect(structured(body)?.body).toBe("lane-response");
+    const har = await f.call("a", "export_har");
+    expect(har.isError).not.toBe(true);
+    expect(await readFile(join(directory, "network.har"), "utf8")).toContain("/lane-body");
+  } finally {
+    server.stop(true);
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });

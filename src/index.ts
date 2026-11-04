@@ -54,12 +54,18 @@ const server = new McpServer(
   },
 );
 
-const mgr = new BrowserManager(env);
+const rootManager = new BrowserManager(env);
 
 // -----------------------------------------------------------------------------
 // Register tools via the gated wrapper
 // -----------------------------------------------------------------------------
-const { register, toolCount } = makeRegistrar(server, activeToolsets);
+const {
+  register,
+  toolCount,
+  manager,
+  close: closeLanes,
+} = makeRegistrar(server, activeToolsets, { manager: rootManager, env });
+const mgr = manager ?? rootManager;
 
 registerTabs(register, mgr, env);
 registerScreenshots(register, mgr, env);
@@ -114,12 +120,14 @@ runServer().catch((error) => {
 
 process.on("SIGINT", async () => {
   console.error("Received SIGINT, cleaning up...");
-  await mgr.stop();
+  await closeLanes?.();
+  await rootManager.stop();
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
   console.error("Received SIGTERM, cleaning up...");
-  await mgr.stop();
+  await closeLanes?.();
+  await rootManager.stop();
   process.exit(0);
 });

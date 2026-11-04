@@ -17,6 +17,8 @@ import {
 } from "../helpers.js";
 import { afterAction } from "../utils.js";
 import { fenceToolResult } from "../untrusted.js";
+import { LaneRuntime, type LaneOptions } from "../lanes.js";
+import type { BrowserManager } from "../manager.js";
 
 // Re-exported because @modelcontextprotocol/sdk 1.29 doesn't re-export
 // ToolAnnotations from the server/mcp module.
@@ -86,6 +88,8 @@ export type ToolRegistrar = (spec: ToolSpec) => void;
 
 export interface RegistrarHandle {
   register: ToolRegistrar;
+  manager?: BrowserManager;
+  close?: () => Promise<void>;
   /** Number of tools actually registered (post-filter). */
   toolCount(): number;
 }
@@ -93,19 +97,49 @@ export interface RegistrarHandle {
 export function makeRegistrar(
   server: McpServer,
   activeToolsets: ReadonlySet<Toolset>,
+  lanes?: LaneOptions,
 ): RegistrarHandle {
   let count = 0;
+  const runtime = lanes && lanes.env.STEEL_LANES === "on" ? new LaneRuntime(lanes) : undefined;
 
   const register = (spec: ToolSpec): void => {
     // "core" tools are always active; others are gated by the active set.
     if (spec.toolset !== "core" && !activeToolsets.has(spec.toolset)) return;
 
+    const laneDescriptions: Record<string, string> = {
+      new_tab:
+        "Open a new tab in the caller's lane and return its global tab ID. owner is an optional label. A profile loads saved state into the lane's existing context; it does not create a separate context.",
+      stop_browser:
+        "Refuse while another lane is active. Otherwise close only the caller's lane, not the shared Steel session or operator context. force is accepted and ignored with a NOTE line.",
+      create_profile:
+        "Create a named profile in the caller's lane and restore saved cookies and localStorage through the existing restore path. Return the initial tab ID. All lane tabs share one context; profile leases are not implemented.",
+      delete_profile:
+        "Close the named profile's tabs in the caller's lane. Keep the lane context open. Optionally remove the shared saved profile file from disk.",
+      get_console:
+        "Read console messages from the caller's lane. Filter by level, tabId, or owner label. clear removes only this lane's captured entries up to the read, regardless of filter. Maximum 500 buffered messages; default 50 returned.",
+    };
+    const descriptions: Record<string, string> = {
+      owner: "Optional tab label in your lane. It grants no access to another lane.",
+      tabId:
+        "Global numeric tab ID in your lane. Omit for your lane's current tab. Foreign tabs return not_in_lane; closed or unknown IDs return lane_closed.",
+      force: "Accepted and ignored in lane mode, with a NOTE line. Cannot bypass lane isolation.",
+      profile:
+        "Saved profile name. Loads state into the caller's lane context; all tabs in this lane share its storage.",
+    };
+    const inputSchema = runtime
+      ? Object.fromEntries(
+          Object.entries(spec.inputSchema).map(([key, schema]) => [
+            key,
+            descriptions[key] ? schema.describe(descriptions[key]) : schema,
+          ]),
+        )
+      : spec.inputSchema;
     server.registerTool(
       spec.name,
       {
         title: spec.title,
-        description: spec.description,
-        inputSchema: spec.inputSchema,
+        description: runtime ? (laneDescriptions[spec.name] ?? spec.description) : spec.description,
+        inputSchema,
         outputSchema: spec.outputSchema,
         annotations: {
           title: spec.title,
@@ -115,15 +149,52 @@ export function makeRegistrar(
       // Handler type is intentionally loose — the SDK validates args at
       // runtime against inputSchema; compile-time narrowing would need
       // per-tool generics that defeat the wrapper's purpose.
-      (async (args: Record<string, unknown>) =>
-        fenceToolResult(await spec.handler(args), spec.name)) as Parameters<
-        McpServer["registerTool"]
-      >[2],
+      (async (args: Record<string, unknown>, extra: { _meta?: Record<string, unknown> }) =>
+        fenceToolResult(
+          runtime
+            ? await runtime.run(spec.name, args, extra?._meta, () => spec.handler(args))
+            : await spec.handler(args),
+          spec.name,
+        )) as Parameters<McpServer["registerTool"]>[2],
     );
     count++;
   };
 
-  return { register, toolCount: () => count };
+  if (runtime) {
+    for (const name of ["list_lanes", "close_lane"]) {
+      register({
+        name,
+        title: name === "list_lanes" ? "List Lanes" : "Close Lane",
+        description:
+          name === "list_lanes"
+            ? "List lane callers, ages and tab counts. No page URLs are disclosed."
+            : "Close your lane's tabs and context. Other lanes and the operator context remain open.",
+        toolset: "core",
+        inputSchema: {},
+        ...(name === "list_lanes"
+          ? {
+              outputSchema: {
+                lanes: z.array(
+                  z.object({ caller: z.string(), ageSeconds: z.number(), tabCount: z.number() }),
+                ),
+              },
+            }
+          : {}),
+        annotations: {
+          readOnlyHint: name === "list_lanes",
+          destructiveHint: name === "close_lane",
+          idempotentHint: true,
+          openWorldHint: false,
+        },
+        handler: async () => ({ content: [] }),
+      });
+    }
+  }
+  return {
+    register,
+    toolCount: () => count,
+    ...(runtime ? { manager: runtime.manager, close: () => runtime.close() } : {}),
+  };
 }
 
 // -----------------------------------------------------------------------------

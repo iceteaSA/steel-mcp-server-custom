@@ -8,15 +8,15 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 
 ## Features
 
-- **42 browser tools** (44 with AI tools). Use snapshots, navigation, forms, screenshots, extraction, network inspection, and owner-scoped tabs. `act` and `extract_ai` require `ACT_LLM_BASE_URL` and `ACT_LLM_MODEL`.
+- **44 browser tools** (46 with AI tools) in lane mode. Each caller has different tabs and browser storage. `STEEL_LANES=off` uses the legacy tool set.
 - **Patchright browser engine** — drops the `Runtime.enable` CDP fingerprint that vanilla Playwright leaks; native binary stays compatible with all standard Playwright page APIs
 - **Snapshot-first paradigm** — `snapshot` returns an accessibility tree with stable `[ref=eN]` tokens; refs feed `click`/`fill`/`scroll`/`get_attrs`/`extract`/`press_key` directly without re-discovering selectors
 - **MCP 2025 best practices** — `server.registerTool` with `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` annotations and `outputSchema` → `structuredContent` on JSON tools
 - **Toolset filtering**: select `core`, `tabs`, `extract`, `media`, `network`, `auth`, `debug`, `ai`, or `intercept` through `--toolsets` or `TOOLSETS`. The server always includes `core`.
-- **Concurrent-agent safe** — owner-tagged tabs, `tabId` + `force` on every page tool, per-tab ownership guard with explicit override, idle sweeper, scoped cleanup
+- **Agent lanes**: one BrowserContext for each calling session, with different current tabs, console buffers, network buffers, and idle leases. Each tab has a call queue.
 - **Iframe targeting** — `click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot` accept `frame: "<name>" | "<url-substring>" | "<index>"` to reach into child frames
 - **TLS-impersonated batch fetch** — `fetch_urls(mode: "auto"|"http"|"browser")` uses `impit` for fast HTTP first, auto-escalates to a real browser tab when the response looks like an SPA shell
-- **Profiles** — isolated BrowserContexts with persistent cookies/localStorage across restarts
+- **Profiles**: saved cookies and localStorage load into the caller's lane. Profile leases are not available.
 - **Credentials** — encrypted credential store (AES-256-GCM) with auto-fill support
 - **Cookie Push Extension** — Chrome/Vivaldi extension pushes real browser sessions to Steel profiles via HTTP relay
 - **CAPTCHA solving**: navigation and action tools wait a maximum of 90 s for CAPTCHA widgets or bot walls. Use `solve_captcha` for the REST API fallback (reCAPTCHA v2/v3 and Turnstile).
@@ -52,7 +52,7 @@ git clone <this-repo>
 cd steel-mcp-server-custom
 bun install
 bun run build          # → dist/index.cjs
-bun test               # run unit tests (bun test)
+STEEL_LANES=off bun test # legacy suite plus explicit lane-mode tests
 ```
 
 ### Run
@@ -82,6 +82,8 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 | `BROWSER_MODE` | `"steel"` | `"steel"` for Steel; `"local"` for plain Chromium |
 | `STEEL_API_KEY` | — | Required for Steel Cloud (when `STEEL_BASE_URL` is not set) |
 | `STEEL_BASE_URL` | Steel Cloud | Self-hosted Steel URL (e.g. `http://your-steel-host:3000`) |
+| `STEEL_LANES` | `on` | Isolated caller lanes. Set `off` for the legacy shared context, owner guard, and `force` override. |
+| `LANE_IDLE_MS` | `900000` | Close an idle lane after 15 minutes. Active calls keep the lane open. |
 | `STEEL_PUBLIC_URL` | — | Public-facing Steel URL for debug/interactive URLs in `start_browser` output |
 | `SESSION_TIMEOUT_MS` | `300000` | Steel session auto-release timeout (ms) |
 | `SETTLE_TIMEOUT_MS` | `5000` | Max time to wait for network idle + DOM quiet after actions. `0` disables |
@@ -95,7 +97,7 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 | `DEFAULT_SCREENSHOT_QUALITY` | `80` | Default webp/jpeg quality (1–100) |
 | `DEFAULT_VIEWPORT_WIDTH` | `1280` | Viewport width in px |
 | `DEFAULT_VIEWPORT_HEIGHT` | `720` | Viewport height in px |
-| `TAB_IDLE_TIMEOUT_MS` | `300000` | Auto-close idle tabs after this long. `0` disables |
+| `TAB_IDLE_TIMEOUT_MS` | `300000` | Legacy mode only: close idle tabs after this long. `0` disables. |
 | `TAB_IDLE_SWEEP_INTERVAL_MS` | `60000` | Sweeper check interval |
 | `NETWORK_BUFFER_SIZE` | `500` | Max request/response events kept for `get_network`. `0` disables capture |
 | `RELAY_PORT` | `3001` | HTTP relay port for Cookie Push extension. `0` disables |
@@ -109,7 +111,54 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 
 ---
 
-## Tools (42 default, 44 with AI tools)
+## Agent lanes
+
+`STEEL_LANES=on` is the default. The hub must send `params._meta["ai.opencode/sessionID"]` on each `tools/call`.
+The SDK supplies this value as `extra._meta` to the tool handler. Tool arguments cannot select a different caller.
+A stateful call without this value gives `no_caller` with a hint.
+`list_profiles`, `credentials`, and `captcha_status` operate without a lane.
+
+The first stateful call opens a new BrowserContext for its caller. The default context and Steel's primary tab stay with the operator.
+Agents cannot address the operator's tabs. A popup stays in the lane of its context.
+
+Tab IDs are global numbers, but a caller can address only its own lane's tabs.
+A tab from a different active lane gives `not_in_lane`. A closed or unknown tab ID gives `lane_closed`, also after an MCP restart.
+
+Each lane has its own current-tab pointer and console and network buffers.
+`get_console({clear:true})` clears only the caller's buffer.
+Calls on one tab run in order. Calls on different tabs and lanes can run in parallel.
+An omitted tab ID selects the current tab before the queue waits.
+
+Two tools are available only in lane mode:
+
+- `list_lanes`: show each active lane's caller, age in seconds, and tab count. It does not give page URLs.
+- `close_lane`: close the caller's tabs and context. It does not stop the shared Steel session.
+
+With other active lanes, `stop_browser` refuses the call. With no other active lanes, it closes only the caller's lane.
+
+`owner` is an optional tab label, not an access check. `force` is accepted but ignored, with a NOTE line.
+
+`new_tab({profile})` loads the saved profile into the lane's context through the same load path as legacy mode.
+All tabs in that lane then share that storage. `list_profiles` keeps the same result format.
+Profile files stay shared. Profile leases and encrypted profile storage are different work.
+
+The idle lease closes a lane after `LANE_IDLE_MS`. It does not close individual idle tabs.
+Lane closure does not save cookies. The next call without `tabId` opens a new lane and reports the previous closure in a NOTE line.
+
+Previous tab IDs stay invalid. An MCP restart clears in-memory lanes, tabs, queues, and buffers.
+The hub must keep the child alive during idle periods (`servers.steel.idleSeconds: 0`).
+Before release, check caller metadata on the live host for direct, Code Mode, and child-session calls.
+
+If the shared browser disconnects, all lanes close. The NOTE line shows `session-ended`.
+Calls with previous tab IDs return `lane_closed`. Calls without a tab ID open new lanes and report the session end.
+Concurrent calls share one new browser startup. `SESSION_TIMEOUT_MS` stays unchanged and can end the shared Steel session before a lane's idle lease.
+
+Set `STEEL_LANES=off` to restore the legacy shared context, owner-based targeting, `force` override, tab sweeper, and whole-browser stop.
+Restart the MCP process to change this switch. The restart does not keep lanes from the previous process.
+
+## Tools (42 default, 44 with AI tools, legacy mode)
+
+This table lists the legacy tool set, which lane mode also includes. The lane rules above replace its shared-state behavior.
 
 All page-interacting tools accept an optional `tabId`. Omit for current-active-tab; pass it for concurrent-agent safety. `click`, `fill`, `scroll`, `wait_for`, `get_attrs`, `extract`, `press_key`, and `upload_file` also accept `ref: "eN"` from `snapshot` in place of a CSS `selector`. `click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot` accept `frame` to target an iframe by name, URL substring, or 0-based child index.
 
@@ -149,13 +198,13 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 | **Network** | |
 | `cookies` | Get or set browser cookies |
 | `get_network` | Inspect request/response traffic (filter by urlPattern/resourceType/status). `body: true` or `requestId` fetches a single response body |
-| `export_har` | Export captured network events as HAR 1.2. Requires an owner or tab ID. |
-| `intercept` | List, fulfill, abort, continue, or remove per-tab request routes. Routes respect tab ownership. |
+| `export_har` | Export lane network events as HAR 1.2. In legacy mode, give an owner or tab ID. |
+| `intercept` | List, fulfill, abort, continue, or remove per-tab request routes in the caller's lane. |
 | **Sessions & Auth** | |
-| `create_profile` | Isolated BrowserContext with auto-restore |
+| `create_profile` | Load a named profile in the lane. Legacy mode uses a different BrowserContext. |
 | `list_profiles` | Active + saved profiles |
 | `save_profile` | Persist cookies + localStorage to disk |
-| `delete_profile` | Close profile context + tabs |
+| `delete_profile` | Close the profile's tabs. Legacy mode also closes the profile context. |
 | `credentials` | List/store/update/delete credentials |
 | `use_credential` | Retrieve or auto-fill login form |
 | **System** | |
@@ -163,7 +212,7 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 | `solve_captcha` | Wait for an active extension solve, or solve reCAPTCHA v2/v3 and Turnstile through the REST API. Accepts `tabId`, `owner`, `frame`, `timeoutMs`. Returns type, public site key, seconds, injection status and errors, never the token |
 | `smoke_test` | Self-test: navigate, fingerprint, stealth, CapSolver checks. Headless-detection probe (sannysoft) |
 | `start_browser` | Start browser, get Session Viewer + Interactive + Relay URLs |
-| `stop_browser` | Stop browser. `owner`+`force` override the multi-agent safety check |
+| `stop_browser` | Close the caller's lane if no other lane is active. Legacy mode stops the shared browser. |
 | **AI (optional — requires `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL`)** | |
 | `act` | LLM-driven bounded micro-loop over a snapshot (1–5 actions) |
 | `extract_ai` | LLM structured extraction from the current page (text or html, optional JSON Schema) |
