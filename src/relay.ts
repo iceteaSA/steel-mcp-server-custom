@@ -8,12 +8,15 @@
  * Endpoints:
  *   GET  /status   — health check (no auth required)
  *   POST /push     — receive session data from extension
+ *   GET /profiles, GET /profiles/:name — saved domains and counts only
+ *   DELETE /profiles/:name/domains/:domain — remove one saved hostname
  */
 
 import crypto from "crypto";
 import http from "http";
 import fs from "fs/promises";
 import path from "path";
+import { z } from "zod";
 import { encryptJSON, decryptJSON } from "./crypto.js";
 import { assertSafeProfilePath, isValidProfileName } from "./helpers.js";
 
@@ -63,6 +66,95 @@ export interface RelayConfig {
   credentialsPassphrase?: string;
 }
 
+const domainSchema = z
+  .string()
+  .max(253)
+  .regex(/^\.?[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$/);
+const originSchema = z.string().refine((value) => {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) && url.origin === value;
+  } catch {
+    return false;
+  }
+});
+const cookieSchema = z.object({
+  name: z.string(),
+  value: z.string(),
+  domain: domainSchema,
+  path: z.string().startsWith("/"),
+  expires: z.number().optional(),
+  httpOnly: z.boolean().optional(),
+  secure: z.boolean().optional(),
+  sameSite: z
+    .enum(["Strict", "Lax", "None", "No_restriction"])
+    .transform((value) => (value === "No_restriction" ? "None" : value))
+    .optional(),
+});
+const storageSchema = z.record(originSchema, z.record(z.string(), z.string()));
+const pushSchema = z.object({
+  profile: z.string().refine(isValidProfileName),
+  cookies: z.array(cookieSchema).optional(),
+  localStorage: storageSchema.optional(),
+  credentials: z
+    .object({
+      name: z.string(),
+      url: z.string(),
+      username: z.string(),
+      password: z.string(),
+      extra: z.record(z.string(), z.string()).optional(),
+    })
+    .optional(),
+});
+const stateSchema = z
+  .object({
+    cookies: z.array(cookieSchema).optional(),
+    localStorage: storageSchema.optional(),
+  })
+  .passthrough();
+type ProfileState = z.infer<typeof stateSchema>;
+
+async function readProfile(name: string, config: RelayConfig): Promise<ProfileState> {
+  const file = assertSafeProfilePath(name, config.profilesDir);
+  const stat = await fs.lstat(file);
+  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Invalid profile file");
+  return stateSchema.parse(JSON.parse(await fs.readFile(file, "utf8")));
+}
+
+async function writeProfile(name: string, state: ProfileState, config: RelayConfig): Promise<void> {
+  await fs.mkdir(config.profilesDir, { recursive: true });
+  const file = assertSafeProfilePath(name, config.profilesDir);
+  const temporary = `${file}.${crypto.randomUUID()}.tmp`;
+  try {
+    await fs.writeFile(temporary, JSON.stringify(state, null, 2), { mode: 0o600 });
+    await fs.rename(temporary, file);
+  } finally {
+    await fs.unlink(temporary).catch(() => {});
+  }
+}
+
+function normalizeDomain(domain: string): string {
+  return domain.replace(/^\./, "").toLowerCase();
+}
+
+function summarizeProfile(name: string, state: ProfileState) {
+  const domains = new Map<
+    string,
+    { domain: string; cookieCount: number; storageKeyCount: number }
+  >();
+  const entry = (domain: string) => {
+    const normalized = normalizeDomain(domain);
+    if (!domains.has(normalized))
+      domains.set(normalized, { domain: normalized, cookieCount: 0, storageKeyCount: 0 });
+    return domains.get(normalized)!;
+  };
+  for (const cookie of state.cookies ?? []) entry(cookie.domain).cookieCount++;
+  for (const [origin, storage] of Object.entries(state.localStorage ?? {})) {
+    entry(new URL(origin).hostname).storageKeyCount += Object.keys(storage).length;
+  }
+  return { name, domains: [...domains.values()].sort((a, b) => a.domain.localeCompare(b.domain)) };
+}
+
 // ---------------------------------------------------------------------------
 // Credential helpers (duplicated minimally to avoid circular deps with index)
 // ---------------------------------------------------------------------------
@@ -89,11 +181,15 @@ async function loadCreds(file: string, passphrase?: string): Promise<Credential[
 
 async function saveCreds(creds: Credential[], file: string, passphrase?: string): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
+  await fs.chmod(file, 0o600).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+  });
   if (passphrase) {
-    await fs.writeFile(file, encryptJSON(creds, passphrase));
+    await fs.writeFile(file, encryptJSON(creds, passphrase), { mode: 0o600 });
   } else {
-    await fs.writeFile(file, JSON.stringify(creds, null, 2));
+    await fs.writeFile(file, JSON.stringify(creds, null, 2), { mode: 0o600 });
   }
+  await fs.chmod(file, 0o600);
 }
 
 // ---------------------------------------------------------------------------
@@ -117,20 +213,11 @@ async function handlePush(payload: PushPayload, config: RelayConfig): Promise<Pu
   // --- Cookies + localStorage → profile JSON ---
   // Defense in depth: assertSafeProfilePath validates the name AND confirms
   // the resolved path stays under profilesDir (catches bugs in the regex).
-  const profilePath = assertSafeProfilePath(profileName, config.profilesDir);
-  await fs.mkdir(config.profilesDir, { recursive: true });
-
-  // Load existing profile state if it exists, merge new data
-  let existingState: {
-    cookies?: RelayCookie[];
-    localStorage?: Record<string, Record<string, string>>;
-    savedAt?: string;
-  } = {};
+  let existingState: ProfileState = {};
   try {
-    const raw = await fs.readFile(profilePath, "utf8");
-    existingState = JSON.parse(raw);
-  } catch {
-    // New profile
+    existingState = await readProfile(profileName, config);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
 
   // Merge cookies: new cookies override existing ones (by name+domain+path)
@@ -163,7 +250,7 @@ async function handlePush(payload: PushPayload, config: RelayConfig): Promise<Pu
     savedAt: new Date().toISOString(),
     pushedFrom: "extension",
   };
-  await fs.writeFile(profilePath, JSON.stringify(state, null, 2));
+  await writeProfile(profileName, state, config);
 
   // --- Credentials ---
   let credentialSaved = false;
@@ -197,7 +284,7 @@ async function handlePush(payload: PushPayload, config: RelayConfig): Promise<Pu
     message:
       `Profile "${profileName}" updated with ${cookies?.length ?? 0} cookies` +
       (localStorage ? `, localStorage from ${Object.keys(localStorage).length} origin(s)` : "") +
-      (credentialSaved ? `, credential "${credentials!.name}" saved` : ""),
+      (credentialSaved ? ", credential saved" : ""),
   };
 }
 
@@ -236,23 +323,27 @@ function jsonResponse(res: http.ServerResponse, status: number, body: unknown): 
   const json = JSON.stringify(body);
   res.writeHead(status, {
     "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Cache-Control": "no-store",
   });
   res.end(json);
 }
 
 export function startRelayServer(config: RelayConfig): http.Server {
+  // Each update reads and writes a complete file. Concurrent updates can discard data.
+  let mutations: Promise<unknown> = Promise.resolve();
+  const mutate = <T>(operation: () => Promise<T>): Promise<T> => {
+    const next = mutations.then(operation);
+    mutations = next.catch(() => {});
+    return next;
+  };
   const srv = http.createServer(async (req, res) => {
-    // CORS preflight
+    if (!/^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i.test(req.headers.host ?? "")) {
+      jsonResponse(res, 403, { error: "Forbidden host." });
+      return;
+    }
+    // Extension host permissions give access without CORS.
     if (req.method === "OPTIONS") {
-      res.writeHead(204, {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-        "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-        "Access-Control-Max-Age": "86400",
-      });
+      res.writeHead(204);
       res.end();
       return;
     }
@@ -265,8 +356,8 @@ export function startRelayServer(config: RelayConfig): http.Server {
       return;
     }
 
-    // POST /push — requires auth
-    if (req.method === "POST" && url.pathname === "/push") {
+    const profilesRoute = url.pathname === "/profiles" || url.pathname.startsWith("/profiles/");
+    if ((req.method === "POST" && url.pathname === "/push") || profilesRoute) {
       // Auth check — timing-safe to avoid leaking the expected secret length
       // or the position of the first mismatch byte.
       const authHeader = req.headers.authorization;
@@ -277,13 +368,71 @@ export function startRelayServer(config: RelayConfig): http.Server {
       }
 
       try {
-        const body = await readBody(req);
-        const payload = JSON.parse(body) as PushPayload;
-        const result = await handlePush(payload, config);
-        jsonResponse(res, 200, result);
+        if (req.method === "POST" && url.pathname === "/push") {
+          const payload = pushSchema.parse(JSON.parse(await readBody(req)));
+          const result = await mutate(() => handlePush(payload, config));
+          jsonResponse(res, 200, result);
+          return;
+        }
+        await mutations;
+        if (req.method === "GET" && url.pathname === "/profiles") {
+          const files = await fs
+            .readdir(config.profilesDir)
+            .catch((error: NodeJS.ErrnoException) => {
+              if (error.code === "ENOENT") return [];
+              throw error;
+            });
+          const names = files
+            .filter((file) => file.endsWith(".json"))
+            .map((file) => file.slice(0, -5))
+            .filter(isValidProfileName)
+            .sort();
+          const profiles = [];
+          for (const name of names)
+            profiles.push(summarizeProfile(name, await readProfile(name, config)));
+          jsonResponse(res, 200, { profiles });
+          return;
+        }
+        const segments = url.pathname.split("/").slice(1).map(decodeURIComponent);
+        const name = segments[1];
+        if (!isValidProfileName(name ?? "")) {
+          jsonResponse(res, 400, {
+            error: "Use a profile name with 1-64 letters, digits, hyphens, or underscores.",
+          });
+          return;
+        }
+        if (req.method === "GET" && segments.length === 2) {
+          jsonResponse(res, 200, summarizeProfile(name, await readProfile(name, config)));
+          return;
+        }
+        if (req.method === "DELETE" && segments.length === 4 && segments[2] === "domains") {
+          const domain = normalizeDomain(domainSchema.parse(segments[3]));
+          const summary = await mutate(async () => {
+            const state = await readProfile(name, config);
+            state.cookies = (state.cookies ?? []).filter(
+              (cookie) => normalizeDomain(cookie.domain) !== domain,
+            );
+            state.localStorage = Object.fromEntries(
+              Object.entries(state.localStorage ?? {}).filter(
+                ([origin]) => new URL(origin).hostname.toLowerCase() !== domain,
+              ),
+            );
+            state.savedAt = new Date().toISOString();
+            await writeProfile(name, state, config);
+            return summarizeProfile(name, state);
+          });
+          jsonResponse(res, 200, summary);
+          return;
+        }
+        jsonResponse(res, 404, { error: "Not found. Check the relay endpoint." });
       } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        jsonResponse(res, 400, { error: msg });
+        // Parse errors can include sign-in values or private file paths.
+        const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
+        jsonResponse(res, missing ? 404 : 400, {
+          error: missing
+            ? "Profile not found. Refresh the profile list."
+            : "Request or saved profile is invalid. Check the profile name and data; check relay file permissions.",
+        });
       }
       return;
     }
