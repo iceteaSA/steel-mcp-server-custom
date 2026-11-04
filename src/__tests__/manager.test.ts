@@ -24,6 +24,7 @@ const mockEnv: Env = {
   LANE_IDLE_MS: 900000,
   LANE_DRAIN_MS: 5000,
   LANE_MAX: 8,
+  STEEL_HIDDEN_TEXT: "off",
   BROWSER_MODE: "steel",
   STEEL_API_KEY: undefined,
   STEEL_BASE_URL: "http://localhost:3000",

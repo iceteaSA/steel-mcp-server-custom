@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { clipText } from "./page-output.js";
 import type { Env } from "./manager.js";
 
 /**
@@ -105,7 +106,7 @@ export async function llmJson<T>(env: Env, opts: LlmJsonOptions<T>): Promise<T> 
       if (!res.ok) {
         const text = await res.text();
         throw new Error(
-          `LLM request failed: ${res.status} ${res.statusText}. Body: ${text.slice(0, 500)}`,
+          `LLM request failed: ${res.status} ${res.statusText}. Body: ${clipText(text, 500)}`,
         );
       }
 
@@ -117,7 +118,7 @@ export async function llmJson<T>(env: Env, opts: LlmJsonOptions<T>): Promise<T> 
         parsed = JSON.parse(content);
       } catch (err) {
         const error = new Error(
-          `Invalid JSON returned by LLM: ${(err as Error).message}. Content: ${content.slice(0, 500)}`,
+          `Invalid JSON returned by LLM: ${(err as Error).message}. Content: ${clipText(content, 500)}`,
         );
         if (attempt === 0) {
           firstParseError = error;
@@ -133,7 +134,7 @@ export async function llmJson<T>(env: Env, opts: LlmJsonOptions<T>): Promise<T> 
         return opts.schema.parse(parsed);
       } catch (err) {
         const error = new Error(
-          `LLM response failed schema validation: ${(err as Error).message}. Content: ${content.slice(0, 500)}`,
+          `LLM response failed schema validation: ${(err as Error).message}. Content: ${clipText(content, 500)}`,
         );
         if (attempt === 0) {
           firstParseError = error;
@@ -152,7 +153,7 @@ export async function llmJson<T>(env: Env, opts: LlmJsonOptions<T>): Promise<T> 
           content: [
             `Your previous response could not be parsed or did not match the requested schema.`,
             `Error: ${(err as Error).message}`,
-            `Raw response: ${(firstRaw || "").slice(0, 1000)}`,
+            `Raw response: ${clipText(firstRaw || "", 1000)}`,
             `Return ONLY valid JSON matching the schema, no prose.`,
           ].join("\n"),
         });
@@ -178,9 +179,9 @@ export async function llmJson<T>(env: Env, opts: LlmJsonOptions<T>): Promise<T> 
     [
       `LLM request failed after one repair retry.`,
       `First error: ${firstParseError?.message ?? ""}`,
-      `First raw response: ${firstRaw.slice(0, 500)}`,
+      `First raw response: ${clipText(firstRaw, 500)}`,
       `Second error: ${secondParseError?.message ?? ""}`,
-      `Second raw response: ${secondRaw.slice(0, 500)}`,
+      `Second raw response: ${clipText(secondRaw, 500)}`,
     ].join("\n"),
   );
 }

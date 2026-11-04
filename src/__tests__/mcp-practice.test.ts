@@ -57,7 +57,12 @@ const expectedToolNames = [
 
 function specs(mgr: Partial<BrowserManager> = {}, overrides: Record<string, string> = {}) {
   const tools: ToolSpec[] = [];
-  const env = EnvSchema.parse({ BROWSER_MODE: "local", RELAY_PORT: "0", ...overrides });
+  const env = EnvSchema.parse({
+    BROWSER_MODE: "local",
+    RELAY_PORT: "0",
+    STEEL_HIDDEN_TEXT: "off",
+    ...overrides,
+  });
   for (const register of Object.values(groups))
     register((tool) => tools.push(tool), mgr as BrowserManager, env);
   return tools;

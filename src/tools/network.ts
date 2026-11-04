@@ -1,4 +1,5 @@
 import fs from "fs/promises";
+import { clipText } from "../page-output.js";
 import path from "path";
 import { z } from "zod";
 import type { BrowserContext } from "patchright";
@@ -571,7 +572,7 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
           const bodyText = await mgr.getResponseBody(targetId);
           const capped =
             bodyText.length > 10000
-              ? bodyText.slice(0, 10000) + "\n[TRUNCATED at 10000 chars]"
+              ? clipText(bodyText, 10000) + "\n[TRUNCATED at 10000 chars]"
               : bodyText;
           if (Buffer.byteLength(capped) > env.MAX_INLINE_BYTES) {
             const filePath = await writeToFile(

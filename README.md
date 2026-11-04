@@ -89,6 +89,7 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 | `SETTLE_TIMEOUT_MS` | `5000` | Max time to wait for network idle + DOM quiet after actions. `0` disables |
 | `GLOBAL_WAIT_SECONDS` | `0` | Seconds to wait after each action tool |
 | `OPTIMIZE_BANDWIDTH` | `false` | Block images/fonts/CSS for text-only scraping |
+| `STEEL_HIDDEN_TEXT` | `drop` | Hidden-text policy for `snapshot`, `get_page_text`, and `extract`: `drop`, `flag`, or `off` |
 | `MAX_INLINE_BYTES` | `512000` | Auto-downgrade to file mode above this size |
 | `OUTPUT_DIR` | `/tmp/steel-mcp` | Directory for file outputs, profiles, credentials |
 | `PROFILES_DIR` | `$OUTPUT_DIR/profiles` | Profile state persistence directory |
@@ -273,7 +274,20 @@ Paginated `maxChars` must be from 1 to 64,000. Continuation is not available wit
 
 All MCP text blocks have an untrusted-content fence. Page text cannot close this fence with a forged delimiter.
 Text and serialized structured data share a 512,000-byte UTF-8 budget, including fences and truncation notices.
-Per-tool `maxChars` controls the payload before this envelope. Structured results are also untrusted data.
+
+Per-tool `maxChars` controls the payload before this envelope. Page-controlled string values in structured results have the same fence. Enum values, cursors, file paths, and server metadata stay unchanged.
+
+JSON property names stay unchanged. This also applies to page-controlled keys from `evaluate`. Read these keys as untrusted data too.
+
+`STEEL_HIDDEN_TEXT=drop` removes non-rendered text from a detached copy during content reads. The guard checks CSS display, visibility, opacity, text size and colour, element geometry, and full-clip shapes. It keeps `aria-hidden` text, standard clipped screen-reader text, and content in scroll containers. It does not change the live DOM, screenshots, or interaction targets.
+
+In snapshots, a hidden string stays unchanged if a person can also see that string. Thus, button names and hyperlink names stay unchanged. The hidden copy adds no new text in this case.
+
+`flag` keeps hidden text with `[hidden]` markers. `off` uses the previous text collection path. The Unicode control strip and trust fences stay active for these modes. The strip removes dangerous Unicode controls in all modes.
+
+Guarded results include `hidden: <count>` in their text. The count includes page-wide text, comment, hidden-label, and control-bearing text entries, not only the selected subtree. A structured `text` field also contains the count when that field is available. The guard does not add schema fields to list results.
+
+Complex CSS masks, image backgrounds, shadow trees, and page changes between capture and inspection can evade these checks. The guard does not replace the trust fence.
 
 These features adapt the focused-read, pagination, and provenance-fence methods from upstream v2.0.1 under the existing MIT license.
 
