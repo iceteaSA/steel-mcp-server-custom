@@ -178,6 +178,31 @@ describe("non-browser tools", () => {
     }
   });
 
+  it("README inventory equals tools/list including gated AI tools", async () => {
+    const allTools = new MCPTestClient({
+      BROWSER_MODE: "local",
+      ACT_LLM_BASE_URL: "http://127.0.0.1:1",
+      ACT_LLM_MODEL: "inventory-only",
+      RELAY_PORT: "0",
+    });
+    try {
+      await allTools.initialize();
+      const response = await allTools.call(1_000, "tools/list");
+      const names = response.result?.tools?.map((tool) => tool.name).sort() ?? [];
+      const readme = await fs.readFile(path.resolve(__dirname, "../../README.md"), "utf8");
+      const section = readme.split(/^## Tools /m)[1]?.split(/^## /m)[0] ?? "";
+      const documented = [...section.matchAll(/^\| `([a-z_]+)` \|/gm)]
+        .map((match) => match[1])
+        .sort();
+      expect(names).toHaveLength(43);
+      expect(documented).toEqual(names);
+      expect(new Set(documented).size).toBe(documented.length);
+      expect(readme).toContain("41 default, 43 with AI tools");
+    } finally {
+      allTools.kill();
+    }
+  });
+
   it("credentials() with no args returns empty list", async () => {
     const r = await client.tool(101, "credentials");
     expect(client.getText(r)).toContain("No stored credentials");

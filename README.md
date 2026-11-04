@@ -8,11 +8,11 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 
 ## Features
 
-- **34 browser tools** (36 with the optional AI tools enabled) — snapshot-first interaction (a11y tree + ref targeting), navigate, click, fill forms, screenshot, extract text/links/attrs, evaluate JS, scroll, history, wait, dialog handling, file uploads, key presses, network inspection, batch URL fetching, declarative structured extraction. `act` and `extract_ai` register only when `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL` are set.
+- **41 browser tools** (43 with AI tools). Use snapshots, navigation, forms, screenshots, extraction, network inspection, and owner-scoped tabs. `act` and `extract_ai` require `ACT_LLM_BASE_URL` and `ACT_LLM_MODEL`.
 - **Patchright browser engine** — drops the `Runtime.enable` CDP fingerprint that vanilla Playwright leaks; native binary stays compatible with all standard Playwright page APIs
 - **Snapshot-first paradigm** — `snapshot` returns an accessibility tree with stable `[ref=eN]` tokens; refs feed `click`/`fill`/`scroll`/`get_attrs`/`extract`/`press_key` directly without re-discovering selectors
 - **MCP 2025 best practices** — `server.registerTool` with `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` annotations and `outputSchema` → `structuredContent` on JSON tools
-- **Toolset filtering** — `core` / `tabs` / `extract` / `media` / `network` / `auth` / `debug` / `ai` groups via `--toolsets` CLI flag or `TOOLSETS` env, to trim the tool surface for context-budget-constrained agents
+- **Toolset filtering**: select `core`, `tabs`, `extract`, `media`, `network`, `auth`, `debug`, `ai`, or `intercept` through `--toolsets` or `TOOLSETS`. The server always includes `core`.
 - **Concurrent-agent safe** — owner-tagged tabs, `tabId` + `force` on every page tool, per-tab ownership guard with explicit override, idle sweeper, scoped cleanup
 - **Iframe targeting** — `click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot` accept `frame: "<name>" | "<url-substring>" | "<index>"` to reach into child frames
 - **TLS-impersonated batch fetch** — `fetch_urls(mode: "auto"|"http"|"browser")` uses `impit` for fast HTTP first, auto-escalates to a real browser tab when the response looks like an SPA shell
@@ -101,14 +101,14 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 | `RELAY_BIND_ADDR` | `127.0.0.1` | Address the relay HTTP server binds to. Use `0.0.0.0` only behind a reverse proxy/firewall |
 | `RELAY_SECRET` | — | Shared secret for relay auth (Bearer token). Required when relay enabled |
 | `RELAY_PUBLIC_URL` | — | Public relay URL shown in `start_browser` (e.g. `http://your-host:3001`) |
-| `TOOLSETS` | all | Comma-separated toolset groups: `core,tabs,extract,media,network,auth,debug,ai`. Overridden by `--toolsets` |
+| `TOOLSETS` | all | Comma-separated toolsets: `core,tabs,extract,media,network,auth,debug,ai,intercept`. The `--toolsets` flag takes precedence. |
 | `ACT_LLM_BASE_URL` | — | OpenAI-compatible endpoint for `act` / `extract_ai`. Required to enable those tools |
 | `ACT_LLM_MODEL` | — | Model name sent to the LLM endpoint. Required to enable `act` / `extract_ai` |
 | `ACT_LLM_API_KEY` | — | Optional API key for the LLM endpoint. Unset = no `Authorization` header (ollama-style) |
 
 ---
 
-## Tools (34 default, 36 with AI tools)
+## Tools (41 default, 43 with AI tools)
 
 All page-interacting tools accept an optional `tabId`. Omit for current-active-tab; pass it for concurrent-agent safety. `click`, `fill`, `scroll`, `wait_for`, `get_attrs`, `extract`, `press_key`, and `upload_file` also accept `ref: "eN"` from `snapshot` in place of a CSS `selector`. `click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot` accept `frame` to target an iframe by name, URL substring, or 0-based child index.
 
@@ -126,6 +126,7 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 | `close_tabs` | Close by tabId, owner, or both |
 | **Extraction** | |
 | `snapshot` | Accessibility tree with `[ref=eN]` tokens. The preferred first look — refs feed interaction tools directly. Default maxChars: 8K |
+| `page_state` | Return the URL, title, scroll position, and element counts without a full snapshot. |
 | `get_page_text` | Text extraction with smart content area fallback. `extractContent` for Readability article extraction. `format: "markdown"` via turndown. `matchAll` for list scraping. Default maxChars: 5K |
 | `get_links` | Extract `[{text, href}]` with optional `urlPattern` filter. Accepts `ref` |
 | `get_attrs` | Extract specific attributes from matched elements (by `selector` or `ref`) |
@@ -136,6 +137,10 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 | `extract` | Declarative structured extraction: CSS selector + field map → JSON. Accepts `ref` |
 | **Interaction** | |
 | `click` | Click by `selector` or `ref`. Optional `waitFor`/`waitForText`. `frame` targets an iframe. Reports navigation + snapshot-diff feedback |
+| `click_at` | Click viewport coordinates. Supports mouse buttons and multiple clicks. |
+| `mouse_move` | Move the mouse to viewport coordinates. |
+| `mouse_down` | Press a mouse button at the current position. |
+| `mouse_up` | Release a mouse button at the current position. |
 | `fill` | Fill form fields by `selector` or `ref`. Auto-detects text/select/checkbox/radio. `frame` targets an iframe |
 | `upload_file` | Upload files via `<input type=file>` or a custom upload button (`viaChooser: true`). Absolute host paths only |
 | `handle_dialog` | Pre-arm the dialog policy (`accept`/`dismiss`, optional `promptText`) before an action that triggers alert/confirm/prompt |
@@ -143,6 +148,8 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 | **Network** | |
 | `cookies` | Get or set browser cookies |
 | `get_network` | Inspect request/response traffic (filter by urlPattern/resourceType/status). `body: true` or `requestId` fetches a single response body |
+| `export_har` | Export captured network events as HAR 1.2. Requires an owner or tab ID. |
+| `intercept` | List, fulfill, abort, continue, or remove per-tab request routes. Routes respect tab ownership. |
 | **Sessions & Auth** | |
 | `create_profile` | Isolated BrowserContext with auto-restore |
 | `list_profiles` | Active + saved profiles |
@@ -158,6 +165,8 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 | **AI (optional — requires `ACT_LLM_BASE_URL` + `ACT_LLM_MODEL`)** | |
 | `act` | LLM-driven bounded micro-loop over a snapshot (1–5 actions) |
 | `extract_ai` | LLM structured extraction from the current page (text or html, optional JSON Schema) |
+
+The unit suite compares this inventory with the actual MCP `tools/list`, with both AI tools enabled.
 
 ---
 
