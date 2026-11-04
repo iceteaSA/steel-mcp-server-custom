@@ -162,6 +162,13 @@ it("rejects another profile and another storage origin", async () => {
   expect(updates).toEqual([]);
 });
 
+it("keeps a request pending after a rejected scope check so the operator can retry correctly", async () => {
+  const request = await store.create(caller, input);
+  expect((await post(request.id, { ...state, profile: "other" })).status).toBe(400);
+  expect((await store.status(caller, request.id)).status).toBe("pending");
+  expect((await post(request.id)).status).toBe(200);
+});
+
 it("requires explicit remember opt-in and supports listing and revocation", async () => {
   const request = await store.create(caller, input);
   expect((await post(request.id)).status).toBe(200);
