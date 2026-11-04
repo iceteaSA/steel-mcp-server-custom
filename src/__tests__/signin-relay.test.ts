@@ -90,6 +90,18 @@ it("lists pending sign-in requests without exposing saved state", async () => {
   expect(await response.json()).toEqual({ requests: [] });
 });
 
+it("accepts explicit IP-origin state but rejects an address suffix as a parent domain", async () => {
+  const site = "http://127.0.0.1:8123";
+  const request = await store.create(caller, { ...input, site });
+  const payload = { profile: "work", cookies: [{ ...state.cookies[0], domain: "0.0.1" }], localStorage: { [site]: { token: "CANARY_PRIVATE" } } };
+  const rejected = await post(request.id, payload);
+  expect(rejected.status).toBe(400);
+  expect(await rejected.json()).toEqual({ error: "signin_site_mismatch" });
+  const accepted = await post(request.id, { ...payload, cookies: [{ ...state.cookies[0], domain: "127.0.0.1" }] });
+  expect(accepted.status).toBe(200);
+  expect(await store.status(caller, request.id)).toMatchObject({ status: "approved", counts: { cookieCount: 1, storageKeyCount: 1 } });
+});
+
 it("rejects an unknown request id instead of writing a profile", async () => {
   const response = await fetch(origin + "/signin/unknown/push", {
     method: "POST",

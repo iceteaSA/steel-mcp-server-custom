@@ -57,6 +57,14 @@ it("merges pending duplicates, persists them with mode 0600, and isolates caller
   restored.close();
 });
 
+it("accepts explicit localhost and IP origins with exact-host scope and no parent walk", () => {
+  for (const [site, host] of [["http://localhost:8123", "localhost"], ["http://127.0.0.1:8123", "127.0.0.1"], ["http://[::1]:8123", "[::1]"]]) {
+    expect(normalizeSite(site)).toEqual({ site, host, domains: [host] });
+  }
+  expect(() => normalizeSite("localhost")).toThrow("invalid_site");
+  expect(() => normalizeSite("127.0.0.1")).toThrow("invalid_site");
+});
+
 it("enforces three pending requests and ten requests per caller per hour without charging merges", async () => {
   for (let index = 0; index < 3; index++)
     await store.create(caller, { ...input, profile: `p${index}` });
