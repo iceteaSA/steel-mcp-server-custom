@@ -44,13 +44,19 @@ async function loadResults() {
     : "";
 }
 async function loadSite() {
-  site = await send("site");
+  // The popup has a real current window; the service worker does not, so send the tab ID.
+  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  site = await send("site", { tabId: tab?.id });
   $("currentDomain").textContent = site?.domain || "No supported site open";
   $("siteCounts").textContent = site
     ? site.granted
       ? `${site.cookieCount} cookies · ${site.storageKeyCount ?? "unavailable"} storage keys · granted domains only`
       : "Grant site access to count and transfer its sign-in data."
-    : "Open an HTTP or HTTPS tab, then reopen this popup.";
+    : !tab
+      ? "No active tab found. Open an HTTP or HTTPS tab, then reopen this popup."
+      : !tab.url
+        ? "The browser did not give this tab's address. Open the popup from the toolbar button on that tab."
+        : "This tab is not an HTTP or HTTPS page. Open one, then reopen this popup.";
   $("grantSite").hidden = !site || site.granted;
   const previousParent = $("parentDomain").value;
   $("parentDomain").replaceChildren();

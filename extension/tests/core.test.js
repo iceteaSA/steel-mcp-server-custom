@@ -132,6 +132,37 @@ describe("transfer boundaries", () => {
     expect(await currentTab()).toBeNull();
   });
 
+  it("uses the popup's tab ID instead of a window query", async () => {
+    const queries = [];
+    globalThis.chrome = {
+      runtime: { id: "fixture-extension" },
+      tabs: {
+        get: async (id) => (id === 7 ? { id: 7, url: "https://app.example.com/login" } : null),
+        query: async (query) => {
+          queries.push(query);
+          return [{ id: 1, url: "https://other-window.example" }];
+        },
+      },
+    };
+    expect((await currentTab(7))?.url).toBe("https://app.example.com/login");
+    expect(queries).toEqual([]);
+  });
+
+  it("returns no site for a non-HTTP tab ID or a closed tab", async () => {
+    globalThis.chrome = {
+      runtime: { id: "fixture-extension" },
+      tabs: {
+        get: async (id) => {
+          if (id === 8) return { id: 8, url: "vivaldi://startpage" };
+          throw new Error("No tab with id");
+        },
+        query: async () => [{ id: 1, url: "https://other-window.example" }],
+      },
+    };
+    expect(await currentTab(8)).toBeNull();
+    expect(await currentTab(9)).toBeNull();
+  });
+
   it("allows HTTPS remote relays and HTTP loopback only", () => {
     expect(relayUrl("https://relay.example.com:3001")).toBe("https://relay.example.com:3001");
     expect(relayUrl("http://localhost:3001")).toBe("http://localhost:3001");

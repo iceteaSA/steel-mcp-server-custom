@@ -211,7 +211,7 @@ async function handleMessage(message) {
       );
     }
     case "site": {
-      const tab = await currentTab();
+      const tab = await currentTab(message.tabId);
       if (!tab?.url) return null;
       const url = siteUrl(tab.url);
       const granted = await chrome.permissions.contains({ origins: [hostPattern(url.href)] });

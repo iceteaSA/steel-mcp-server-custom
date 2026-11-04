@@ -154,8 +154,12 @@ export function convertCookie(cookie) {
   };
 }
 
-export async function currentTab() {
-  const [active] = await chrome.tabs.query({ active: true, currentWindow: true });
+export async function currentTab(tabId) {
+  // The popup sends its own active tab ID. In the service worker, "currentWindow" has no window of its own and
+  // can resolve to a different browser window.
+  const active = tabId
+    ? await chrome.tabs.get(tabId).catch(() => null)
+    : (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
   if (active?.url?.match(/^https?:/)) return active;
   return null;
 }
