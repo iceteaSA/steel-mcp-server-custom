@@ -136,6 +136,32 @@ afterEach(() => {
 });
 
 describe("MV3 transfer worker", () => {
+  it("retrieves pending requests without returning cookie or storage values", async () => {
+    const pending = [
+      { id: "request-one", site: "https://example.com", profile: "work", reason: "Read" },
+    ];
+    globalThis.fetch = async (url) => {
+      expect(url).toBe("http://localhost:3001/signin");
+      return Response.json({ requests: pending });
+    };
+    expect(await message({ type: "signin-pending" })).toEqual({
+      ok: true,
+      data: { requests: pending },
+    });
+  });
+
+  it("denies only the selected request and preserves an operator note", async () => {
+    const response = await message({
+      type: "signin-deny",
+      id: "request-one",
+      note: "Wrong account",
+    });
+    expect(response.ok).toBe(true);
+    expect(requests).toHaveLength(1);
+    expect(requests[0].url).toBe("http://localhost:3001/signin/request-one/deny");
+    expect(JSON.parse(requests[0].input.body)).toEqual({ note: "Wrong account" });
+  });
+
   it("revokes a killed run at its recorded deadline after worker restart", () => {
     const child = spawnSync(
       process.execPath,

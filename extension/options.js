@@ -7,6 +7,8 @@ import {
   DISCOVERY_ORIGINS,
   send,
 } from "./core.js";
+import { mountSigninLists } from "./signin-ui.js";
+mountSigninLists(document);
 const $ = (id) => document.getElementById(id);
 function status(text, error = false) {
   $("status").textContent = text;

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { readFile } from "node:fs/promises";
+import * as core from "../core.js";
 import {
   DEFAULTS,
   requestAccess,
@@ -17,9 +18,111 @@ import {
 
 const originalChrome = globalThis.chrome;
 const originalFetch = globalThis.fetch;
+const signin = {
+  id: "request-one",
+  site: "https://login.example.com",
+  domains: ["login.example.com", "example.com"],
+  profile: "work",
+  expires: Date.now() + 300000,
+};
 afterEach(() => {
   globalThis.chrome = originalChrome;
   globalThis.fetch = originalFetch;
+});
+
+describe("request-scoped sign-in transfer", () => {
+  it("requests exact hosts on the click before any asynchronous read, then pushes only scoped state", async () => {
+    const calls = [];
+    globalThis.chrome = {
+      storage: {
+        local: {
+          get: async () => ({ serverUrl: "http://localhost:3001", serverSecret: "fixture-only" }),
+        },
+      },
+      permissions: {
+        request: (input) => {
+          calls.push({ permission: input });
+          return Promise.resolve(true);
+        },
+        contains: async () => true,
+      },
+      cookies: {
+        getAll: async () => {
+          calls.push("cookies");
+          return [
+            { name: "sid", value: "CANARY_PRIVATE", domain: ".example.com", path: "/" },
+            { name: "sibling", value: "CANARY_PRIVATE", domain: "sibling.example.com", path: "/" },
+            { name: "public", value: "CANARY_PRIVATE", domain: "com", path: "/" },
+          ];
+        },
+      },
+      tabs: { query: async () => [{ id: 1, url: "https://login.example.com/private" }] },
+      scripting: {
+        executeScript: async () => [
+          { result: { keyCount: 1, entries: { token: "CANARY_PRIVATE" } } },
+        ],
+      },
+    };
+    globalThis.fetch = async (url, options) => {
+      calls.push({ url, body: JSON.parse(options.body) });
+      return Response.json({ status: "approved", cookieCount: 1, storageKeyCount: 1 });
+    };
+    const transfer = core.approveSignin(signin, true);
+    expect(calls).toEqual([
+      { permission: { origins: ["*://login.example.com/*", "*://example.com/*"] } },
+    ]);
+    expect(await transfer).toMatchObject({ status: "approved" });
+    expect(calls.at(-1)).toEqual({
+      url: "http://localhost:3001/signin/request-one/push",
+      body: {
+        profile: "work",
+        cookies: [{ name: "sid", value: "CANARY_PRIVATE", domain: ".example.com", path: "/" }],
+        localStorage: { "https://login.example.com": { token: "CANARY_PRIVATE" } },
+        remember: true,
+      },
+    });
+  });
+
+  it("sends no data when request host permission is denied", async () => {
+    let reads = 0;
+    globalThis.chrome = {
+      permissions: { request: async () => false },
+      cookies: {
+        getAll: async () => {
+          reads++;
+          return [];
+        },
+      },
+    };
+    await expect(core.approveSignin(signin, false)).rejects.toThrow("not granted");
+    expect(reads).toBe(0);
+  });
+
+  it("previews cookie names and storage counts without returning values", async () => {
+    globalThis.chrome = {
+      permissions: { contains: async () => true },
+      cookies: {
+        getAll: async () => [
+          { name: "sid", value: "CANARY_PRIVATE", domain: ".example.com", path: "/" },
+        ],
+      },
+      tabs: { query: async () => [{ id: 1, url: "https://login.example.com/private" }] },
+      scripting: {
+        executeScript: async (input) => {
+          expect(input.args[1]).toBe(true);
+          return [{ result: { keyCount: 2 } }];
+        },
+      },
+    };
+    const preview = await core.previewSignin(signin);
+    expect(preview).toEqual({
+      cookies: [{ name: "sid", domain: ".example.com" }],
+      cookieCount: 1,
+      storage: [{ origin: "https://login.example.com", keyCount: 2 }],
+      storageAvailable: true,
+    });
+    expect(JSON.stringify(preview)).not.toContain("CANARY_PRIVATE");
+  });
 });
 
 describe("explicit host permissions", () => {
