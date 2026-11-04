@@ -190,7 +190,7 @@ it("sends one high-priority ntfy message after 60 seconds with a fake clock and 
   try {
     await notified.create(caller, {
       ...input,
-      reason: "Read https://example.com/private-path?token=CANARY_PRIVATE " + "x".repeat(200),
+      reason: "mailto:CANARY_MAILTO@example.com example.com/secret/path?token=CANARY_PRIVATE Read https://example.com/private-path?token=CANARY_PRIVATE " + "x".repeat(200),
     });
     now += 59_999;
     await notified.tick();
@@ -199,9 +199,11 @@ it("sends one high-priority ntfy message after 60 seconds with a fake clock and 
     await notified.tick();
     expect(messages).toHaveLength(1);
     expect(messages[0].priority).toBe("high");
-    expect(messages[0].text).toContain(
-      "agent asks for https://login.example.com sign-in into profile work: Read https://example.com",
-    );
+    expect(messages[0].text).toBe("agent asks for https://login.example.com sign-in into profile work");
+    expect(messages[0].text).not.toContain("mailto:");
+    expect(messages[0].text).not.toContain("CANARY_MAILTO");
+    expect(messages[0].text).not.toContain("/secret/path");
+    expect(messages[0].text).not.toContain("Read");
     expect(messages[0].text).not.toContain("private-path");
     expect(messages[0].text).not.toContain("CANARY_PRIVATE");
     now += 60_000;
