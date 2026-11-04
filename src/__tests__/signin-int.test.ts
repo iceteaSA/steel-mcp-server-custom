@@ -107,6 +107,13 @@ for (const mode of ["on", "off"] as const) {
             }),
           ),
         ).toContain("no_caller");
+      if (mode === "on") {
+        for (const name of ["request_signin", "signin_status", "cancel_signin"]) {
+          const missing = await call(f.client, undefined, name, name === "request_signin" ? { site: "example.com", profile: "work", reason: "test" } : { id: "missing" });
+          expect(missing.isError).toBe(true);
+          expect(data(missing)).toEqual({ error: "no_caller" });
+        }
+      }
       const created = data(
         await call(f.client, "a", "request_signin", {
           site: "example.com",
@@ -192,6 +199,12 @@ for (const mode of ["on", "off"] as const) {
       expect(data(await call(f.client, "a", "cancel_signin", { id: next?.id }))?.status).toBe(
         "cancelled",
       );
+      const repeated = await call(f.client, "a", "cancel_signin", { id: next?.id });
+      expect(repeated.isError).not.toBe(true);
+      expect(data(repeated)?.status).toBe("cancelled");
+      const alreadyApproved = await call(f.client, "a", "cancel_signin", { id });
+      expect(alreadyApproved.isError).not.toBe(true);
+      expect(data(alreadyApproved)?.status).toBe("approved");
       expect((await call(f.client, undefined, "list_profiles")).isError).not.toBe(true);
       expect(JSON.stringify(await call(f.client, undefined, "list_profiles"))).not.toContain(
         ".signin-state",
@@ -294,6 +307,16 @@ test("INT live profile pushes update only holding lane contexts; absent membersh
     SETTLE_TIMEOUT_MS: "0",
   });
   const root = new BrowserManager(env);
+  const laneManagers: BrowserManager[] = [];
+  const selected: BrowserManager[] = [];
+  const createLane = root.createLane.bind(root);
+  root.createLane = async (...args: Parameters<BrowserManager["createLane"]>) => {
+    const lane = await createLane(...args);
+    laneManagers.push(lane);
+    const apply = lane.applyProfileUpdated.bind(lane);
+    lane.applyProfileUpdated = async (profile) => { selected.push(lane); return apply(profile); };
+    return lane;
+  };
   Object.assign(root, {
     _connectSteel: async () => {
       Object.assign(root, { browser, browserContext: operator });
@@ -355,6 +378,8 @@ test("INT live profile pushes update only holding lane contexts; absent membersh
       .flatMap((context) => context.pages())
       .find((page) => page.url() === origin + "/b")!;
     expect((await push("work", "CANARY_LIVE")).liveApplied).toBe(true);
+    expect(selected).toEqual([laneManagers[0]]);
+    expect(selected).not.toContain(laneManagers[1]);
     expect(await a.context().cookies()).toContainEqual(
       expect.objectContaining({ name: "sid", value: "CANARY_LIVE" }),
     );
@@ -369,6 +394,28 @@ test("INT live profile pushes update only holding lane contexts; absent membersh
         ?.localStorage,
     ).toContainEqual({ name: "token", value: "CANARY_UNVISITED" });
     expect(await b.context().cookies()).toEqual([]);
+    const originalNewPage = a.context().newPage.bind(a.context());
+    let enter!: () => void;
+    let release!: () => void;
+    const entered = new Promise<void>((resolve) => { enter = resolve; });
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    a.context().newPage = async () => { const page = await originalNewPage(); enter(); await gate; return page; };
+    try {
+      const pushing = push("work", "CANARY_RACE", unvisited);
+      await entered;
+      const saving = call(client, "a", "save_profile", { name: "work" });
+      await Bun.sleep(50);
+      release();
+      expect((await saving).isError).not.toBe(true);
+      expect((await pushing).liveApplied).toBe(true);
+      const saved = JSON.parse(await readFile(path.join(directory, "work.json"), "utf8"));
+      expect(saved.localStorage[unvisited]?.token).toBe("CANARY_RACE");
+      expect((await a.context().storageState()).origins.find((entry) => entry.origin === unvisited)?.localStorage).toContainEqual({ name: "token", value: "CANARY_RACE" });
+    } finally { release(); a.context().newPage = originalNewPage; }
+    await a.evaluate(() => localStorage.setItem("token", "CANARY_STALE"));
+    expect((await fetch(`http://127.0.0.1:${address.port}/push`, { method: "POST", headers: { Authorization: "Bearer fake-live-secret", "Content-Type": "application/json" }, body: JSON.stringify({ profile: "work", localStorage: { [origin]: { token: "CANARY_MANUAL" } } }) })).status).toBe(200);
+    expect((await call(client, "a", "save_profile", { name: "work" })).isError).not.toBe(true);
+    expect(JSON.parse(await readFile(path.join(directory, "work.json"), "utf8")).localStorage[origin].token).toBe("CANARY_MANUAL");
     const own = data(await call(client, "a", "list_profiles"))?.profiles as Array<{
       name: string;
       active: boolean;

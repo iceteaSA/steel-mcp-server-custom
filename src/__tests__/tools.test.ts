@@ -245,6 +245,7 @@ describe("non-browser tools", () => {
       expect(documented).toEqual(names);
       expect(new Set(documented).size).toBe(documented.length);
       expect(readme).toContain("45 default, 47 with AI tools");
+      expect(readme).toContain("**47 browser tools** (49 with AI tools) in lane mode");
     } finally {
       allTools.kill();
     }
