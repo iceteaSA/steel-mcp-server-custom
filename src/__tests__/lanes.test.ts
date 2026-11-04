@@ -98,6 +98,10 @@ function tab(result: Awaited<ReturnType<Client["callTool"]>>) {
   return Number(match![1]);
 }
 
+function structured(result: Awaited<ReturnType<Client["callTool"]>>) {
+  return result.structuredContent as Record<string, unknown> | undefined;
+}
+
 test("lane requests require SDK request metadata, while profile listing is stateless", async () => {
   const f = await fixture();
   try {
@@ -126,7 +130,7 @@ test("two callers isolate cookies, current tabs, labels, and foreign tab access"
     expect(text(await f.call("b", "close_tabs", { tabId: a }))).toContain("not_in_lane");
     expect(text(await f.call("b", "list_tabs", { tabId: a }))).toContain("not_in_lane");
     expect(text(await f.call("a", "list_tabs"))).not.toContain(`Tab ${b}`);
-    expect((await f.call("a", "list_tabs")).structuredContent?.tabs).toMatchObject([
+    expect(structured(await f.call("a", "list_tabs"))?.tabs).toMatchObject([
       { tabId: a, active: true },
     ]);
     expect(
@@ -143,9 +147,15 @@ test("popups remain in their context lane and the operator context is never adop
   try {
     await f.call("a", "new_tab");
     await f.call("b", "new_tab");
-    await f.call("a", "evaluate", { expression: "window.open('about:blank'); 'opened'" });
-    const a = (await f.call("a", "list_tabs")).structuredContent?.tabs as unknown[];
-    const b = (await f.call("b", "list_tabs")).structuredContent?.tabs as unknown[];
+    expect(
+      (
+        await f.call("a", "evaluate", {
+          expression: "(() => { window.open('about:blank'); return 'opened'; })()",
+        })
+      ).isError,
+    ).not.toBe(true);
+    const a = structured(await f.call("a", "list_tabs"))?.tabs as unknown[];
+    const b = structured(await f.call("b", "list_tabs"))?.tabs as unknown[];
     expect(a).toHaveLength(2);
     expect(b).toHaveLength(1);
     expect(f.operator.pages()).toHaveLength(1);
@@ -165,7 +175,7 @@ test("stop_browser cannot stop another lane even with force, and list_lanes hide
     expect(text(stopped)).toContain("NOTE");
     const lanes = await f.call("a", "list_lanes");
     expect(text(lanes)).not.toContain("secret-");
-    expect(lanes.structuredContent?.lanes).toHaveLength(2);
+    expect(structured(lanes)?.lanes).toHaveLength(2);
     await f.call("b", "close_lane");
     expect((await f.call("a", "stop_browser")).isError).not.toBe(true);
     expect(f.primary.isClosed()).toBe(false);
@@ -222,8 +232,8 @@ test("concurrent first callers create one Steel session and one context per call
   try {
     await Promise.all([f.call("a", "new_tab"), f.call("b", "new_tab"), f.call("a", "new_tab")]);
     expect(f.starts()).toBe(1);
-    expect((await f.call("a", "list_tabs")).structuredContent?.tabs).toHaveLength(2);
-    expect((await f.call("b", "list_tabs")).structuredContent?.tabs).toHaveLength(1);
+    expect(structured(await f.call("a", "list_tabs"))?.tabs).toHaveLength(2);
+    expect(structured(await f.call("b", "list_tabs"))?.tabs).toHaveLength(1);
   } finally {
     await f.close();
   }
@@ -275,8 +285,183 @@ test("STEEL_LANES off preserves caller-free shared tabs and legacy owner guards"
     expect(
       (await f.call("b", "evaluate", { tabId: id, force: true, expression: "1" })).isError,
     ).not.toBe(true);
-    expect((await f.call(undefined, "list_tabs")).structuredContent?.tabs).toHaveLength(2);
+    expect(structured(await f.call(undefined, "list_tabs"))?.tabs).toHaveLength(2);
   } finally {
+    await f.close();
+  }
+});
+
+test("queued implicit targeting stays on the admitted tab when new_tab changes current", async () => {
+  const f = await fixture();
+  const entered = barrier();
+  const release = barrier();
+  try {
+    const a = tab(await f.call("a", "new_tab"));
+    f.handle.register({
+      name: "implicit_probe",
+      title: "Implicit Probe",
+      description: "Check admitted target",
+      toolset: "core",
+      inputSchema: { hold: z.boolean().optional() },
+      annotations: {},
+      handler: async ({ hold }) => {
+        if (hold) {
+          entered.release();
+          await release.promise;
+        }
+        await f.mgr.getPage({});
+        return { content: [{ type: "text", text: String(f.mgr.resolveTab({})) }] };
+      },
+    });
+    const first = f.call("a", "implicit_probe", { hold: true });
+    await entered.promise;
+    const second = f.call("a", "implicit_probe");
+    await f.call("a", "new_tab");
+    release.release();
+    expect(text(await second)).toContain(String(a));
+    expect(text(await first)).toContain(String(a));
+  } finally {
+    release.release();
+    await f.close();
+  }
+});
+
+test("console read and clear affect only the caller lane", async () => {
+  const f = await fixture();
+  try {
+    f.handle.register({
+      name: "console_probe",
+      title: "Console Probe",
+      description: "Inject a console event",
+      toolset: "core",
+      inputSchema: { message: z.string() },
+      annotations: {},
+      handler: async ({ message }) => {
+        const page = await f.mgr.getPage();
+        (page as unknown as { emit(event: string, data: unknown): void }).emit("console", {
+          type: () => "log",
+          text: () => message,
+          location: () => ({ url: "", lineNumber: 0, columnNumber: 0 }),
+        });
+        return { content: [] };
+      },
+    });
+    await f.call("a", "console_probe", { message: "only-a" });
+    await f.call("b", "console_probe", { message: "only-b" });
+    const a = await f.call("a", "get_console", { clear: true });
+    expect(text(a)).toContain("only-a");
+    expect(text(a)).not.toContain("only-b");
+    expect(text(await f.call("a", "get_console"))).not.toContain("only-a");
+    expect(text(await f.call("b", "get_console"))).toContain("only-b");
+  } finally {
+    await f.close();
+  }
+});
+
+test("network requests and response bodies stay within the caller lane", async () => {
+  const f = await fixture();
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: (request) =>
+      new Response(new URL(request.url).pathname, { headers: { "content-type": "text/html" } }),
+  });
+  try {
+    await f.call("a", "new_tab", { url: `http://127.0.0.1:${server.port}/only-a` });
+    await f.call("b", "new_tab", { url: `http://127.0.0.1:${server.port}/only-b` });
+    const a = await f.call("a", "get_network");
+    const b = await f.call("b", "get_network");
+    expect(text(a)).toContain("only-a");
+    expect(text(a)).not.toContain("only-b");
+    expect(text(b)).toContain("only-b");
+    expect(text(b)).not.toContain("only-a");
+    expect(
+      text(await f.call("b", "get_network", { body: true, urlPattern: "only-a" })),
+    ).not.toContain('"body"');
+  } finally {
+    server.stop(true);
+    await f.close();
+  }
+});
+
+test("close_lane drains admitted calls and does not admit new work into its closing context", async () => {
+  const f = await fixture();
+  const entered = barrier();
+  const release = barrier();
+  try {
+    const a = tab(await f.call("a", "new_tab"));
+    f.handle.register({
+      name: "closing_probe",
+      title: "Closing Probe",
+      description: "Hold a lane operation",
+      toolset: "core",
+      inputSchema: { tabId: z.number() },
+      annotations: {},
+      handler: async () => {
+        entered.release();
+        await release.promise;
+        const page = await f.mgr.getPage(a);
+        return { content: [{ type: "text", text: String(page.isClosed()) }] };
+      },
+    });
+    const pending = f.call("a", "closing_probe", { tabId: a });
+    await entered.promise;
+    const closing = f.call("a", "close_lane");
+    const rejected = await f.call("a", "evaluate", { tabId: a, expression: "1" });
+    expect(text(rejected)).toContain("lane_closed");
+    release.release();
+    expect(text(await pending)).toContain("false");
+    expect((await closing).isError).not.toBe(true);
+    const fresh = await f.call("a", "new_tab");
+    expect(text(fresh)).toContain("Previous lane closed (close_lane)");
+  } finally {
+    release.release();
+    await f.close();
+  }
+});
+
+test("new_tab holds its new page queue until navigation and tool completion", async () => {
+  const f = await fixture();
+  const entered = barrier();
+  const release = barrier();
+  const order: string[] = [];
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async () => {
+      entered.release();
+      await release.promise;
+      return new Response("<title>Ready</title>");
+    },
+  });
+  try {
+    f.handle.register({
+      name: "creation_probe",
+      title: "Creation Probe",
+      description: "Check new page queue",
+      toolset: "core",
+      inputSchema: { tabId: z.number().optional(), label: z.string() },
+      annotations: {},
+      handler: async ({ label }) => {
+        order.push(label);
+        return { content: [] };
+      },
+    });
+    const creating = f.call("a", "new_tab", { url: `http://127.0.0.1:${server.port}/` });
+    await entered.promise;
+    const rows = structured(await f.call("a", "list_tabs"))?.tabs as Array<{ tabId: number }>;
+    const probe = f.call("a", "creation_probe", { tabId: rows[0]!.tabId, label: "new-page" });
+    await f.call("b", "creation_probe", { label: "other-lane" });
+    try {
+      expect(order).toEqual(["other-lane"]);
+    } finally {
+      release.release();
+      await Promise.all([creating, probe]);
+    }
+    expect(order).toEqual(["other-lane", "new-page"]);
+  } finally {
+    release.release();
+    server.stop(true);
     await f.close();
   }
 });
