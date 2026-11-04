@@ -1,9 +1,11 @@
 import { z } from "zod";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
 import { Impit } from "impit";
-import { PageTextStore } from "../page-output.js";
+import { clipText, PageTextStore } from "../page-output.js";
+import { hiddenReadContext, hiddenNotice, guardSnapshot } from "../hidden-text.js";
 import type { BrowserManager, Env } from "../manager.js";
 import { globalWait, withBackgroundTab, writeToFile } from "../utils.js";
 import {
@@ -126,7 +128,7 @@ export async function fetchHttp(
   let outText = fullText;
   if (maxCharsPerPage > 0 && outText.length > maxCharsPerPage) {
     outText =
-      outText.slice(0, maxCharsPerPage) +
+      clipText(outText, maxCharsPerPage) +
       `\n[TRUNCATED — ${fullText.length.toLocaleString()} total]`;
   }
   const tag = `[http${status === 200 ? "" : ` ${status}`}]`;
@@ -179,7 +181,7 @@ export async function runFetchUrls(
 
       if (maxCharsPerPage > 0 && text.length > maxCharsPerPage) {
         const truncated =
-          text.slice(0, maxCharsPerPage) + `\n[TRUNCATED — ${text.length.toLocaleString()} total]`;
+          clipText(text, maxCharsPerPage) + `\n[TRUNCATED — ${text.length.toLocaleString()} total]`;
         return {
           url,
           title: title || pageTitle || url,
@@ -429,59 +431,164 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
       paginate,
       cursor,
     }) => {
-      try {
-        const page = await mgr.getPage({ tabId, owner });
-        const ctx = resolveFrame(page, frame);
-        const paginated = query !== undefined || paginate || cursor !== undefined;
-        if (paginated && (matchAll || outputMode !== "inline")) {
-          throw new Error("query, paginate, and cursor require inline single-match text output.");
-        }
-        const readChunk = (text?: string) =>
-          pageTextStore.read(text, {
-            scope: JSON.stringify([
-              "get_page_text",
-              mgr.resolveTab({ tabId, owner }),
-              owner,
-              ctx.url(),
-              frame,
-              selector,
+      let hiddenState = { hidden: 0, applied: false };
+      const result = await (async (): Promise<CallToolResult> => {
+        try {
+          const page = await mgr.getPage({ tabId, owner });
+          const guarded = hiddenReadContext(resolveFrame(page, frame), env.STEEL_HIDDEN_TEXT);
+          hiddenState = guarded.state;
+          const ctx = guarded.context;
+          const paginated = query !== undefined || paginate || cursor !== undefined;
+          if (paginated && (matchAll || outputMode !== "inline")) {
+            throw new Error("query, paginate, and cursor require inline single-match text output.");
+          }
+          const readChunk = (text?: string) =>
+            pageTextStore.read(text, {
+              scope: JSON.stringify([
+                "get_page_text",
+                mgr.resolveTab({ tabId, owner }),
+                owner,
+                ctx.url(),
+                frame,
+                selector,
+                query,
+                extractContent,
+                format,
+                includeLinks,
+              ]),
               query,
-              extractContent,
-              format,
-              includeLinks,
-            ]),
-            query,
-            cursor,
-            maxChars,
-          });
-        if (cursor !== undefined) return readChunk();
+              cursor,
+              maxChars,
+              hidden: hiddenState.applied ? hiddenState.hidden : undefined,
+            });
+          if (cursor !== undefined) return readChunk();
 
-        // --- extractContent: Readability-based article extraction ----------
-        if (extractContent && !matchAll) {
-          const html = await ctx.content();
-          const { document: dom } = parseHTML(html);
-          const reader = new Readability(dom as any);
-          const article = reader.parse();
-          let text: string;
-          if (format === "markdown" && article?.content) {
-            text = turndown.turndown(article.content).trim();
-            if (article.title) text = `# ${article.title}\n\n${text}`;
-          } else {
-            text = article
-              ? (article.textContent ?? "")
-                  .replace(/[^\S\n]+/g, " ")
-                  .replace(/\n{3,}/g, "\n\n")
-                  .trim()
-              : "";
-            if (article?.title && text) text = `# ${article.title}\n\n${text}`;
+          // --- extractContent: Readability-based article extraction ----------
+          if (extractContent && !matchAll) {
+            const html = await ctx.content();
+            const { document: dom } = parseHTML(html);
+            const reader = new Readability(dom as any);
+            const article = reader.parse();
+            let text: string;
+            if (format === "markdown" && article?.content) {
+              text = turndown.turndown(article.content).trim();
+              if (article.title) text = `# ${article.title}\n\n${text}`;
+            } else {
+              text = article
+                ? (article.textContent ?? "")
+                    .replace(/[^\S\n]+/g, " ")
+                    .replace(/\n{3,}/g, "\n\n")
+                    .trim()
+                : "";
+              if (article?.title && text) text = `# ${article.title}\n\n${text}`;
+            }
+
+            if (text) {
+              if (paginated) return readChunk(text);
+              if (outputMode === "file") {
+                const filePath = await writeToFile(
+                  Buffer.from(text, "utf8"),
+                  `page_article_${Date.now()}.txt`,
+                  env,
+                  outputPath,
+                );
+                return {
+                  content: [
+                    {
+                      type: "text",
+                      text: `Article extracted to: ${filePath}\nTotal chars: ${text.length.toLocaleString()}`,
+                    },
+                  ],
+                  structuredContent: { filePath, totalChars: text.length },
+                };
+              }
+              const truncated = maxChars > 0 && text.length > maxChars;
+              const output = truncated ? clipText(text, maxChars) : text;
+              return {
+                structuredContent: { text: output, totalChars: text.length },
+                content: [
+                  {
+                    type: "text",
+                    text:
+                      output +
+                      (truncated
+                        ? `\n\n[TRUNCATED — ${text.length.toLocaleString()} total chars, showing first ${maxChars.toLocaleString()}. Use maxChars: 0 with outputMode: "file" for full content.]`
+                        : ""),
+                  },
+                ],
+              };
+            }
+            // Readability failed — fall through to standard extraction
           }
 
-          if (text) {
-            if (paginated) return readChunk(text);
+          // --- matchAll: per-element structured output -----------------------
+          if (matchAll) {
+            const rawEntries = await ctx.evaluate(
+              ({
+                sel,
+                withLinks,
+                walkerSrc,
+              }: {
+                sel: string | null;
+                withLinks: boolean;
+                walkerSrc: string;
+              }) => {
+                // Rebuild the shared walkContentBlock in the browser context so
+                // we don't leak module references across the page.evaluate
+                // boundary. See helpers.ts WALK_CONTENT_BLOCK_SRC.
+                const walker = new Function("return (" + walkerSrc + ")")();
+                const roots = sel ? Array.from(document.querySelectorAll(sel)) : [document.body];
+                return roots.map((root: Element) =>
+                  walker(root, {
+                    includeLinks: withLinks,
+                    // matchAll returns structured {text, links} — anchor URLs
+                    // are surfaced via rawLinks, not as inline markers in text.
+                    markHrefsInText: false,
+                    // matchAll's pre-shared-walker behavior: aggressive
+                    // whitespace collapse inside anchor text (incl. newlines).
+                    collapseWhitespaceInAnchors: true,
+                  }),
+                );
+              },
+              {
+                sel: selector ?? null,
+                withLinks: includeLinks,
+                walkerSrc: WALK_CONTENT_BLOCK_SRC,
+              },
+            );
+
+            type MatchEntry = {
+              text: string;
+              title?: string;
+              primaryLink?: string;
+              links?: Link[];
+            };
+            const entries: MatchEntry[] = rawEntries.map((r) => {
+              const entry: MatchEntry = { text: capText(r.text, maxChars) };
+              if (includeLinks) {
+                const links = dedupeLinks(r.rawLinks);
+                entry.links = links;
+                const primary = pickPrimaryLink(links);
+                if (primary) {
+                  entry.primaryLink = primary;
+                  const title = findTitle(primary, links);
+                  if (title) entry.title = title;
+                }
+              }
+              return entry;
+            });
+
+            const totalMatched = entries.length;
+            const capped =
+              maxEntries > 0 && entries.length > maxEntries
+                ? entries.slice(0, maxEntries)
+                : entries;
+
             if (outputMode === "file") {
+              const json = JSON.stringify(capped, null, 2);
               const filePath = await writeToFile(
-                Buffer.from(text, "utf8"),
-                `page_article_${Date.now()}.txt`,
+                Buffer.from(json, "utf8"),
+                `page_sections_${Date.now()}.json`,
                 env,
                 outputPath,
               );
@@ -489,97 +596,66 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
                 content: [
                   {
                     type: "text",
-                    text: `Article extracted to: ${filePath}\nTotal chars: ${text.length.toLocaleString()}`,
+                    text: `Page sections saved to: ${filePath}\nMatched: ${totalMatched}\nReturned: ${capped.length}`,
                   },
                 ],
-                structuredContent: { filePath, totalChars: text.length },
+                structuredContent: { filePath, totalMatched },
               };
             }
-            const truncated = maxChars > 0 && text.length > maxChars;
-            const output = truncated ? text.slice(0, maxChars) : text;
+
+            const truncated = capped.length < totalMatched;
+            const body =
+              capped.length === 0
+                ? `[]${selector ? `\n(selector "${selector}" matched no elements)` : ""}`
+                : pretty
+                  ? JSON.stringify(capped, null, 2)
+                  : "[\n" + capped.map((e) => JSON.stringify(e)).join(",\n") + "\n]";
             return {
-              structuredContent: { text: output, totalChars: text.length },
+              structuredContent: { results: capped, totalMatched },
               content: [
                 {
                   type: "text",
                   text:
-                    output +
+                    body +
                     (truncated
-                      ? `\n\n[TRUNCATED — ${text.length.toLocaleString()} total chars, showing first ${maxChars.toLocaleString()}. Use maxChars: 0 with outputMode: "file" for full content.]`
+                      ? `\n[CAPPED — ${totalMatched} total sections matched, returning first ${capped.length}. Raise maxEntries or use outputMode: "file" for full list.]`
                       : ""),
                 },
               ],
             };
           }
-          // Readability failed — fall through to standard extraction
-        }
 
-        // --- matchAll: per-element structured output -----------------------
-        if (matchAll) {
-          const rawEntries = await ctx.evaluate(
-            ({
-              sel,
-              withLinks,
-              walkerSrc,
-            }: {
-              sel: string | null;
-              withLinks: boolean;
-              walkerSrc: string;
-            }) => {
-              // Rebuild the shared walkContentBlock in the browser context so
-              // we don't leak module references across the page.evaluate
-              // boundary. See helpers.ts WALK_CONTENT_BLOCK_SRC.
-              const walker = new Function("return (" + walkerSrc + ")")();
-              const roots = sel ? Array.from(document.querySelectorAll(sel)) : [document.body];
-              return roots.map((root: Element) =>
-                walker(root, {
-                  includeLinks: withLinks,
-                  // matchAll returns structured {text, links} — anchor URLs
-                  // are surfaced via rawLinks, not as inline markers in text.
-                  markHrefsInText: false,
-                  // matchAll's pre-shared-walker behavior: aggressive
-                  // whitespace collapse inside anchor text (incl. newlines).
-                  collapseWhitespaceInAnchors: true,
-                }),
-              );
-            },
-            {
-              sel: selector ?? null,
-              withLinks: includeLinks,
-              walkerSrc: WALK_CONTENT_BLOCK_SRC,
-            },
-          );
-
-          type MatchEntry = {
-            text: string;
-            title?: string;
-            primaryLink?: string;
-            links?: Link[];
-          };
-          const entries: MatchEntry[] = rawEntries.map((r) => {
-            const entry: MatchEntry = { text: capText(r.text, maxChars) };
-            if (includeLinks) {
-              const links = dedupeLinks(r.rawLinks);
-              entry.links = links;
-              const primary = pickPrimaryLink(links);
-              if (primary) {
-                entry.primaryLink = primary;
-                const title = findTitle(primary, links);
-                if (title) entry.title = title;
-              }
-            }
-            return entry;
+          // --- single-match path (original behavior) ------------------------
+          const effectiveSelector: string | null = selector ?? null;
+          type SingleResult = { __noMatch?: boolean; text?: string; usedSelector?: string };
+          const rawResult: SingleResult = await ctx.evaluate(extractPageContent, {
+            selector: effectiveSelector,
+            includeLinks,
+            mode: includeLinks ? ("walk" as const) : ("innerText" as const),
           });
 
-          const totalMatched = entries.length;
-          const capped =
-            maxEntries > 0 && entries.length > maxEntries ? entries.slice(0, maxEntries) : entries;
+          if (rawResult.__noMatch) {
+            return {
+              structuredContent: { text: "", totalChars: 0 },
+              content: [
+                {
+                  type: "text",
+                  text: `(selector "${selector}" matched no elements)`,
+                },
+              ],
+            };
+          }
+          let text: string = (rawResult.text ?? "")
+            .replace(/[^\S\n]+/g, " ")
+            .replace(/\n{3,}/g, "\n\n")
+            .trim();
+
+          if (paginated) return readChunk(text);
 
           if (outputMode === "file") {
-            const json = JSON.stringify(capped, null, 2);
             const filePath = await writeToFile(
-              Buffer.from(json, "utf8"),
-              `page_sections_${Date.now()}.json`,
+              Buffer.from(text, "utf8"),
+              `page_text_${Date.now()}.txt`,
               env,
               outputPath,
             );
@@ -587,99 +663,41 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
               content: [
                 {
                   type: "text",
-                  text: `Page sections saved to: ${filePath}\nMatched: ${totalMatched}\nReturned: ${capped.length}`,
+                  text: `Page text saved to: ${filePath}\nTotal chars: ${text.length.toLocaleString()}`,
                 },
               ],
-              structuredContent: { filePath, totalMatched },
+              structuredContent: { filePath, totalChars: text.length },
             };
           }
 
-          const truncated = capped.length < totalMatched;
-          const body =
-            capped.length === 0
-              ? `[]${selector ? `\n(selector "${selector}" matched no elements)` : ""}`
-              : pretty
-                ? JSON.stringify(capped, null, 2)
-                : "[\n" + capped.map((e) => JSON.stringify(e)).join(",\n") + "\n]";
+          const truncated = maxChars > 0 && text.length > maxChars;
+          const output = truncated ? clipText(text, maxChars) : text;
           return {
-            structuredContent: { results: capped, totalMatched },
+            structuredContent: { text: output, totalChars: text.length },
             content: [
               {
                 type: "text",
                 text:
-                  body +
+                  output +
                   (truncated
-                    ? `\n[CAPPED — ${totalMatched} total sections matched, returning first ${capped.length}. Raise maxEntries or use outputMode: "file" for full list.]`
+                    ? `\n\n[TRUNCATED — ${text.length.toLocaleString()} total chars, showing first ${maxChars.toLocaleString()}. Use maxChars: 0 with outputMode: "file" to get full content.]`
                     : ""),
               },
             ],
           };
+        } catch (err) {
+          const error = err as Error;
+          return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
         }
-
-        // --- single-match path (original behavior) ------------------------
-        const effectiveSelector: string | null = selector ?? null;
-        type SingleResult = { __noMatch?: boolean; text?: string; usedSelector?: string };
-        const rawResult: SingleResult = await ctx.evaluate(extractPageContent, {
-          selector: effectiveSelector,
-          includeLinks,
-          mode: includeLinks ? ("walk" as const) : ("innerText" as const),
-        });
-
-        if (rawResult.__noMatch) {
-          return {
-            structuredContent: { text: "", totalChars: 0 },
-            content: [
-              {
-                type: "text",
-                text: `(selector "${selector}" matched no elements)`,
-              },
-            ],
-          };
-        }
-        let text: string = (rawResult.text ?? "")
-          .replace(/[^\S\n]+/g, " ")
-          .replace(/\n{3,}/g, "\n\n")
-          .trim();
-
-        if (paginated) return readChunk(text);
-
-        if (outputMode === "file") {
-          const filePath = await writeToFile(
-            Buffer.from(text, "utf8"),
-            `page_text_${Date.now()}.txt`,
-            env,
-            outputPath,
-          );
-          return {
-            content: [
-              {
-                type: "text",
-                text: `Page text saved to: ${filePath}\nTotal chars: ${text.length.toLocaleString()}`,
-              },
-            ],
-            structuredContent: { filePath, totalChars: text.length },
-          };
-        }
-
-        const truncated = maxChars > 0 && text.length > maxChars;
-        const output = truncated ? text.slice(0, maxChars) : text;
-        return {
-          structuredContent: { text: output, totalChars: text.length },
-          content: [
-            {
-              type: "text",
-              text:
-                output +
-                (truncated
-                  ? `\n\n[TRUNCATED — ${text.length.toLocaleString()} total chars, showing first ${maxChars.toLocaleString()}. Use maxChars: 0 with outputMode: "file" to get full content.]`
-                  : ""),
-            },
-          ],
-        };
-      } catch (err) {
-        const error = err as Error;
-        return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
-      }
+      })();
+      const count = result._meta?.["steel/hidden"];
+      return hiddenState.applied || typeof count === "number"
+        ? hiddenNotice(
+            result,
+            typeof count === "number" ? count : hiddenState.hidden,
+            env.STEEL_HIDDEN_TEXT,
+          )
+        : result;
     },
   });
 
@@ -920,11 +938,15 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
           // Ref addresses exactly one element.  locator.evaluate() auto-waits
           // and throws on timeout (stale ref) — never silently return [].
           const record = await ctx.locator(sel).evaluate(
-            (el, { attrNames, maxChars }) => {
+            (el, { attrNames, maxChars, clipSource }) => {
+              const clip = new Function(`return (${clipSource})`)() as (
+                text: string,
+                maxChars: number,
+              ) => string;
               const trunc = (s: string | null): string | null => {
                 if (s === null) return null;
                 if (maxChars <= 0 || s.length <= maxChars) return s;
-                return s.slice(0, maxChars) + "…[truncated]";
+                return clip(s, maxChars) + "…[truncated]";
               };
               const out: Record<string, string | null> = {};
               for (const name of attrNames) {
@@ -944,7 +966,7 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
               }
               return out;
             },
-            { attrNames: attrs, maxChars: maxCharsPerAttr },
+            { attrNames: attrs, maxChars: maxCharsPerAttr, clipSource: clipText.toString() },
           );
           results = [record];
         } else {
@@ -953,16 +975,22 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
               sel: cssSel,
               attrNames,
               maxChars,
+              clipSource,
             }: {
               sel: string;
               attrNames: string[];
               maxChars: number;
+              clipSource: string;
             }) => {
+              const clip = new Function(`return (${clipSource})`)() as (
+                text: string,
+                maxChars: number,
+              ) => string;
               const nodes = Array.from(document.querySelectorAll(cssSel));
               const trunc = (s: string | null): string | null => {
                 if (s === null) return null;
                 if (maxChars <= 0 || s.length <= maxChars) return s;
-                return s.slice(0, maxChars) + "…[truncated]";
+                return clip(s, maxChars) + "…[truncated]";
               };
               return nodes.map((el) => {
                 const out: Record<string, string | null> = {};
@@ -984,7 +1012,12 @@ CONTEXT BUDGET — output capped at limit (default 50 elements). Use maxCharsPer
                 return out;
               });
             },
-            { sel: sel, attrNames: attrs, maxChars: maxCharsPerAttr },
+            {
+              sel: sel,
+              attrNames: attrs,
+              maxChars: maxCharsPerAttr,
+              clipSource: clipText.toString(),
+            },
           );
         }
 
@@ -1135,7 +1168,7 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
         if (maxChars > 0 && text.length > maxChars) {
           return {
             structuredContent: {
-              text: text.slice(0, maxChars),
+              text: clipText(text, maxChars),
               truncated: true,
               totalChars: text.length,
             },
@@ -1143,7 +1176,7 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
               {
                 type: "text",
                 text:
-                  text.slice(0, maxChars) +
+                  clipText(text, maxChars) +
                   `\n\n[TRUNCATED — ${text.length.toLocaleString()} total chars, showing first ${maxChars.toLocaleString()}. Use maxChars: 0 or outputMode: "file" for full output.]`,
               },
             ],
@@ -1208,63 +1241,31 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
     },
     handler: async ({ selector, ref, fields, limit = 20, tabId, owner, frame }) => {
       let sel = "";
-      try {
-        sel = toSelector({ selector, ref });
-        const page = await mgr.getPage({ tabId, owner });
-        const ctx = resolveFrame(page, frame);
+      let hiddenState = { hidden: 0, applied: false };
+      const result = await (async (): Promise<CallToolResult> => {
+        try {
+          sel = toSelector({ selector, ref });
+          const page = await mgr.getPage({ tabId, owner });
+          const guarded = hiddenReadContext(resolveFrame(page, frame), env.STEEL_HIDDEN_TEXT);
+          hiddenState = guarded.state;
+          const ctx = guarded.context;
 
-        // aria-ref is a Playwright-internal selector engine — invisible to
-        // ctx.evaluate / querySelectorAll.  Resolve element handles via
-        // locator when a ref-based selector is given.
-        const isRef = sel.startsWith("aria-ref=");
-        let results: Array<Record<string, string | null>>;
+          // aria-ref is a Playwright-internal selector engine — invisible to
+          // ctx.evaluate / querySelectorAll.  Resolve element handles via
+          // locator when a ref-based selector is given.
+          const isRef = sel.startsWith("aria-ref=");
+          let results: Array<Record<string, string | null>>;
 
-        if (isRef) {
-          // Ref addresses exactly one element.  locator.evaluate() auto-waits
-          // and throws on timeout (stale ref) — never silently return [].
-          // Field-map parser is inlined so the evaluated function stays
-          // self-contained: Playwright serializes it to the browser, where
-          // module-scope references are not available.
-          const record = await ctx.locator(sel).evaluate(
-            (root, { fieldMap }) => {
-              const rec: Record<string, string | null> = {};
-              for (const [name, spec] of Object.entries(fieldMap)) {
-                const atIdx = spec.lastIndexOf("@");
-                let subSel: string;
-                let attr: string | null = null;
-                if (atIdx > 0) {
-                  subSel = spec.slice(0, atIdx);
-                  attr = spec.slice(atIdx + 1);
-                } else if (spec === ".") {
-                  rec[name] = root.textContent?.trim() ?? null;
-                  continue;
-                } else {
-                  subSel = spec;
-                }
-                const el = root.querySelector(subSel);
-                if (!el) {
-                  rec[name] = null;
-                } else if (attr) {
-                  rec[name] = el.getAttribute(attr);
-                } else {
-                  rec[name] = el.textContent?.trim() ?? null;
-                }
-              }
-              return rec;
-            },
-            { fieldMap: fields as Record<string, string> },
-          );
-          results = [record];
-        } else {
-          // Same parser inlined for the multi-root path — passing a Node
-          // module-scope function into ctx.evaluate produces
-          // ReferenceError in the browser isolate.
-          results = await ctx.evaluate(
-            (args) => {
-              const roots = Array.from(document.querySelectorAll(args.sel)).slice(0, args.maxItems);
-              return roots.map((root) => {
-                const record: Record<string, string | null> = {};
-                for (const [name, spec] of Object.entries(args.fieldMap)) {
+          if (isRef) {
+            // Ref addresses exactly one element.  locator.evaluate() auto-waits
+            // and throws on timeout (stale ref) — never silently return [].
+            // Field-map parser is inlined so the evaluated function stays
+            // self-contained: Playwright serializes it to the browser, where
+            // module-scope references are not available.
+            const record = await ctx.locator(sel).evaluate(
+              (root, { fieldMap }) => {
+                const rec: Record<string, string | null> = {};
+                for (const [name, spec] of Object.entries(fieldMap)) {
                   const atIdx = spec.lastIndexOf("@");
                   let subSel: string;
                   let attr: string | null = null;
@@ -1272,45 +1273,88 @@ CONTEXT BUDGET — output capped at limit (default 20 items).`,
                     subSel = spec.slice(0, atIdx);
                     attr = spec.slice(atIdx + 1);
                   } else if (spec === ".") {
-                    record[name] = root.textContent?.trim() ?? null;
+                    rec[name] = root.textContent?.trim() ?? null;
                     continue;
                   } else {
                     subSel = spec;
                   }
                   const el = root.querySelector(subSel);
                   if (!el) {
-                    record[name] = null;
+                    rec[name] = null;
                   } else if (attr) {
-                    record[name] = el.getAttribute(attr);
+                    rec[name] = el.getAttribute(attr);
                   } else {
-                    record[name] = el.textContent?.trim() ?? null;
+                    rec[name] = el.textContent?.trim() ?? null;
                   }
                 }
-                return record;
-              });
-            },
-            { sel, fieldMap: fields as Record<string, string>, maxItems: limit },
-          );
-        }
+                return rec;
+              },
+              { fieldMap: fields as Record<string, string> },
+            );
+            results = [record];
+          } else {
+            // Same parser inlined for the multi-root path — passing a Node
+            // module-scope function into ctx.evaluate produces
+            // ReferenceError in the browser isolate.
+            results = await ctx.evaluate(
+              (args) => {
+                const roots = Array.from(document.querySelectorAll(args.sel)).slice(
+                  0,
+                  args.maxItems,
+                );
+                return roots.map((root) => {
+                  const record: Record<string, string | null> = {};
+                  for (const [name, spec] of Object.entries(args.fieldMap)) {
+                    const atIdx = spec.lastIndexOf("@");
+                    let subSel: string;
+                    let attr: string | null = null;
+                    if (atIdx > 0) {
+                      subSel = spec.slice(0, atIdx);
+                      attr = spec.slice(atIdx + 1);
+                    } else if (spec === ".") {
+                      record[name] = root.textContent?.trim() ?? null;
+                      continue;
+                    } else {
+                      subSel = spec;
+                    }
+                    const el = root.querySelector(subSel);
+                    if (!el) {
+                      record[name] = null;
+                    } else if (attr) {
+                      record[name] = el.getAttribute(attr);
+                    } else {
+                      record[name] = el.textContent?.trim() ?? null;
+                    }
+                  }
+                  return record;
+                });
+              },
+              { sel, fieldMap: fields as Record<string, string>, maxItems: limit },
+            );
+          }
 
-        if (results.length === 0) {
+          if (results.length === 0) {
+            return {
+              content: [{ type: "text", text: `[]\n(selector "${sel}" matched no elements)` }],
+              structuredContent: { results: [] },
+            };
+          }
+
+          const json = "[\n" + results.map((r) => JSON.stringify(r)).join(",\n") + "\n]";
           return {
-            content: [{ type: "text", text: `[]\n(selector "${sel}" matched no elements)` }],
-            structuredContent: { results: [] },
+            content: [{ type: "text", text: json }],
+            structuredContent: { results },
+          };
+        } catch (err) {
+          return {
+            isError: true,
+            content: [{ type: "text", text: decorateRefError(err as Error, sel) }],
           };
         }
-
-        const json = "[\n" + results.map((r) => JSON.stringify(r)).join(",\n") + "\n]";
-        return {
-          content: [{ type: "text", text: json }],
-          structuredContent: { results },
-        };
-      } catch (err) {
-        return {
-          isError: true,
-          content: [{ type: "text", text: decorateRefError(err as Error, sel) }],
-        };
-      }
+      })();
+      return hiddenState.applied
+        ? hiddenNotice(result, hiddenState.hidden, env.STEEL_HIDDEN_TEXT)
+        : result;
     },
   });
 
@@ -1374,90 +1418,107 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
       paginate,
       cursor,
     }) => {
-      try {
-        const resolvedTabId = mgr.resolveTab({ tabId, owner });
-        const page = await mgr.getPage({ tabId, owner });
-        const ctx = resolveFrame(page, frame);
-        const paginated = query !== undefined || paginate || cursor !== undefined;
-        if (paginated && diff)
-          throw new Error("Continuation and query cannot be combined with diff.");
-        const readChunk = (text?: string) =>
-          pageTextStore.read(text, {
-            scope: JSON.stringify([
-              "snapshot",
-              resolvedTabId,
-              owner,
-              ctx.url(),
-              frame,
-              selector,
+      let hidden = 0;
+      let applied = false;
+      const outputResult = await (async (): Promise<CallToolResult> => {
+        try {
+          const resolvedTabId = mgr.resolveTab({ tabId, owner });
+          const page = await mgr.getPage({ tabId, owner });
+          const ctx = resolveFrame(page, frame);
+          const paginated = query !== undefined || paginate || cursor !== undefined;
+          if (paginated && diff)
+            throw new Error("Continuation and query cannot be combined with diff.");
+          const readChunk = (text?: string) =>
+            pageTextStore.read(text, {
+              scope: JSON.stringify([
+                "snapshot",
+                resolvedTabId,
+                owner,
+                ctx.url(),
+                frame,
+                selector,
+                query,
+                filter,
+                intent,
+              ]),
               query,
-              filter,
-              intent,
-            ]),
-            query,
-            cursor,
-            maxChars: maxChars ?? 8000,
-          });
-        if (cursor !== undefined) return readChunk();
+              cursor,
+              maxChars: maxChars ?? 8000,
+              hidden: applied ? hidden : undefined,
+            });
+          if (cursor !== undefined) return readChunk();
 
-        // Capture the full untruncated tree.
-        const result = await captureSnapshot(ctx, resolvedTabId, { selector, noTruncate: true });
+          // Capture the full untruncated tree.
+          const result = await captureSnapshot(ctx, resolvedTabId, { selector, noTruncate: true });
+          const guarded = await guardSnapshot(ctx, result.text, env.STEEL_HIDDEN_TEXT);
+          result.text = guarded.text;
+          hidden = guarded.hidden;
+          applied = guarded.applied;
 
-        // ----- diff mode: return delta vs stored baseline -----
-        // Diff operates on the full raw tree so no change is missed.
-        // Filter and intent are not applied in diff mode.
-        if (diff && frame === undefined) {
-          const prev = getStoredSnapshot(resolvedTabId);
-          storeSnapshot(resolvedTabId, result.text);
-          if (prev === undefined) {
-            const shown = truncateForDisplay(result.text, maxChars ?? 8000);
-            return {
-              content: [{ type: "text", text: `(no baseline — captured fresh)\n${shown}` }],
-              structuredContent: { text: shown },
-            };
+          // ----- diff mode: return delta vs stored baseline -----
+          // Diff operates on the full raw tree so no change is missed.
+          // Filter and intent are not applied in diff mode.
+          if (diff && frame === undefined) {
+            const prev = getStoredSnapshot(resolvedTabId);
+            storeSnapshot(resolvedTabId, result.text);
+            if (prev === undefined) {
+              const shown = truncateForDisplay(result.text, maxChars ?? 8000);
+              return {
+                content: [{ type: "text", text: `(no baseline — captured fresh)\n${shown}` }],
+                structuredContent: { text: shown },
+              };
+            }
+            const delta = diffSnapshots(prev, result.text, { maxChars: maxChars ?? 8000 });
+            return { content: [{ type: "text", text: delta }], structuredContent: { text: delta } };
           }
-          const delta = diffSnapshots(prev, result.text, { maxChars: maxChars ?? 8000 });
-          return { content: [{ type: "text", text: delta }], structuredContent: { text: delta } };
+
+          // Store the raw tree (no frames block) — baseline must not include
+          // the frames metadata or actionFeedback diffs will phantom-diff it
+          // every time child frame URLs change.
+          if (frame === undefined) {
+            storeSnapshot(resolvedTabId, result.text);
+          }
+
+          // When an intent is given, its own role set narrows the FULL tree (base
+          // "all"), so content intents (read_content / extract_data) aren't pre-stripped
+          // by the interactive default. An explicit filter arg is still honored.
+          const baseFilter =
+            intent || query !== undefined ? (filter ?? "all") : (filter ?? "interactive");
+          const filtered = filterTree(result.text, baseFilter);
+          const scoped = intent ? applyIntent(filtered, intent) : filtered;
+          if (paginated) return readChunk(scoped);
+
+          // Build the frames block first so we can reserve its budget — maxChars
+          // must be a hard cap on the whole output, frames included.
+          const childFrames = page.frames().slice(1);
+          let framesBlock = "";
+          if (childFrames.length > 0) {
+            const list = childFrames
+              .map((f, i) => `[${i}] name="${f.name()}" url=${f.url()}`)
+              .join("\n");
+            framesBlock = `\n--- frames ---\n${list}`;
+          }
+          const contentBudget = Math.max(200, (maxChars ?? 8000) - framesBlock.length);
+          const displayText = truncateForDisplay(scoped, contentBudget);
+          const output = displayText + framesBlock;
+
+          return { content: [{ type: "text", text: output }], structuredContent: { text: output } };
+        } catch (err) {
+          const error = err as Error;
+          return {
+            isError: true,
+            content: [{ type: "text", text: cleanErrorMessage(error) }],
+          };
         }
-
-        // Store the raw tree (no frames block) — baseline must not include
-        // the frames metadata or actionFeedback diffs will phantom-diff it
-        // every time child frame URLs change.
-        if (frame === undefined) {
-          storeSnapshot(resolvedTabId, result.text);
-        }
-
-        // When an intent is given, its own role set narrows the FULL tree (base
-        // "all"), so content intents (read_content / extract_data) aren't pre-stripped
-        // by the interactive default. An explicit filter arg is still honored.
-        const baseFilter =
-          intent || query !== undefined ? (filter ?? "all") : (filter ?? "interactive");
-        const filtered = filterTree(result.text, baseFilter);
-        const scoped = intent ? applyIntent(filtered, intent) : filtered;
-        if (paginated) return readChunk(scoped);
-
-        // Build the frames block first so we can reserve its budget — maxChars
-        // must be a hard cap on the whole output, frames included.
-        const childFrames = page.frames().slice(1);
-        let framesBlock = "";
-        if (childFrames.length > 0) {
-          const list = childFrames
-            .map((f, i) => `[${i}] name="${f.name()}" url=${f.url()}`)
-            .join("\n");
-          framesBlock = `\n--- frames ---\n${list}`;
-        }
-        const contentBudget = Math.max(200, (maxChars ?? 8000) - framesBlock.length);
-        const displayText = truncateForDisplay(scoped, contentBudget);
-        const output = displayText + framesBlock;
-
-        return { content: [{ type: "text", text: output }], structuredContent: { text: output } };
-      } catch (err) {
-        const error = err as Error;
-        return {
-          isError: true,
-          content: [{ type: "text", text: cleanErrorMessage(error) }],
-        };
-      }
+      })();
+      const count = outputResult._meta?.["steel/hidden"];
+      return applied || typeof count === "number"
+        ? hiddenNotice(
+            outputResult,
+            typeof count === "number" ? count : hidden,
+            env.STEEL_HIDDEN_TEXT,
+          )
+        : outputResult;
     },
   });
 

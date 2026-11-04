@@ -1,4 +1,5 @@
 import fs from "fs/promises";
+import { clipText } from "../page-output.js";
 
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
@@ -521,7 +522,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
               .trim();
             if (maxChars > 0 && cleaned.length > maxChars) {
               cleaned =
-                cleaned.slice(0, maxChars) +
+                clipText(cleaned, maxChars) +
                 `\n[TRUNCATED — ${cleaned.length.toLocaleString()} total chars]`;
             }
             pageText = "\n---\n" + cleaned;
@@ -1186,7 +1187,7 @@ Errors: unknown key name, selector timeout.`,
         const raw = error.message;
         // Playwright "Unknown key" errors: "Unknown key: \"foo\""
         if (/unknown key/i.test(raw)) {
-          const keyName = key.length > 30 ? `${key.slice(0, 30)}…` : key;
+          const keyName = key.length > 30 ? `${clipText(key, 30)}…` : key;
           return {
             isError: true,
             content: [

@@ -1,4 +1,5 @@
 import type { BrowserManager, Env } from "../manager.js";
+import { clipText } from "../page-output.js";
 import { z } from "zod";
 import { awaitCaptcha, formatCaptchaResult } from "../captcha.js";
 import { extractPageContent as defaultExtractPageContent } from "../helpers.js";
@@ -433,7 +434,7 @@ export async function runExtractAi(
 
   const maxContent = 20_000;
   if (content.length > maxContent) {
-    content = content.slice(0, maxContent) + "\n[TRUNCATED — content capped at 20000 chars]";
+    content = clipText(content, maxContent) + "\n[TRUNCATED — content capped at 20000 chars]";
   }
 
   const builtSchema = schemaJson

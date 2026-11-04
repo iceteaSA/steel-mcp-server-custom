@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { clipText } from "../page-output.js";
 import type { Page } from "patchright";
 import type { BrowserManager, Env } from "../manager.js";
 import { afterAction, actionFeedback } from "../utils.js";
@@ -184,7 +185,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
               .trim();
             if (maxChars > 0 && cleaned.length > maxChars) {
               cleaned =
-                cleaned.slice(0, maxChars) +
+                clipText(cleaned, maxChars) +
                 `\n[TRUNCATED — ${cleaned.length.toLocaleString()} total chars]`;
             }
             pageText = "\n---\n" + cleaned;

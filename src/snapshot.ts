@@ -4,6 +4,7 @@
 // -----------------------------------------------------------------------------
 
 import type { Frame, Page } from "patchright";
+import { clipText } from "./page-output.js";
 
 // -----------------------------------------------------------------------------
 // Types
@@ -75,7 +76,7 @@ export async function captureSnapshot(
       }
       // Hard clip as last resort (notice alone exceeds maxChars).
       if (out.length > maxChars) {
-        out = out.slice(0, maxChars);
+        out = clipText(out, maxChars);
       }
     }
     return { text: out, generation };
@@ -325,7 +326,7 @@ function capOutput(raw: string, maxChars: number, suffix: string): string {
   let out = text + suffix;
   // Hard-clip when truncateAtLine keeps a line longer than effective
   // (truncateAtLine guarantees at least one full line).
-  if (out.length > maxChars) out = out.slice(0, maxChars);
+  if (out.length > maxChars) out = clipText(out, maxChars);
   return out;
 }
 
@@ -508,7 +509,7 @@ export function truncateForDisplay(text: string, maxChars: number): string {
       const { text: trimmed } = truncateAtLine(text, effective);
       out = trimmed + notice;
     }
-    if (out.length > maxChars) out = out.slice(0, maxChars);
+    if (out.length > maxChars) out = clipText(out, maxChars);
   }
   return out;
 }

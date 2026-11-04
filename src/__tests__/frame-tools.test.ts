@@ -6,6 +6,7 @@ import type { BrowserManager, Env } from "../manager.js";
 import type { ToolRegistrar, ToolSpec } from "../tools/shared.js";
 
 const mockEnv: Env = {
+  STEEL_HIDDEN_TEXT: "off",
   BROWSER_MODE: "steel",
   STEEL_API_KEY: undefined,
   STEEL_BASE_URL: "http://localhost:3000",

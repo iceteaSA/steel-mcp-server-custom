@@ -5,6 +5,7 @@ dotenv.config({ quiet: true });
 
 export const EnvSchema = z
   .object({
+    STEEL_HIDDEN_TEXT: z.enum(["drop", "flag", "off"]).default("drop"),
     BROWSER_MODE: z
       .string()
       .transform((arg) => arg.toLowerCase())

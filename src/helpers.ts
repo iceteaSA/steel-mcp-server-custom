@@ -3,6 +3,7 @@
 
 import path from "path";
 import fs from "fs/promises";
+import { clipText } from "./page-output.js";
 
 import mime from "mime-types";
 
@@ -210,7 +211,7 @@ export function findTitle(primaryLink: string | undefined, links: Link[]): strin
  */
 export function capText(s: string, maxChars: number): string {
   if (maxChars <= 0 || s.length <= maxChars) return s;
-  return s.slice(0, maxChars) + "…";
+  return clipText(s, maxChars) + "…";
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +268,7 @@ export function checkFingerprintConsistency(fp: FingerprintInput): FingerprintCh
   const familyMatch = uaFamily === undefined || uaFamily === navFamily;
   const uaDataMatch = uaDataFamily === undefined || uaDataFamily === navFamily;
   const observedParts = [
-    `ua=${fp.userAgent.slice(0, 80)}`,
+    `ua=${clipText(fp.userAgent, 80)}`,
     `platform=${fp.platform}`,
     fp.userAgentData?.platform ? `userAgentData.platform=${fp.userAgentData.platform}` : null,
   ].filter((s): s is string => !!s);

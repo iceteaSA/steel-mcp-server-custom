@@ -604,7 +604,7 @@ describe("snapshot handler (diff + intent)", () => {
 - textbox "Search": hello @e4
 - button "Go" @e5`;
 
-  const env: Env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+  const env: Env = { GLOBAL_WAIT_SECONDS: 0, STEEL_HIDDEN_TEXT: "off" } as Env;
 
   function makeRegistrar() {
     const handlers: Record<string, (...args: any[]) => any> = {};
@@ -828,7 +828,7 @@ describe("snapshot handler (diff + intent)", () => {
 // page_state handler
 // ---------------------------------------------------------------------------
 describe("page_state handler", () => {
-  const env: Env = { GLOBAL_WAIT_SECONDS: 0 } as Env;
+  const env: Env = { GLOBAL_WAIT_SECONDS: 0, STEEL_HIDDEN_TEXT: "off" } as Env;
 
   function makeRegistrar() {
     const handlers: Record<string, (...args: any[]) => any> = {};

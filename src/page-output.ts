@@ -1,10 +1,27 @@
 import { randomUUID } from "node:crypto";
 
+export function clipText(text: string, maxChars: number, offset = 0): string {
+  let end = Math.min(text.length, offset + maxChars);
+  if (
+    end > offset &&
+    end < text.length &&
+    text.charCodeAt(end - 1) >= 0xd800 &&
+    text.charCodeAt(end - 1) <= 0xdbff &&
+    text.charCodeAt(end) >= 0xdc00 &&
+    text.charCodeAt(end) <= 0xdfff
+  ) {
+    // A one-unit budget must advance past one complete character.
+    end += end - offset === 1 ? 1 : -1;
+  }
+  return text.slice(offset, end);
+}
+
 interface Continuation {
   scope: string;
   text: string;
   offset: number;
   expires: number;
+  hidden?: number;
 }
 
 export class PageTextStore {
@@ -18,9 +35,10 @@ export class PageTextStore {
 
   read(
     text: string | undefined,
-    options: { scope: string; maxChars: number; cursor?: string; query?: string },
+    options: { scope: string; maxChars: number; cursor?: string; query?: string; hidden?: number },
   ) {
     const { scope, cursor, query } = options;
+    let { hidden } = options;
     const maxChars = options.maxChars;
     if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > 64000) {
       throw new Error(
@@ -42,7 +60,7 @@ export class PageTextStore {
           "Invalid, expired, or differently scoped cursor. Omit cursor to start again.",
         );
       }
-      ({ text, offset, expires } = stored);
+      ({ text, offset, expires, hidden } = stored);
     } else {
       if (text === undefined) throw new Error("Missing initial page content.");
       if (text.length > 1000000)
@@ -63,22 +81,12 @@ export class PageTextStore {
       const newline = document.lastIndexOf("\n", end - 1);
       if (newline >= offset) end = newline + 1;
     }
-    if (
-      end > offset &&
-      end < document.length &&
-      document.charCodeAt(end - 1) >= 0xd800 &&
-      document.charCodeAt(end - 1) <= 0xdbff &&
-      document.charCodeAt(end) >= 0xdc00 &&
-      document.charCodeAt(end) <= 0xdfff
-    ) {
-      // One astral character uses two UTF-16 units, also when maxChars is one.
-      end += end - offset === 1 ? 1 : -1;
-    }
-    const chunk = document.slice(offset, end);
+    const chunk = clipText(document, end - offset, offset);
+    end = offset + chunk.length;
     let nextCursor: string | undefined;
     if (end < document.length) {
       nextCursor = randomUUID();
-      this.entries.set(nextCursor, { scope, text: document, offset: end, expires });
+      this.entries.set(nextCursor, { scope, text: document, offset: end, expires, hidden });
       while (this.entries.size > this.capacity)
         this.entries.delete(this.entries.keys().next().value!);
     }
@@ -95,6 +103,7 @@ export class PageTextStore {
         },
       ],
       structuredContent,
+      ...(hidden !== undefined ? { _meta: { "steel/hidden": hidden } } : {}),
     };
   }
 }
