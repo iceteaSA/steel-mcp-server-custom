@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type http from "node:http";
-import { startRelayServer } from "../relay";
+import { startRelayServer, type PushPayload } from "../relay";
 import { SigninStore } from "../signin";
 import { WebSocket } from "ws";
 
@@ -41,12 +41,11 @@ afterEach(async () => {
   store.close();
   await new Promise<void>((resolve, reject) => {
     server.close((error) => error ? reject(error) : resolve());
-    server.closeAllConnections();
   });
   await fs.rm(directory, { recursive: true, force: true });
 });
 
-function post(id: string, body = state) {
+function post(id: string, body: PushPayload = state) {
   return fetch(origin + `/signin/${id}/push`, { method: "POST", headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" }, body: JSON.stringify(body) });
 }
 
@@ -164,3 +163,26 @@ for (const secret of [undefined, "wrong-secret"]) {
     expect(messages).toEqual([]);
   });
 }
+
+it("closes within one second with authenticated, unauthenticated and idle HTTP connections", async () => {
+  const authenticated = new WebSocket(origin.replace("http:", "ws:") + "/signin/events");
+  const snapshot = new Promise<void>((resolve, reject) => { authenticated.once("message", () => resolve()); authenticated.once("error", reject); });
+  authenticated.once("open", () => authenticated.send(JSON.stringify({ secret: "fake-signin-secret" })));
+  await snapshot;
+  const unauthenticated = new WebSocket(origin.replace("http:", "ws:") + "/signin/events");
+  await new Promise<void>((resolve, reject) => { unauthenticated.once("open", resolve); unauthenticated.once("error", reject); });
+  expect((await fetch(origin + "/status")).status).toBe(200);
+  let deadline: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const closed = new Promise<boolean>((resolve) => server.close(() => resolve(true)));
+    const timedOut = new Promise<boolean>((resolve) => { deadline = setTimeout(() => resolve(false), 1000); });
+    expect(await Promise.race([closed, timedOut])).toBe(true);
+    expect(server.listening).toBe(false);
+    expect(authenticated.readyState).not.toBe(WebSocket.OPEN);
+    expect(unauthenticated.readyState).not.toBe(WebSocket.OPEN);
+  } finally {
+    if (deadline) clearTimeout(deadline);
+    authenticated.terminate();
+    unauthenticated.terminate();
+  }
+});
