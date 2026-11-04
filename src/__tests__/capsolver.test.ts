@@ -21,7 +21,7 @@ function client(responses: Array<unknown | Error>, timeoutMs = 10000) {
           requests.push({ url: String(url), body: JSON.parse(String(init?.body)) });
           const response = responses.shift() ?? { errorId: 0, status: "processing" };
           if (response instanceof Error) throw response;
-          return Response.json(response);
+          return response instanceof Response ? response : Response.json(response);
         }) as typeof fetch,
         now: () => now,
         sleep: async (ms: number) => {
@@ -98,5 +98,71 @@ describe("CapSolver REST client", () => {
     await expect(client([{ errorId: 0, status: "ready", solution: {} }]).run()).rejects.toThrow(
       "token",
     );
+  });
+  for (const phase of ["create", "result"]) {
+    it(`preserves HTTP 400 ${phase} API errors without retrying or leaking request values`, async () => {
+      const responses: unknown[] = [
+        Response.json(
+          {
+            errorId: 1,
+            errorCode: "ERROR_INVALID_TASK_DATA",
+            errorDescription:
+              "invalid task data: invalid websiteKey (public-site-key); clientKey=private-key; taskId=task-1; token=private-result",
+            taskId: "task-1",
+            solution: { token: "private-result" },
+          },
+          { status: 400 },
+        ),
+      ];
+      if (phase === "result") responses.unshift({ errorId: 0, taskId: "task-1" });
+      const c = client(responses);
+      let message = "";
+      try {
+        await c.run();
+      } catch (error) {
+        message = (error as Error).message;
+      }
+      expect(message).toContain(
+        "CapSolver ERROR_INVALID_TASK_DATA: invalid task data: invalid websiteKey",
+      );
+      for (const value of ["public-site-key", "private-key", "task-1", "private-result"])
+        expect(message).not.toContain(value);
+      expect(c.requests).toHaveLength(phase === "create" ? 1 : 2);
+    });
+  }
+  it("bounds API descriptions and removes control characters", async () => {
+    const c = client([
+      Response.json(
+        {
+          errorId: 1,
+          errorCode: "ERROR_INVALID_TASK_DATA",
+          errorDescription: `invalid task data\n${"detail ".repeat(100)}\u001b[31m`,
+        },
+        { status: 400 },
+      ),
+    ]);
+    let message = "";
+    try {
+      await c.run();
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toStartWith("CapSolver ERROR_INVALID_TASK_DATA: invalid task data");
+    expect(message.length).toBeLessThanOrEqual("CapSolver ERROR_INVALID_TASK_DATA: ".length + 240);
+    expect(message).not.toMatch(/[\x00-\x1f\x7f]/);
+  });
+  it("treats non-JSON create bodies as transport failures without retry", async () => {
+    const c = client([new Response("gateway private-key", { status: 502 })]);
+    await expect(c.run()).rejects.toThrow("CapSolver createTask transport failed");
+    expect(c.requests).toHaveLength(1);
+  });
+  it("uses result-host fallback for non-JSON transport responses", async () => {
+    const c = client([
+      { errorId: 0, taskId: "task-1" },
+      new Response("gateway", { status: 502 }),
+      ready,
+    ]);
+    expect(await c.run()).toBe("private-result");
+    expect(c.requests[2].url).toBe("https://api-stable.capsolver.com/getTaskResult");
   });
 });

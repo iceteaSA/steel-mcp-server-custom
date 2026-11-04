@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { parseHTML } from "linkedom";
 import { createContext, runInContext } from "node:vm";
-import type { Page } from "patchright";
+import type { Frame, Page } from "patchright";
+import * as helpers from "../helpers.js";
 import type { BrowserManager, Env } from "../manager.js";
 import { register as registerInteraction } from "../tools/interaction.js";
 import { register as registerNavigation } from "../tools/navigation.js";
@@ -19,17 +20,29 @@ import {
 
 function fixture(html: string) {
   const dom = parseHTML(`<html><head></head><body>${html}</body></html>`);
+  const location = { href: "https://example.test/form" };
+  const history = {
+    pushState: (_data: unknown, _unused: string, url?: string | URL | null) => {
+      if (url) location.href = new URL(String(url), location.href).href;
+    },
+    replaceState: (_data: unknown, _unused: string, url?: string | URL | null) => {
+      if (url) location.href = new URL(String(url), location.href).href;
+    },
+  };
   // linkedom window proxies share Node globals. Use a separate event target per page.
   const window = Object.assign(new dom.window.EventTarget(), {
     document: dom.document,
     Event: dom.window.Event,
+    location,
+    history,
   });
   const context = createContext({
     window,
     document: window.document,
     URL,
     Event: window.Event,
-    location: { href: "https://example.test/form" },
+    location,
+    history,
   });
   const page = {
     evaluate: async (fn: Function | string, arg?: unknown) => {
@@ -37,7 +50,7 @@ function fixture(html: string) {
       return runInContext(typeof fn === "string" ? fn : `(${fn.toString()})(arg)`, context);
     },
     title: async () => "Form",
-    url: () => "https://example.test/form",
+    url: () => location.href,
     frames: () => [],
   } as unknown as Page;
   return { page, window, context };
@@ -122,6 +135,198 @@ describe("CAPTCHA local HTML detection and injection", () => {
         state: "detected",
       }),
     ).toBe(false);
+  });
+});
+
+describe("R1 CAPTCHA signal scope and exits", () => {
+  function message(f: ReturnType<typeof fixture>, type: string) {
+    f.context.messageType = type;
+    runInContext(
+      '{ const event = new window.Event("message"); event.source = window; event.data = {type: messageType}; window.dispatchEvent(event); }',
+      f.context,
+    );
+  }
+  it("review probe A: a detected signal cannot stall a plain SPA view", async () => {
+    const f = fixture('<div class="g-recaptcha" data-sitekey="key"></div>');
+    await detectCaptcha(f.page);
+    message(f, "capsolverDetectedCallback");
+    f.window.document.body.innerHTML = "<p>plain view after route change</p>";
+    expect((await awaitCaptcha(f.page, { timeoutMs: 30, pollIntervalMs: 5 })).status).toBe("none");
+  });
+  it("review probe B: a solved signal cannot hide a fresh unsolved Turnstile", async () => {
+    const f = fixture('<div class="g-recaptcha" data-sitekey="key"></div>');
+    await detectCaptcha(f.page);
+    message(f, "capsolverCallback");
+    f.window.document.body.innerHTML =
+      '<div class="cf-turnstile" data-sitekey="fresh-key"></div><input name="cf-turnstile-response">';
+    const result = await awaitCaptcha(f.page, { timeoutMs: 30, pollIntervalMs: 5 });
+    expect(result).toMatchObject({ status: "timeout", type: "Turnstile", siteKey: "fresh-key" });
+  });
+  for (const navigation of [
+    "pushState",
+    "replaceState",
+    "popstate",
+    "pageshow",
+    "url",
+    "widget-key",
+    "widget-node",
+    "document",
+  ] as const) {
+    it(`invalidates solved state on ${navigation} changes`, async () => {
+      const f = fixture('<div class="cf-turnstile" data-sitekey="key"></div>');
+      await detectCaptcha(f.page);
+      message(f, "capsolverCallback");
+      expect((await detectCaptcha(f.page))?.state).toBe("solved");
+      if (navigation === "pushState" || navigation === "replaceState")
+        runInContext(`window.history.${navigation}({}, "", location.href)`, f.context);
+      else if (navigation === "popstate")
+        runInContext('window.dispatchEvent(new window.Event("popstate"))', f.context);
+      else if (navigation === "pageshow")
+        runInContext(
+          'const event = new window.Event("pageshow"); event.persisted = true; window.dispatchEvent(event)',
+          f.context,
+        );
+      else if (navigation === "url") f.window.location.href = "https://example.test/other";
+      else if (navigation === "widget-key")
+        f.window.document.querySelector(".cf-turnstile")!.setAttribute("data-sitekey", "new-key");
+      else if (navigation === "widget-node")
+        f.window.document.body.innerHTML = '<div class="cf-turnstile" data-sitekey="key"></div>';
+      else {
+        const dom = parseHTML(
+          '<html><body><div class="cf-turnstile" data-sitekey="key"></div></body></html>',
+        );
+        f.context.document = dom.document;
+        f.window.document = dom.document;
+      }
+      expect((await awaitCaptcha(f.page, { timeoutMs: 20, pollIntervalMs: 5 })).status).toBe(
+        "timeout",
+      );
+    });
+  }
+  it("does not invalidate a signal on an ordinary pageshow", async () => {
+    const f = fixture('<div class="g-recaptcha" data-sitekey="key"></div>');
+    await detectCaptcha(f.page);
+    message(f, "capsolverCallback");
+    runInContext('window.dispatchEvent(new window.Event("pageshow"))', f.context);
+    expect((await awaitCaptcha(f.page, { timeoutMs: 20 })).status).toBe("solved");
+  });
+  for (const mode of ["before", "during"] as const) {
+    it(`reports a frame detached ${mode} inspection without a timeout`, async () => {
+      let calls = 0;
+      let detached = mode === "before";
+      const frame = {
+        url: () => "https://example.test/frame",
+        isDetached: () => detached,
+        evaluate: async () => {
+          calls++;
+          if (mode === "during" && calls === 1)
+            return { type: "Turnstile", siteKey: "key", state: "solving", hasToken: false };
+          detached = true;
+          throw new Error("Frame was detached");
+        },
+      } as unknown as Frame;
+      const result = await awaitCaptcha(frame, { timeoutMs: 50, pollIntervalMs: 5 });
+      expect(result).toMatchObject({ status: "failed", error: "frame detached" });
+      expect(calls).toBe(mode === "before" ? 0 : 2);
+    });
+  }
+  for (const [title, url] of [
+    ["Just a moment...", "https://example.test"],
+    ["Form", "https://www.google.com/sorry/index"],
+  ]) {
+    it(`waits on the bot-wall fallback for ${title} ${url}`, async () => {
+      const f = fixture("<p>challenge</p>");
+      Object.assign(f.page, { title: async () => title, url: () => url });
+      expect(await awaitCaptcha(f.page, { timeoutMs: 20, pollIntervalMs: 5 })).toMatchObject({
+        status: "timeout",
+        type: "bot wall",
+        state: "detected",
+      });
+    });
+  }
+  it("reports page closed instead of a generic inspection failure", async () => {
+    const f = fixture("<p>closed</p>");
+    Object.assign(f.page, {
+      isClosed: () => true,
+      evaluate: async () => {
+        throw new Error("Target closed");
+      },
+    });
+    expect(await awaitCaptcha(f.page, { timeoutMs: 20 })).toMatchObject({
+      status: "failed",
+      error: "page closed",
+    });
+  });
+  it("reports an initial inspection failure without retrying until timeout", async () => {
+    const f = fixture("<p>unavailable</p>");
+    Object.assign(f.page, {
+      evaluate: async () => {
+        throw new Error("Execution context unavailable");
+      },
+    });
+    expect(await awaitCaptcha(f.page, { timeoutMs: 20 })).toMatchObject({
+      status: "failed",
+      error: "could not inspect CAPTCHA state",
+    });
+  });
+  it("does not expose obsolete title-poll constants as a second timeout source", () => {
+    expect("CAPTCHA_WAIT_TOTAL_MS" in helpers).toBe(false);
+    expect("CAPTCHA_POLL_INTERVAL_MS" in helpers).toBe(false);
+  });
+  for (const change of ["removed", "key", "url", "frame"] as const) {
+    it(`rejects a ${change} change before token injection`, async () => {
+      const html =
+        '<div class="g-recaptcha" data-sitekey="key"></div><textarea name="g-recaptcha-response"></textarea>';
+      const f = fixture(change === "frame" ? "<p>parent</p>" : html);
+      const first = fixture(html);
+      const second = fixture(html);
+      if (change === "frame") Object.assign(f.page, { frames: () => [f.page, first.page] });
+      let calls = 0;
+      const result = await solveCaptcha(f.page, {
+        apiKey: "private-key",
+        fetch: (async () => {
+          calls++;
+          if (change === "removed") f.window.document.body.innerHTML = "<p>new page</p>";
+          if (change === "key")
+            f.window.document
+              .querySelector(".g-recaptcha")!
+              .setAttribute("data-sitekey", "other-key");
+          if (change === "url") f.window.location.href = "https://example.test/other";
+          if (change === "frame") Object.assign(f.page, { frames: () => [f.page, second.page] });
+          return Response.json({
+            errorId: 0,
+            status: "ready",
+            solution: { token: "private-token" },
+          });
+        }) as typeof fetch,
+      });
+      expect(result).toMatchObject({
+        status: "failed",
+        injected: false,
+        error: "page or widget changed before token injection",
+      });
+      expect(calls).toBe(1);
+    });
+  }
+  it("returns sanitized HTTP API descriptions through the tool error allow-list", async () => {
+    const f = fixture('<div class="g-recaptcha" data-sitekey="public-site-key"></div>');
+    const result = await solveCaptcha(f.page, {
+      apiKey: "private-key",
+      fetch: (async () =>
+        Response.json(
+          {
+            errorId: 1,
+            errorCode: "ERROR_INVALID_TASK_DATA",
+            errorDescription:
+              "invalid task data: invalid websiteKey (public-site-key); clientKey=private-key",
+          },
+          { status: 400 },
+        )) as typeof fetch,
+    });
+    expect(result.error).toContain(
+      "CapSolver ERROR_INVALID_TASK_DATA: invalid task data: invalid websiteKey",
+    );
+    expect(result.error).not.toMatch(/public-site-key|private-key/);
   });
 });
 
