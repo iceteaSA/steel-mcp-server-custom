@@ -3,6 +3,7 @@ import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
+import { isIP } from "node:net";
 import { getDomain } from "tldts";
 import { isValidProfileName } from "./helpers.js";
 
@@ -69,6 +70,13 @@ export function normalizeSite(value: string): { site: string; host: string; doma
     const host = url.hostname.toLowerCase();
     if (host.endsWith(".") || host.includes("..")) throw new Error();
     const domain = getDomain(host, { allowPrivateDomains: true });
+    if (
+      !domain &&
+      origin &&
+      (host === "localhost" || isIP(host.startsWith("[") ? host.slice(1, -1) : host))
+    ) {
+      return { site: url.origin, host, domains: [host] };
+    }
     if (!domain || (!origin && (host !== domain || value !== host))) throw new Error();
     const labels = host.split(".");
     const count = labels.length - domain.split(".").length;
