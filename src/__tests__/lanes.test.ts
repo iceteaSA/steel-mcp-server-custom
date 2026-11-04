@@ -4,6 +4,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { chromium } from "patchright";
 import { z } from "zod";
+import { mkdtemp, writeFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { EnvSchema } from "../env.js";
 import { BrowserManager } from "../manager.js";
 import { makeRegistrar, ALL_TOOLSETS } from "../tools/shared.js";
@@ -17,12 +20,13 @@ function barrier() {
   return { promise, release };
 }
 
-async function fixture(mode = "on") {
-  const browser = await chromium.launch({
+async function fixture(mode = "on", overrides: Record<string, string> = {}) {
+  const launchOptions = {
     executablePath: "/home/icetea/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome",
     headless: true,
     args: ["--no-sandbox"],
-  });
+  };
+  let browser = await chromium.launch(launchOptions);
   let now = 1000;
   let starts = 0;
   const env = EnvSchema.parse({
@@ -32,16 +36,22 @@ async function fixture(mode = "on") {
     TAB_IDLE_TIMEOUT_MS: "0",
     SETTLE_TIMEOUT_MS: "0",
     RELAY_PORT: "0",
+    ...overrides,
   });
   const root = new BrowserManager(env);
-  const operator = await browser.newContext();
-  const primary = await operator.newPage();
+  let operator = await browser.newContext();
+  let primary = await operator.newPage();
   const startGate = barrier();
   startGate.release();
   Object.assign(root, {
     _connectSteel: async () => {
       starts++;
       await startGate.promise;
+      if (!browser.isConnected()) {
+        browser = await chromium.launch(launchOptions);
+        operator = await browser.newContext();
+        primary = await operator.newPage();
+      }
       Object.assign(root, { browser, browserContext: operator });
       const id = (root as unknown as { allocateTab(page: typeof primary): number }).allocateTab(
         primary,
@@ -73,8 +83,15 @@ async function fixture(mode = "on") {
     mgr,
     root,
     handle,
-    operator,
-    primary,
+    get operator() {
+      return operator;
+    },
+    get primary() {
+      return primary;
+    },
+    env,
+    contexts: () => browser.contexts(),
+    endSession: () => browser.close(),
     starts: () => starts,
     advance: (ms: number) => {
       now += ms;
@@ -244,11 +261,15 @@ test("idle clock closes whole lane, stale tabs stay closed, and explicit new_tab
   try {
     const a = tab(await f.call("a", "new_tab"));
     await f.call("a", "new_tab");
+    const previousContext = f.contexts().find((context) => context !== f.operator)!;
+    expect(previousContext.pages()).toHaveLength(2);
     f.advance(101);
     const fresh = await f.call("a", "list_tabs");
     expect(text(fresh)).toContain("Previous lane closed (idle)");
     expect(text(fresh)).toContain("cookies, tabs and buffers were reset.");
     expect(fresh.isError).not.toBe(true);
+    expect(previousContext.pages()).toHaveLength(0);
+    await expect(previousContext.newPage()).rejects.toThrow();
     expect(text(await f.call("a", "evaluate", { tabId: a, expression: "1" }))).toContain(
       "lane_closed",
     );
@@ -462,6 +483,172 @@ test("new_tab holds its new page queue until navigation and tool completion", as
   } finally {
     release.release();
     server.stop(true);
+    await f.close();
+  }
+});
+
+test("saved profile restoration targets the lane context without adding a profile context", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "steel-lane-profile-"));
+  const f = await fixture("on", { PROFILES_DIR: directory });
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response("<title>Profile</title>"),
+  });
+  const origin = `http://127.0.0.1:${server.port}`;
+  try {
+    await writeFile(
+      join(directory, "saved.json"),
+      JSON.stringify({
+        cookies: [{ name: "profile-cookie", value: "saved-value", domain: "127.0.0.1", path: "/" }],
+        localStorage: { [origin]: { restored: "saved-local" } },
+        savedAt: "2026-01-01T00:00:00.000Z",
+      }),
+    );
+    const ordinary = tab(await f.call("a", "new_tab"));
+    await f.call("b", "new_tab");
+    const before = f.contexts().length;
+    const profileTab = tab(await f.call("a", "new_tab", { profile: "saved", url: origin }));
+    expect(f.contexts()).toHaveLength(before);
+    expect(text(await f.call("a", "cookies"))).toContain("saved-value");
+    expect(
+      text(
+        await f.call("a", "evaluate", {
+          tabId: profileTab,
+          expression: "localStorage.getItem('restored')",
+        }),
+      ),
+    ).toContain("saved-local");
+    expect(structured(await f.call("b", "cookies"))).toEqual({ cookies: [] });
+    const profiles = structured(await f.call(undefined, "list_profiles"))?.profiles as Array<
+      Record<string, unknown>
+    >;
+    expect(profiles).toContainEqual({
+      name: "saved",
+      active: true,
+      tabCount: 1,
+      savedAt: "2026-01-01T00:00:00.000Z",
+    });
+    expect((await f.call("a", "delete_profile", { name: "saved" })).isError).not.toBe(true);
+    expect(f.contexts()).toHaveLength(before);
+    expect((await f.call("a", "evaluate", { tabId: ordinary, expression: "1" })).isError).not.toBe(
+      true,
+    );
+  } finally {
+    server.stop(true);
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("CAPTCHA extension waits and solve_captcha inspect only the caller's page", async () => {
+  const f = await fixture();
+  try {
+    const html =
+      '<div class="g-recaptcha" data-sitekey="lane-a-public"></div><textarea name="g-recaptcha-response"></textarea><button id="capsolver-solver-tip-button" data-state="solving"></button>';
+    const a = tab(
+      await f.call("a", "new_tab", { url: `data:text/html,${encodeURIComponent(html)}` }),
+    );
+    const b = tab(await f.call("b", "new_tab"));
+    const pageA = f
+      .contexts()
+      .flatMap((context) => context.pages())
+      .find((page) => page.url().includes("lane-a-public"))!;
+    const solving = f.call("a", "solve_captcha", { tabId: a, timeoutMs: 3000 });
+    await pageA.waitForFunction(() => Boolean(window.__steelCaptchaSignal), undefined, {
+      timeout: 2000,
+    });
+    const other = await f.call("b", "solve_captcha", { tabId: b, timeoutMs: 500 });
+    expect(text(other)).toContain("none detected");
+    await pageA.evaluate(
+      () => {
+        (document.querySelector("textarea") as HTMLTextAreaElement).value =
+          "synthetic-private-token";
+      },
+      undefined,
+      undefined,
+      false,
+    );
+    const solved = await solving;
+    expect(solved.isError).not.toBe(true);
+    expect(text(solved)).toContain("lane-a-public");
+    expect(text(solved)).toContain("solved");
+    expect(text(solved)).not.toContain("synthetic-private-token");
+    expect(text(await f.call("b", "solve_captcha", { tabId: a, timeoutMs: 500 }))).toContain(
+      "not_in_lane",
+    );
+  } finally {
+    await f.close();
+  }
+});
+
+test("lane defaults validate the rollback switch and the idle lease", () => {
+  expect(EnvSchema.parse({ BROWSER_MODE: "local" }).STEEL_LANES).toBe("on");
+  expect(EnvSchema.parse({ BROWSER_MODE: "local" }).LANE_IDLE_MS).toBe(900000);
+  expect(() => EnvSchema.parse({ BROWSER_MODE: "local", STEEL_LANES: "invalid" })).toThrow();
+  expect(() => EnvSchema.parse({ BROWSER_MODE: "local", LANE_IDLE_MS: "0" })).toThrow();
+});
+
+test("queued close_tabs without a target closes the admitted current tab, not a newer tab", async () => {
+  const f = await fixture();
+  const entered = barrier();
+  const release = barrier();
+  try {
+    const a = tab(await f.call("a", "new_tab"));
+    f.handle.register({
+      name: "close_target_probe",
+      title: "Close Target Probe",
+      description: "Hold the current tab",
+      toolset: "core",
+      inputSchema: {},
+      annotations: {},
+      handler: async () => {
+        entered.release();
+        await release.promise;
+        return { content: [] };
+      },
+    });
+    const held = f.call("a", "close_target_probe");
+    await entered.promise;
+    const closing = f.call("a", "close_tabs");
+    const b = tab(await f.call("a", "new_tab"));
+    release.release();
+    await Promise.all([held, closing]);
+    const rows = structured(await f.call("a", "list_tabs"))?.tabs as Array<{ tabId: number }>;
+    expect(rows.map((row) => row.tabId)).toEqual([b]);
+    expect(text(await f.call("a", "evaluate", { tabId: a, expression: "1" }))).toContain(
+      "lane_closed",
+    );
+  } finally {
+    release.release();
+    await f.close();
+  }
+});
+
+test("browser disconnect closes every lane and single-flights a fresh session with session-ended notices", async () => {
+  const f = await fixture();
+  try {
+    const a = tab(await f.call("a", "new_tab"));
+    const b = tab(await f.call("b", "new_tab"));
+    await f.endSession();
+    expect(text(await f.call("a", "evaluate", { tabId: a, expression: "1" }))).toContain(
+      "lane_closed",
+    );
+    expect(text(await f.call("b", "evaluate", { tabId: b, expression: "1" }))).toContain(
+      "lane_closed",
+    );
+    const [reopenedA, reopenedB] = await Promise.all([
+      f.call("a", "new_tab"),
+      f.call("b", "new_tab"),
+    ]);
+    expect(text(reopenedA)).toContain("Previous lane closed (session-ended)");
+    expect(text(reopenedB)).toContain("Previous lane closed (session-ended)");
+    expect(tab(reopenedA)).toBeGreaterThan(a);
+    expect(tab(reopenedB)).toBeGreaterThan(b);
+    expect(f.starts()).toBe(2);
+    expect(f.primary.isClosed()).toBe(false);
+    expect(f.contexts()).toHaveLength(3);
+  } finally {
     await f.close();
   }
 });
