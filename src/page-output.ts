@@ -63,6 +63,17 @@ export class PageTextStore {
       const newline = document.lastIndexOf("\n", end - 1);
       if (newline >= offset) end = newline + 1;
     }
+    if (
+      end > offset &&
+      end < document.length &&
+      document.charCodeAt(end - 1) >= 0xd800 &&
+      document.charCodeAt(end - 1) <= 0xdbff &&
+      document.charCodeAt(end) >= 0xdc00 &&
+      document.charCodeAt(end) <= 0xdfff
+    ) {
+      // One astral character uses two UTF-16 units, also when maxChars is one.
+      end += end - offset === 1 ? 1 : -1;
+    }
     const chunk = document.slice(offset, end);
     let nextCursor: string | undefined;
     if (end < document.length) {

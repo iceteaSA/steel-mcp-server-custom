@@ -345,7 +345,7 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
         .default(5000)
         .optional()
         .describe(
-          "Maximum characters to return inline. Default: 5000. Set to 0 for no limit (use with outputMode: 'file').",
+          "Maximum characters to return inline. Default: 5000. Set to 0 for no limit (use with outputMode: 'file'). Pagination preserves surrogate pairs: maxChars=1 can return two UTF-16 units for one character.",
         ),
       outputMode: z
         .enum(["inline", "file"])
@@ -1331,7 +1331,7 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         .number()
         .optional()
         .describe(
-          "Cap output (default 8000). Over-budget output is truncated at a line boundary — scope with selector instead of raising this.",
+          "Cap output (default 8000). Over-budget output is truncated at a line boundary — scope with selector instead of raising this. Pagination preserves surrogate pairs: maxChars=1 can return two UTF-16 units for one character.",
         ),
       filter: snapshotFilterSchema,
       diff: z

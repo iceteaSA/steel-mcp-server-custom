@@ -1,9 +1,9 @@
 // -----------------------------------------------------------------------------
 // settle.ts — post-action settle detection via injected browser-side counters.
 //
-// Injects a script once per context (via context.addInitScript) that installs
-// window.__steelSettle = { inflight, lastMutation }.  After every action tool
-// waitForSettled polls those counters until the page is quiet.
+// The per-page domcontentloaded listener uses page.evaluate in the main world.
+// Do not use context.addInitScript because Patchright can break WebSocket upgrades.
+// Interaction tools poll window.__steelSettle until the page is quiet.
 // -----------------------------------------------------------------------------
 
 import type { Page } from "patchright";
@@ -16,11 +16,13 @@ import type { Page } from "patchright";
 export type SettleEnv = { SETTLE_TIMEOUT_MS: number };
 
 // -----------------------------------------------------------------------------
-// SETTLE_INIT_SCRIPT — injected once per BrowserContext
+// SETTLE_INIT_SCRIPT — page-world counters
 // -----------------------------------------------------------------------------
 
 /**
- * Self-contained JS that runs at document_start via context.addInitScript.
+ * The page listener uses page.evaluate in the main world at domcontentloaded.
+ * Some navigation waits end before that event. waitForSettled can run the
+ * script if the counter is missing.
  *
  * Creates `window.__steelSettle` (non-enumerable, configurable) with:
  *   - inflight: count of in-flight fetch + XHR requests
@@ -90,9 +92,8 @@ export const SETTLE_INIT_SCRIPT = `(() => {
  *
  * When `env.SETTLE_TIMEOUT_MS` is 0 this is a no-op.
  *
- * Guards against pages where the init script never ran (about:blank, tabs
- * created before this server started): if `window.__steelSettle` is undefined
- * the wait resolves immediately.
+ * If `window.__steelSettle` is missing, run the script before the counter check.
+ * If navigation stops the script, do not wait.
  *
  * The entire body is wrapped in try/catch — navigation destroying the
  * execution context mid-wait must NOT throw (returns normally).

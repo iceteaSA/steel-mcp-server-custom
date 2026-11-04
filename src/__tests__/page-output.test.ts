@@ -156,3 +156,71 @@ test("pagination rejects oversized captures, zero budgets, and empty queries", (
   }
   expect(() => store.read("text", { scope: "one", maxChars: 100, query: " " })).toThrow("query");
 });
+
+test("continuation preserves astral characters at every border position after UTF-8 transport", () => {
+  for (let maxChars = 1; maxChars <= 32; maxChars++) {
+    for (let border = 0; border < maxChars; border++) {
+      const original = "a".repeat(border) + "\u{1f642}".repeat(maxChars + 1) + "\n\u{1f642}tail";
+      const store = new PageTextStore();
+      let cursor: string | undefined;
+      let recovered = "";
+      let chunks = 0;
+      do {
+        const result = store.read(cursor ? undefined : original, {
+          scope: "unicode",
+          maxChars,
+          cursor,
+        });
+        const chunk = result.structuredContent.text;
+        expect(chunk.length).toBeGreaterThan(0);
+        expect(chunk.length).toBeLessThanOrEqual(maxChars === 1 ? 2 : maxChars);
+        const transported = Buffer.from(chunk, "utf8").toString("utf8");
+        expect(transported).toBe(chunk);
+        recovered += transported;
+        cursor = result.structuredContent.nextCursor;
+        expect(++chunks).toBeLessThanOrEqual(original.length);
+      } while (cursor);
+      expect(recovered).toBe(original);
+    }
+  }
+});
+
+test("maxChars=1 returns a whole surrogate pair as one character and always advances", () => {
+  const store = new PageTextStore();
+  const first = store.read("\u{1f642}x", { scope: "one", maxChars: 1 });
+  expect(first.structuredContent.text).toBe("\u{1f642}");
+  expect(first.structuredContent.text.length).toBe(2);
+  const second = store.read(undefined, {
+    scope: "one",
+    maxChars: 1,
+    cursor: first.structuredContent.nextCursor,
+  });
+  expect(second.structuredContent.text).toBe("x");
+  expect(second.structuredContent.nextCursor).toBeUndefined();
+});
+
+test("large continuation budgets do not split an astral character at either edge", () => {
+  for (const maxChars of [127, 256, 500, 8000, 64000]) {
+    for (const border of [0, 1, maxChars - 2, maxChars - 1, maxChars, maxChars + 1]) {
+      const original = "a".repeat(border) + "\u{1f642}\u{1f642}end";
+      const store = new PageTextStore();
+      let cursor: string | undefined;
+      let recovered = "";
+      do {
+        const result = store.read(cursor ? undefined : original, {
+          scope: "large",
+          maxChars,
+          cursor,
+        });
+        const chunk = result.structuredContent.text;
+        expect(chunk.length).toBeGreaterThan(0);
+        expect(chunk.length).toBeLessThanOrEqual(maxChars);
+        const transported = Buffer.from(chunk, "utf8").toString("utf8");
+        expect(transported).toBe(chunk);
+        recovered += transported;
+        cursor = result.structuredContent.nextCursor;
+      } while (cursor);
+      expect(recovered).toBe(original);
+    }
+  }
+});

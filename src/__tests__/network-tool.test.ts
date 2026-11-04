@@ -1,7 +1,10 @@
 import { describe, it, expect } from "bun:test";
 import { register as registerNetwork, authorizeBodyFetch } from "../tools/network.js";
 import type { BrowserManager, Env } from "../manager.js";
-import type { ToolRegistrar } from "../tools/shared.js";
+import type { ToolRegistrar, ToolSpec } from "../tools/shared.js";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const env: Env = {
   MAX_INLINE_BYTES: 1000,
@@ -80,6 +83,34 @@ describe("get_network tool", () => {
     expect(result.isError).toBeUndefined();
     expect(result.content[0].text).toBe("xhr-body");
     expect(result.structuredContent).toEqual({ events: [], body: "xhr-body", requestId: 5 });
+  });
+
+  it("body spill overwrites its stable output path and requires mutating/destructive hints", async () => {
+    const output = await mkdtemp(join(tmpdir(), "steel-network-spill-"));
+    const filePath = join(output, "network-body-5.txt");
+    await writeFile(filePath, "existing scratch data");
+    const mgr = fakeMgr(
+      [{ id: 5, tabId: 1, method: "GET", url: "https://fixture.test/x", resourceType: "xhr" }],
+      { 5: "replacement body" },
+    );
+    const specs: ToolSpec[] = [];
+    registerNetwork((spec) => specs.push(spec), mgr, {
+      ...env,
+      MAX_INLINE_BYTES: 1,
+      OUTPUT_DIR: output,
+      OUTPUT_ROOT: output,
+    });
+    const tool = specs.find((spec) => spec.name === "get_network")!;
+    try {
+      expect(tool.annotations.readOnlyHint).toBe(false);
+      expect(tool.annotations.destructiveHint).toBe(true);
+      const result = await tool.handler({ body: true });
+      expect(result.isError).toBeUndefined();
+      expect(result.structuredContent.filePath).toBe(filePath);
+      expect(await readFile(filePath, "utf8")).toBe("replacement body");
+    } finally {
+      await rm(output, { recursive: true, force: true });
+    }
   });
 
   it("returns isError when body:true matches multiple events", async () => {

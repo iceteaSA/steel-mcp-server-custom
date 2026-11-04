@@ -164,3 +164,78 @@ test("nested cross-origin iframe snapshots keep frame refs and the main baseline
     await rm(profile, { recursive: true, force: true });
   }
 }, 20000);
+
+test("fetch_urls browser mode can overwrite pre-existing shared cookies and localStorage", async () => {
+  const server = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch(request) {
+      const overwrite = new URL(request.url).pathname === "/overwrite";
+      return new Response(
+        `<script>localStorage.setItem('existing', '${overwrite ? "after" : "before"}')</script><article><h1>Fixture article</h1><p>Synthetic local article content for the shared-context state regression.</p></article>`,
+        {
+          headers: {
+            "content-type": "text/html",
+            ...(overwrite ? { "set-cookie": "existing=after; Path=/" } : {}),
+          },
+        },
+      );
+    },
+  });
+  const profile = await mkdtemp(join(tmpdir(), "steel-fetch-state-"));
+  const context = await chromium.launchPersistentContext(profile, {
+    executablePath: "/usr/bin/chromium",
+    headless: true,
+    timeout: 5000,
+    args: ["--no-sandbox"],
+  });
+  const origin = `http://127.0.0.1:${server.port}`;
+  try {
+    const primary = context.pages()[0];
+    await context.addCookies([{ name: "existing", value: "before", url: origin }]);
+    await primary.goto(`${origin}/seed`, { waitUntil: "domcontentloaded" });
+    expect(
+      (await context.cookies(origin)).find((cookie) => cookie.name === "existing")?.value,
+    ).toBe("before");
+    expect(await primary.evaluate(() => localStorage.getItem("existing"))).toBe("before");
+    const tabs = new Map<number, Page>();
+    let nextId = 1;
+    const mgr = {
+      newTab: async (_url: unknown, _owner: unknown, _profile: unknown, activate: boolean) => {
+        expect(activate).toBe(false);
+        const page = await context.newPage();
+        const tabId = nextId++;
+        tabs.set(tabId, page);
+        return { tabId, page };
+      },
+      closeTab: async (tabId: number) => {
+        await tabs.get(tabId)!.close();
+        tabs.delete(tabId);
+      },
+    } as unknown as BrowserManager;
+    const specs: ToolSpec[] = [];
+    registerExtraction(
+      (spec) => specs.push(spec),
+      mgr,
+      EnvSchema.parse({ BROWSER_MODE: "local", GLOBAL_WAIT_SECONDS: "0" }),
+    );
+    const tool = specs.find((spec) => spec.name === "fetch_urls")!;
+    expect(tool.annotations.readOnlyHint).toBe(false);
+    expect(tool.annotations.destructiveHint).toBe(true);
+    const result = await tool.handler({ urls: [`${origin}/overwrite`], mode: "browser" });
+    expect(result.isError).toBeUndefined();
+    expect(result.structuredContent.results[0].path).toBe("browser");
+    expect(result.structuredContent.results[0].text).toContain("Fixture article");
+    expect(tabs.size).toBe(0);
+    expect(context.pages()).toHaveLength(1);
+    expect(primary.url()).toBe(`${origin}/seed`);
+    expect(
+      (await context.cookies(origin)).find((cookie) => cookie.name === "existing")?.value,
+    ).toBe("after");
+    expect(await primary.evaluate(() => localStorage.getItem("existing"))).toBe("after");
+  } finally {
+    await context.close();
+    server.stop(true);
+    await rm(profile, { recursive: true, force: true });
+  }
+}, 20000);
