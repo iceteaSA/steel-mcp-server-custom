@@ -5,13 +5,7 @@ import { EnvSchema } from "../env.js";
 import { BrowserManager } from "../manager.js";
 import { LaneRuntime } from "../lanes.js";
 
-function barrier() {
-  let release!: () => void;
-  const promise = new Promise<void>((resolve) => {
-    release = resolve;
-  });
-  return { promise, release };
-}
+import { barrier } from "./helpers.js";
 
 async function bounded<T>(promise: Promise<T>, ms = 300): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -74,7 +68,7 @@ function fixture(overrides: Record<string, string> = {}) {
   };
 }
 
-test("R1 P2: close_lane bounds a held handler drain, closes its context, and permits reopen", async () => {
+test("close_lane bounds a held handler drain, closes its context, and permits reopen", async () => {
   const f = fixture();
   const entered = barrier();
   const held = barrier();
@@ -99,7 +93,7 @@ test("R1 P2: close_lane bounds a held handler drain, closes its context, and per
   }
 });
 
-test("R1 P2 idle: an expired lane with a hung handler is drained and closed", async () => {
+test("an expired lane with a hung handler is drained and closed", async () => {
   const f = fixture();
   const entered = barrier();
   const held = barrier();
@@ -122,7 +116,7 @@ test("R1 P2 idle: an expired lane with a hung handler is drained and closed", as
   }
 });
 
-test("R1 a young in-flight call survives the old idle deadline, then drains only after its own idle interval", async () => {
+test("a young in-flight call survives the old idle deadline, then drains only after its own idle interval", async () => {
   const f = fixture();
   const entered = barrier();
   const held = barrier();
@@ -151,7 +145,7 @@ test("R1 a young in-flight call survives the old idle deadline, then drains only
   }
 });
 
-test("R1 P3b: no-ID admission waits for the sweep's held disposal then reopens once", async () => {
+test("no-ID admission waits for the sweep's held disposal then reopens once", async () => {
   const f = fixture();
   const entered = barrier();
   const held = barrier();
@@ -177,7 +171,7 @@ test("R1 P3b: no-ID admission waits for the sweep's held disposal then reopens o
   }
 });
 
-test("R1 lane capacity includes in-flight opens but never rejects an existing lane", async () => {
+test("lane capacity includes in-flight opens but never rejects an existing lane", async () => {
   const f = fixture({ LANE_MAX: "2" });
   const entered = barrier();
   const held = barrier();
@@ -208,7 +202,7 @@ test("R1 lane capacity includes in-flight opens but never rejects an existing la
   }
 });
 
-test("R1 closed records evict oldest callers at 1000 and expire after 24 hours", async () => {
+test("closed records evict oldest callers at 1000 and expire after 24 hours", async () => {
   const f = fixture();
   try {
     for (let i = 0; i < 1005; i++) {
@@ -229,7 +223,7 @@ test("R1 closed records evict oldest callers at 1000 and expire after 24 hours",
   }
 });
 
-test("R1 bogus IDs neither create closure history nor report a fictional restart", async () => {
+test("bogus IDs neither create closure history nor report a fictional restart", async () => {
   const f = fixture();
   try {
     const result = await f.runtime.run(
@@ -246,7 +240,7 @@ test("R1 bogus IDs neither create closure history nor report a fictional restart
   }
 });
 
-test("R1 numeric tab IDs use process randomness rather than process-relative hrtime", () => {
+test("numeric tab IDs use process randomness rather than process-relative hrtime", () => {
   const script = `
     process.hrtime.bigint = () => 1234n;
     const { LaneRuntime } = await import('./src/lanes.ts');
@@ -276,7 +270,7 @@ test("R1 numeric tab IDs use process randomness rather than process-relative hrt
 });
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  test(`R1 actual index ${signal} callback exits within drain grace plus two seconds`, async () => {
+  test(`actual index ${signal} callback exits within drain grace plus two seconds`, async () => {
     const source = await readFile(new URL("../index.ts", import.meta.url), "utf8");
     const start = source.indexOf('process.on("SIGINT"');
     expect(start).toBeGreaterThan(0);
@@ -313,7 +307,7 @@ for (const signal of ["SIGINT", "SIGTERM"] as const) {
   }, 20000);
 }
 
-test("R1 validates bounded lifecycle defaults", () => {
+test("validates bounded lifecycle defaults", () => {
   const env = EnvSchema.parse({ BROWSER_MODE: "local" });
   expect(env).toHaveProperty("LANE_DRAIN_MS", 5000);
   expect(env).toHaveProperty("LANE_MAX", 8);

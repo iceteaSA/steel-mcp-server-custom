@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { once } from "node:events";
-import { chromiumPath, retainedBrowserCount } from "./browser-processes.js";
+import { chromiumPath, retainedBrowserCount, bun13 } from "./browser-processes.js";
 import { BrowserManager } from "../manager.js";
 import { EnvSchema } from "../env.js";
 import { SigninStore } from "../signin.js";
@@ -293,7 +293,7 @@ test("INT live profile pushes update only holding lane contexts; absent membersh
     headless: true,
     args: ["--no-sandbox"],
   });
-  if (Bun.version.startsWith("1.3.")) expect(retainedBrowserCount()).toBe(retained + 1);
+  if (bun13()) expect(retainedBrowserCount()).toBe(retained + 1);
   const operator = await browser.newContext();
   await operator.newPage();
   const site = Bun.serve({

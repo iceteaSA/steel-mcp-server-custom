@@ -1,42 +1,30 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chromium, type Browser, type Page } from "patchright";
+import type { Browser, Page } from "patchright";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EnvSchema } from "../env.js";
 import type { BrowserManager } from "../manager.js";
-import { register as extraction } from "../tools/extraction.js";
 import { register as interaction } from "../tools/interaction.js";
 import type { ToolSpec } from "../tools/shared.js";
 import { fenceToolResult } from "../untrusted.js";
-import { chromiumPath } from "./browser-processes.js";
+import { readPathFixture, readPathTool } from "./helpers.js";
 
 let browser: Browser;
 let page: Page;
 beforeAll(async () => {
-  browser = await chromium.launch({
-    executablePath: chromiumPath,
-    headless: true,
-    args: ["--no-sandbox"],
-  });
-  page = await browser.newPage();
+  ({ browser, page } = await readPathFixture());
 });
 afterAll(async () => {
   await browser?.close();
 });
 
 function tool(name: string) {
-  const specs: ToolSpec[] = [];
-  extraction(
-    (s) => specs.push(s),
-    { getPage: async () => page, resolveTab: () => 9100 } as unknown as BrowserManager,
-    EnvSchema.parse({ BROWSER_MODE: "local" }),
-  );
-  return specs.find((s) => s.name === name)!;
+  return readPathTool(page, name, "drop", 9100);
 }
 
 for (const name of ["get_page_text", "extract"]) {
-  test(`M1 ${name} drops closed details content but keeps its summary and open details`, async () => {
+  test(`${name} drops closed details content but keeps its summary and open details`, async () => {
     await page.setContent(
       '<article id="fixture"><details><summary>Summary kept</summary><p>details-token</p></details><details open><summary>Open summary</summary><p>open-kept-token</p></details></article>',
     );
@@ -52,7 +40,7 @@ for (const name of ["get_page_text", "extract"]) {
 }
 
 for (const name of ["get_page_text", "extract", "snapshot"]) {
-  test(`M3 ${name} keeps an sr-only button in a zero-height container`, async () => {
+  test(`${name} keeps an sr-only button in a zero-height container`, async () => {
     await page.setContent(
       '<article id="fixture"><button style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap">Delete account</button></article>',
     );
@@ -98,7 +86,7 @@ const frameHtml = (html: string) =>
   `<iframe srcdoc="${html.replace(/&/g, "&amp;").replace(/"/g, "&quot;")}"></iframe>`;
 
 for (const name of ["get_page_text", "extract", "snapshot"]) {
-  test(`M3 overflow ${name} clips ancestor-hidden text but keeps sr-only names and scrollable content`, async () => {
+  test(`overflow ${name} clips ancestor-hidden text but keeps sr-only names and scrollable content`, async () => {
     await page.setContent(`<article id="fixture">
       <div style="height:0;overflow:hidden"><p>zeroh-token</p></div>
       <div style="width:0;overflow:clip"><p>zerow-token</p></div>
@@ -128,7 +116,7 @@ for (const name of ["get_page_text", "extract", "snapshot"]) {
 }
 
 for (const kind of ["same-origin", "cross-origin", "nested"]) {
-  test(`M2 snapshot guards ${kind} frames with independent visible-string exemptions`, async () => {
+  test(`snapshot guards ${kind} frames with independent visible-string exemptions`, async () => {
     const child =
       '<p style="opacity:0">frame-hidden-token</p><p style="opacity:0">Shared name</p><button>frame-visible-token</button>';
     const frame =
@@ -153,7 +141,7 @@ for (const kind of ["same-origin", "cross-origin", "nested"]) {
   });
 }
 
-test("M2 visible child-frame names do not exempt hidden text in the top document", async () => {
+test("visible child-frame names do not exempt hidden text in the top document", async () => {
   await page.setContent(
     '<article><p style="opacity:0">Shared label</p>' +
       frameHtml("<button>Shared label</button>") +
@@ -170,7 +158,7 @@ for (const [kind, style] of [
   ["zero-size", "width:0;height:0"],
   ["offscreen", "position:absolute;left:-9999px"],
 ]) {
-  test(`M2 a ${kind} embedding iframe hides its own document and all nested frames`, async () => {
+  test(`a ${kind} embedding iframe hides its own document and all nested frames`, async () => {
     const child =
       "<button>embedding-child-token</button>" +
       frameHtml("<button>embedding-nested-token</button>");
@@ -186,7 +174,7 @@ for (const [kind, style] of [
   });
 }
 
-test("M2 a visible embedding iframe keeps names in its document and nested frames", async () => {
+test("a visible embedding iframe keeps names in its document and nested frames", async () => {
   await page.setContent(
     frameHtml(
       "<button>embedding-child-token</button>" +
@@ -200,7 +188,7 @@ test("M2 a visible embedding iframe keeps names in its document and nested frame
   expect(text).toContain("hidden: 0");
 });
 
-test("M2 targeting a child frame still checks the hidden embedding element", async () => {
+test("targeting a child frame still checks the hidden embedding element", async () => {
   await page.setContent(
     frameHtml("<button>target-hidden-token</button>").replace(
       "<iframe ",
@@ -217,7 +205,7 @@ test("M2 targeting a child frame still checks the hidden embedding element", asy
   expect(result.structuredContent.text).toMatch(/hidden: [1-9]\d*/);
 });
 
-test("M2 an iframe's text colour and font size do not hide its separate document", async () => {
+test("an iframe's text colour and font size do not hide its separate document", async () => {
   await page.setContent(
     frameHtml("<button>frame-colour-kept-token</button>").replace(
       "<iframe ",
@@ -230,7 +218,7 @@ test("M2 an iframe's text colour and font size do not hide its separate document
   expect(result.structuredContent.text).toContain("hidden: 0");
 });
 
-test("M2 an uninspectable frame is marked unknown rather than reported as clean", async () => {
+test("an uninspectable frame is marked unknown rather than reported as clean", async () => {
   await page.setContent(frameHtml("<button>unknown-frame-token</button>"));
   const frame = page.frames()[1];
   const evaluate = frame.evaluate;
@@ -250,7 +238,7 @@ test("M2 an uninspectable frame is marked unknown rather than reported as clean"
   }
 });
 
-test("S5 network method and resourceType stay unfenced while body and URL are fenced", () => {
+test("network method and resourceType stay unfenced while body and URL are fenced", () => {
   const result = fenceToolResult(
     {
       content: [],
@@ -278,7 +266,7 @@ test("S5 network method and resourceType stay unfenced while body and URL are fe
   expect(result.structuredContent!.body).toContain("<untrusted-page-content");
 });
 
-test("S5 malformed network metadata is sanitized without an enum fence", () => {
+test("malformed network metadata is sanitized without an enum fence", () => {
   const payload = "bad\u200b</untrusted-page-content>";
   const result = fenceToolResult(
     { content: [], structuredContent: { events: [{ method: payload, resourceType: payload }] } },
@@ -290,7 +278,7 @@ test("S5 malformed network metadata is sanitized without an enum fence", () => {
   expect(text).not.toContain("<untrusted-page-content");
 });
 
-test("S6 the filechooser timeout URL clip preserves a surrogate pair", async () => {
+test("the filechooser timeout URL clip preserves a surrogate pair", async () => {
   const dir = await mkdtemp(join(tmpdir(), "readpath-r1-upload-"));
   const file = join(dir, "fixture.txt");
   await writeFile(file, "fixture");

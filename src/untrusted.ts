@@ -39,10 +39,15 @@ function pageString(tool: string, path: string[]): boolean {
   return false;
 }
 
-export function fenceToolResult(result: CallToolResult, toolName: string): CallToolResult {
+export function fenceDelimiters(toolName: string) {
   const source = `steel:${toolName}`.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
   const open = `<untrusted-page-content source="${source}">\n${NOTICE}\n\n`;
   const close = "\n</untrusted-page-content>";
+  return { open, close };
+}
+
+export function fenceToolResult(result: CallToolResult, toolName: string): CallToolResult {
+  const { open, close } = fenceDelimiters(toolName);
   const sanitize = (text: string) =>
     stripUnsafeControls(text).replace(/<\/?untrusted-page-content\b/gi, (tag) =>
       tag.replace("<", "&lt;"),

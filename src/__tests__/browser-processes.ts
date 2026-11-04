@@ -1,7 +1,13 @@
 import childProcess, { type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import { chromium } from "patchright";
 
-export const chromiumPath = "/home/icetea/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome";
 export const systemChromiumPath = "/usr/bin/chromium";
+const bundledChromium = chromium.executablePath();
+export const chromiumPath =
+  process.env.STEEL_TEST_CHROMIUM ??
+  (existsSync(bundledChromium) ? bundledChromium : systemChromiumPath);
+export const bun13 = () => Bun.version.startsWith("1.3.");
 
 // Bun #34785 double-closes extra stdio fds after child GC.
 // Keep closed child references for this test process. Remove at Bun ≥ 1.4.0.
@@ -23,7 +29,7 @@ const retainedSpawn = new Proxy(nativeSpawn, {
     return child;
   },
 });
-if (Bun.version.startsWith("1.3.")) {
+if (bun13()) {
   childProcess.spawn = retainedSpawn;
   process.once("exit", () => {
     if (childProcess.spawn === retainedSpawn) childProcess.spawn = nativeSpawn;

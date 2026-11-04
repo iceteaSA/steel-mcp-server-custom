@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { chromium, type Browser, type Page } from "patchright";
+import type { Browser, Page } from "patchright";
 import { z } from "zod";
 import { EnvSchema } from "../env.js";
 import type { BrowserManager } from "../manager.js";
@@ -11,30 +11,19 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { makeRegistrar } from "../tools/shared.js";
-import { chromiumPath } from "./browser-processes.js";
+import { readPathFixture, readPathTool } from "./helpers.js";
 
 let browser: Browser;
 let page: Page;
 beforeAll(async () => {
-  browser = await chromium.launch({
-    executablePath: chromiumPath,
-    headless: true,
-    args: ["--no-sandbox"],
-  });
-  page = await browser.newPage();
+  ({ browser, page } = await readPathFixture());
 });
 afterAll(async () => {
   await browser?.close();
 });
 
 function tool(name: string, mode = "drop") {
-  const specs: ToolSpec[] = [];
-  extraction(
-    (s) => specs.push(s),
-    { getPage: async () => page, resolveTab: () => 9001 } as unknown as BrowserManager,
-    EnvSchema.parse({ BROWSER_MODE: "local", STEEL_HIDDEN_TEXT: mode }),
-  );
-  return specs.find((s) => s.name === name)!;
+  return readPathTool(page, name, mode);
 }
 
 const hidden = [
@@ -179,14 +168,26 @@ test("all tool outputSchema JSON bytes equal the pre-hardening catalog", () => {
   });
   for (const register of Object.values(groups))
     register((s) => specs.push(s), {} as BrowserManager, env);
-  const json = JSON.stringify(
-    specs.map((s) => ({
-      name: s.name,
-      outputSchema: s.outputSchema ? z.toJSONSchema(z.object(s.outputSchema)) : null,
-    })),
-  );
+  const schemas = specs.map((s) => ({
+    name: s.name,
+    outputSchema: s.outputSchema ? z.toJSONSchema(z.object(s.outputSchema)) : null,
+  }));
+  const added = new Set(["request_signin", "signin_status", "cancel_signin"]);
+  const legacy = schemas.filter((s) => !added.has(s.name));
+  expect(legacy).toHaveLength(44);
+  expect(schemas).toHaveLength(47);
+  expect(
+    schemas
+      .filter((s) => added.has(s.name))
+      .map((s) => s.name)
+      .sort(),
+  ).toEqual([...added].sort());
+  const json = JSON.stringify(legacy);
   expect(new Bun.CryptoHasher("sha256").update(json).digest("hex")).toBe(
     "26dd4401cb071fbf71dbcf628d8252aaf8c99b44e2154ac052032a7f2abacf76",
+  );
+  expect(new Bun.CryptoHasher("sha256").update(JSON.stringify(schemas)).digest("hex")).toBe(
+    "37d4d60a6c71ab170c9a2e1846cc3834e1b6a828cd64f1e377157d1fc749d62d",
   );
 });
 
