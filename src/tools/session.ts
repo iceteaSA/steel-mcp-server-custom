@@ -104,8 +104,23 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
     description: `Self-test: navigates to example.com and bot.sannysoft.com, checks fingerprint consistency against the real browser identity, reports headless-detection failures, restores the WebGL spoofing check, and verifies CapSolver balance. Use after browser restarts or config changes to verify stealth posture. Creates and cleans up its own test tab — does not affect your active tabs.`,
     toolset: "debug",
     inputSchema: {},
+    outputSchema: {
+      checks: z.array(z.object({ check: z.string(), pass: z.boolean(), detail: z.string() })),
+      headlessDetection: z.object({
+        available: z.boolean(),
+        reason: z.string().optional(),
+        failures: z.array(z.string()),
+      }),
+      identity: z.object({
+        userAgent: z.string().optional(),
+        platform: z.string().optional(),
+        tz: z.string().optional(),
+        locale: z.string().optional(),
+        screen: z.object({ width: z.number(), height: z.number() }).optional(),
+      }),
+    },
     annotations: {
-      readOnlyHint: true,
+      readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: false,
       openWorldHint: true,
@@ -275,7 +290,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           });
           results.push({
             check: "Canvas noise",
-            pass: noised,
+            pass: noised === true,
             detail: noised ? "active" : "NOT noised",
           });
         } catch (e) {
@@ -431,10 +446,10 @@ NOTE: when clear=true with a filter, ALL entries captured up to read time are re
         .describe("Filter to messages from tabs owned by this agent. Omit for all owners."),
     },
     annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: false,
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
     },
     handler: async ({ level = "all", maxEntries = 50, clear = false, tabId, owner }) => {
       try {
@@ -527,7 +542,7 @@ NOTE: when clear=true with a filter, ALL entries captured up to read time are re
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
-      openWorldHint: false,
+      openWorldHint: true,
     },
     handler: async () => {
       try {

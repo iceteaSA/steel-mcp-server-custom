@@ -15,11 +15,27 @@ function clipUtf8(text: string, maxBytes: number): string {
 }
 
 export function fenceToolResult(result: CallToolResult, toolName: string): CallToolResult {
+  let structuredBytes = result.structuredContent
+    ? Buffer.byteLength(JSON.stringify(result.structuredContent))
+    : 0;
+  // Keep room for a complete trust fence when structured data consumes the budget.
+  if (structuredBytes > MAX_TEXT_BYTES - 1024) {
+    result = {
+      isError: true,
+      content: [
+        {
+          type: "text",
+          text: "Structured output exceeds the inline budget. Scope the request, reduce limits, or use file mode.",
+        },
+      ],
+    };
+    structuredBytes = 0;
+  }
   const source = `steel:${toolName}`.replace(/[&<>"']/g, (char) => `&#${char.charCodeAt(0)};`);
   const open = `<untrusted-page-content source="${source}">\n${NOTICE}\n\n`;
   const close = "\n</untrusted-page-content>";
   const overhead = Buffer.byteLength(open + close + TRUNCATED);
-  let remaining = MAX_TEXT_BYTES;
+  let remaining = MAX_TEXT_BYTES - structuredBytes;
   const content: CallToolResult["content"] = [];
   for (const block of result.content) {
     if (block.type !== "text") {

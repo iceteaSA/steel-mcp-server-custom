@@ -67,8 +67,8 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: true,
+      destructiveHint: true,
+      idempotentHint: false,
       openWorldHint: true,
     },
     handler: async ({
@@ -270,7 +270,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },

@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { makeRegistrar } from "../tools/shared.js";
 
-async function call(texts: string[], isError = false) {
+async function call(texts: string[], isError = false, structuredContent?: Record<string, unknown>) {
   const server = new McpServer({ name: "fence-test", version: "1" });
   const { register } = makeRegistrar(server, new Set(["core"]));
   register({
@@ -22,6 +22,7 @@ async function call(texts: string[], isError = false) {
     handler: async () => ({
       content: texts.map((text) => ({ type: "text", text })),
       ...(isError ? { isError: true } : {}),
+      ...(structuredContent ? { structuredContent } : {}),
     }),
   });
   const client = new Client({ name: "test", version: "1" });
@@ -72,4 +73,23 @@ test("dropping a later text block always reports truncation", async () => {
   const text = (result.content as Array<{ text: string }>).map((block) => block.text).join("");
   expect(text).toMatch(/tail|TRUNCATED/);
   expect(Buffer.byteLength(text)).toBeLessThanOrEqual(512000);
+});
+
+test("structured data cannot bypass the inline output budget", async () => {
+  const result = await call(["small text"], false, { data: "🙂".repeat(150000) });
+  expect(result.isError).toBe(true);
+  expect(result.structuredContent).toBeUndefined();
+  const text = (result.content as Array<{ text: string }>)[0].text;
+  expect(text).toContain("Structured output exceeds");
+  expect(text).toContain("<untrusted-page-content");
+});
+
+test("text and structured data share one UTF-8 inline budget", async () => {
+  const result = await call(["x".repeat(300000)], false, { data: "y".repeat(300000) });
+  expect(result.isError).not.toBe(true);
+  const text = (result.content as Array<{ text: string }>).map((block) => block.text).join("");
+  expect(
+    Buffer.byteLength(text) + Buffer.byteLength(JSON.stringify(result.structuredContent)),
+  ).toBeLessThanOrEqual(512000);
+  expect(text).toContain("TRUNCATED");
 });

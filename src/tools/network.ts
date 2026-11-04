@@ -174,7 +174,7 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
     },
     annotations: {
       readOnlyHint: false, // set mode mutates
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: true, // get is idempotent; set is also safe to repeat
       openWorldHint: false,
     },
@@ -307,7 +307,7 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -433,6 +433,9 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
       ...tabTarget,
     },
     outputSchema: {
+      body: z.string().optional(),
+      requestId: z.number().optional(),
+      filePath: z.string().optional(),
       events: z
         .array(
           z.object({
@@ -448,10 +451,10 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
         .optional(),
     },
     annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
-      openWorldHint: false,
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
+      openWorldHint: true,
     },
     handler: async ({
       urlPattern,
@@ -576,10 +579,13 @@ CONTEXT BUDGET — default limit 30 lines; body capped at 10K chars and downgrad
             );
             return {
               content: [{ type: "text", text: `Body written to: ${filePath}` }],
-              structuredContent: { events: [] },
+              structuredContent: { events: [], filePath, requestId: targetId },
             };
           }
-          return { content: [{ type: "text", text: capped }], structuredContent: { events: [] } };
+          return {
+            content: [{ type: "text", text: capped }],
+            structuredContent: { events: [], body: capped, requestId: targetId },
+          };
         }
 
         const lines = events.map((e: any) => {
@@ -620,8 +626,8 @@ CONTEXT BUDGET — HAR is always written to disk (no inline option).`,
         .describe("Absolute path to save the HAR. Defaults to OUTPUT_DIR/network.har."),
     },
     annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
+      readOnlyHint: false,
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: false,
     },

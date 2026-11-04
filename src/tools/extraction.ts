@@ -388,10 +388,27 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
       ...frameTarget,
       ...continuationParams,
     },
+    outputSchema: {
+      text: z.string().optional(),
+      totalChars: z.number().optional(),
+      nextCursor: z.string().optional(),
+      filePath: z.string().optional(),
+      totalMatched: z.number().optional(),
+      results: z
+        .array(
+          z.object({
+            text: z.string(),
+            title: z.string().optional(),
+            primaryLink: z.string().optional(),
+            links: z.array(z.object({ text: z.string(), href: z.string() })).optional(),
+          }),
+        )
+        .optional(),
+    },
     annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
       openWorldHint: true,
     },
     handler: async ({
@@ -475,11 +492,13 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
                     text: `Article extracted to: ${filePath}\nTotal chars: ${text.length.toLocaleString()}`,
                   },
                 ],
+                structuredContent: { filePath, totalChars: text.length },
               };
             }
             const truncated = maxChars > 0 && text.length > maxChars;
             const output = truncated ? text.slice(0, maxChars) : text;
             return {
+              structuredContent: { text: output, totalChars: text.length },
               content: [
                 {
                   type: "text",
@@ -571,6 +590,7 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
                   text: `Page sections saved to: ${filePath}\nMatched: ${totalMatched}\nReturned: ${capped.length}`,
                 },
               ],
+              structuredContent: { filePath, totalMatched },
             };
           }
 
@@ -582,6 +602,7 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
                 ? JSON.stringify(capped, null, 2)
                 : "[\n" + capped.map((e) => JSON.stringify(e)).join(",\n") + "\n]";
           return {
+            structuredContent: { results: capped, totalMatched },
             content: [
               {
                 type: "text",
@@ -606,6 +627,7 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
 
         if (rawResult.__noMatch) {
           return {
+            structuredContent: { text: "", totalChars: 0 },
             content: [
               {
                 type: "text",
@@ -635,12 +657,14 @@ CONTEXT BUDGET — output capped at maxChars (default 5K). Use outputMode: "file
                 text: `Page text saved to: ${filePath}\nTotal chars: ${text.length.toLocaleString()}`,
               },
             ],
+            structuredContent: { filePath, totalChars: text.length },
           };
         }
 
         const truncated = maxChars > 0 && text.length > maxChars;
         const output = truncated ? text.slice(0, maxChars) : text;
         return {
+          structuredContent: { text: output, totalChars: text.length },
           content: [
             {
               type: "text",
@@ -699,9 +723,9 @@ CONTEXT BUDGET — output capped at maxCharsPerPage per URL (default 3K per URL)
       ),
     },
     annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
       openWorldHint: true,
     },
     handler: async ({ urls, extractContent = true, maxCharsPerPage = 3000, mode = "auto" }) => {
@@ -1041,9 +1065,16 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
       ...tabTargetForce,
       ...frameTarget,
     },
+    outputSchema: {
+      result: z.json().optional(),
+      text: z.string().optional(),
+      truncated: z.boolean().optional(),
+      totalChars: z.number().optional(),
+      filePath: z.string().optional(),
+    },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -1097,11 +1128,17 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
                 text: `Eval result saved to: ${filePath}\nSize: ${text.length.toLocaleString()} chars`,
               },
             ],
+            structuredContent: { filePath, totalChars: text.length },
           };
         }
 
         if (maxChars > 0 && text.length > maxChars) {
           return {
+            structuredContent: {
+              text: text.slice(0, maxChars),
+              truncated: true,
+              totalChars: text.length,
+            },
             content: [
               {
                 type: "text",
@@ -1113,7 +1150,11 @@ CONTEXT BUDGET — output capped at maxChars (default 10K). Use outputMode: "fil
           };
         }
 
-        return { content: [{ type: "text", text }] };
+        return {
+          content: [{ type: "text", text }],
+          structuredContent:
+            result === undefined ? { text: "undefined" } : { result: JSON.parse(text) },
+        };
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
@@ -1309,6 +1350,11 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
       ...frameTarget,
       ...continuationParams,
     },
+    outputSchema: {
+      text: z.string(),
+      totalChars: z.number().optional(),
+      nextCursor: z.string().optional(),
+    },
     annotations: {
       readOnlyHint: true,
       destructiveHint: false,
@@ -1367,10 +1413,11 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
             const shown = truncateForDisplay(result.text, maxChars ?? 8000);
             return {
               content: [{ type: "text", text: `(no baseline — captured fresh)\n${shown}` }],
+              structuredContent: { text: shown },
             };
           }
           const delta = diffSnapshots(prev, result.text, { maxChars: maxChars ?? 8000 });
-          return { content: [{ type: "text", text: delta }] };
+          return { content: [{ type: "text", text: delta }], structuredContent: { text: delta } };
         }
 
         // Store the raw tree (no frames block) — baseline must not include
@@ -1403,7 +1450,7 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
         const displayText = truncateForDisplay(scoped, contentBudget);
         const output = displayText + framesBlock;
 
-        return { content: [{ type: "text", text: output }] };
+        return { content: [{ type: "text", text: output }], structuredContent: { text: output } };
       } catch (err) {
         const error = err as Error;
         return {

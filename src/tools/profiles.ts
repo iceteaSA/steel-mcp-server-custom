@@ -26,9 +26,9 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, _env: Env
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
-      openWorldHint: false,
+      openWorldHint: true,
     },
     handler: async ({ name, url }) => {
       try {
@@ -116,7 +116,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, _env: Env
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: false,
     },

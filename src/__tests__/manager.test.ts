@@ -8,6 +8,11 @@
 import { describe, it, expect, spyOn } from "bun:test";
 import { BrowserManager, TabOwnershipError, NoTabError, type Env } from "../manager.js";
 import type { Page } from "patchright";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { z } from "zod";
+import { makeRegistrar as makeMcpRegistrar } from "../tools/shared.js";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1402,7 +1407,7 @@ describe("tab route registry", () => {
 // ---------------------------------------------------------------------------
 
 import { register as registerIntercept } from "../tools/intercept.js";
-import type { ToolRegistrar } from "../tools/shared.js";
+import type { ToolRegistrar, ToolSpec } from "../tools/shared.js";
 
 function makeHandlerCapturer(): {
   handlers: Record<string, (args: any) => any>;
@@ -1501,18 +1506,102 @@ describe("intercept tool guards", () => {
     expect(result.content[0].text).toContain('"fulfill"');
   });
 
-  it("intercept handler does NOT include outputSchema (removed — strict MCP path)", () => {
-    const captured: any[] = [];
-    const register = ((opts: any) => {
-      captured.push(opts);
-    }) as ToolRegistrar;
-    const mgr = {} as BrowserManager;
-    const env = {} as Env;
-    registerIntercept(register, mgr, env);
-
-    const spec = captured.find((s) => s.name === "intercept");
-    expect(spec).toBeTruthy();
-    expect(spec.outputSchema).toBeUndefined();
+  it("intercept outputSchema survives the strict MCP path for success, empty, and error results", async () => {
+    let routes: Array<{ pattern: string; owner: string }> = [];
+    let fail = false;
+    const mgr = {
+      resolveTab: ({ owner }: { owner?: string }) => {
+        if (owner === "other") throw new Error("ownership denied");
+        return 1;
+      },
+      getTabOwner: () => "self",
+      listRoutes: () => {
+        if (fail) throw new Error("fixture route failure");
+        return routes;
+      },
+      addRoute: async (_tabId: number, owner: string, pattern: string) => {
+        routes.push({ owner, pattern });
+      },
+      removeRoutes: async () => {
+        const count = routes.length;
+        routes = [];
+        return count;
+      },
+    } as unknown as BrowserManager;
+    const server = new McpServer({ name: "intercept-schema", version: "1" });
+    let spec: ToolSpec | undefined;
+    const registrar = makeMcpRegistrar(server, new Set(["core", "intercept"])).register;
+    registerIntercept(
+      (tool) => {
+        spec = tool;
+        registrar(tool);
+      },
+      mgr,
+      { GLOBAL_WAIT_SECONDS: 0 } as Env,
+    );
+    const client = new Client({ name: "strict-schema-client", version: "1" });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverTransport);
+    await client.connect(clientTransport);
+    try {
+      const listing = await client.listTools();
+      expect(listing.tools.find((tool) => tool.name === "intercept")?.outputSchema).toBeDefined();
+      const schema = z.object(spec!.outputSchema!);
+      const call = async (args: Record<string, unknown>) => {
+        const result = await client.callTool({
+          name: "intercept",
+          arguments: { owner: "self", ...args },
+        });
+        expect(schema.safeParse(result.structuredContent).success).toBe(true);
+        return result;
+      };
+      expect((await call({ action: "list" })).structuredContent).toEqual({ routes: [] });
+      for (const action of ["fulfill", "abort", "continue"]) {
+        const result = await call({ action, pattern: `**/${action}` });
+        expect(result.isError).not.toBe(true);
+        expect(result.structuredContent).toEqual({
+          message: `Interception armed on **/${action} (${action}), tab 1.`,
+        });
+      }
+      expect((await call({ action: "list" })).structuredContent).toEqual({
+        routes: [
+          { owner: "self", pattern: "**/fulfill" },
+          { owner: "self", pattern: "**/abort" },
+          { owner: "self", pattern: "**/continue" },
+        ],
+      });
+      expect((await call({ action: "unroute" })).structuredContent).toEqual({ removed: 3 });
+      expect((await call({ action: "unroute" })).structuredContent).toEqual({ removed: 0 });
+      for (const args of [
+        { action: "fulfill" },
+        { action: "list", owner: "other" },
+        { action: "list", owner: undefined },
+      ]) {
+        const result = await call(args);
+        expect(result.isError).toBe(true);
+        expect(typeof (result.structuredContent as { error: string }).error).toBe("string");
+      }
+      fail = true;
+      const failed = await call({ action: "list" });
+      expect(failed.isError).toBe(true);
+      expect(failed.structuredContent).toEqual({ error: "fixture route failure" });
+      fail = false;
+      const send = serverTransport.send.bind(serverTransport);
+      serverTransport.send = async (message) => {
+        if ("result" in message) {
+          await send({
+            ...message,
+            result: { ...message.result, structuredContent: { routes: "wrong type" } },
+          });
+        } else await send(message);
+      };
+      await expect(call({ action: "list" })).rejects.toThrow(
+        "Structured content does not match the tool's output schema: data/routes must be array",
+      );
+    } finally {
+      await client.close();
+      await server.close();
+    }
   });
 
   // SEC3 regression: tabId-only bypass — resolveTab skips ownership when

@@ -33,9 +33,15 @@ CONTEXT BUDGET — small confirmation output.`,
         .describe("fulfill/continue: response/request headers."),
       errorCode: z.string().optional().describe("abort: Playwright error code (default 'failed')."),
     },
+    outputSchema: {
+      routes: z.array(z.object({ pattern: z.string(), owner: z.string() })).optional(),
+      message: z.string().optional(),
+      removed: z.number().optional(),
+      error: z.string().optional(),
+    },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -73,7 +79,11 @@ CONTEXT BUDGET — small confirmation output.`,
         // Belt-and-suspenders owner-auth — resolveTab is primary.
         const auth = assertTabOwner(mgr, resolved, owner, force);
         if (!auth.ok) {
-          return { isError: true, content: [{ type: "text", text: auth.error }] };
+          return {
+            isError: true,
+            content: [{ type: "text", text: auth.error }],
+            structuredContent: { error: auth.error },
+          };
         }
 
         // Actions that require a pattern — guard AFTER ownership check.
@@ -86,6 +96,7 @@ CONTEXT BUDGET — small confirmation output.`,
                 text: `pattern is required for action "${action}".`,
               },
             ],
+            structuredContent: { error: `pattern is required for action "${action}".` },
           };
         }
 
@@ -93,6 +104,7 @@ CONTEXT BUDGET — small confirmation output.`,
           const routes = mgr.listRoutes(resolved);
           return {
             content: [{ type: "text", text: JSON.stringify(routes) }],
+            structuredContent: { routes },
           };
         }
 
@@ -106,6 +118,7 @@ CONTEXT BUDGET — small confirmation output.`,
                 text: `Removed ${n} route(s) ${label}.`,
               },
             ],
+            structuredContent: { removed: n },
           };
         }
 
@@ -135,10 +148,17 @@ CONTEXT BUDGET — small confirmation output.`,
               text: `Interception armed on ${pattern} (${action}), tab ${resolved}.`,
             },
           ],
+          structuredContent: {
+            message: `Interception armed on ${pattern} (${action}), tab ${resolved}.`,
+          },
         };
       } catch (err) {
         const error = err as Error;
-        return { isError: true, content: [{ type: "text", text: error.message }] };
+        return {
+          isError: true,
+          content: [{ type: "text", text: error.message }],
+          structuredContent: { error: error.message },
+        };
       }
     },
   });

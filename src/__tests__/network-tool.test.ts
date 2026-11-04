@@ -79,6 +79,7 @@ describe("get_network tool", () => {
     const result = await handlers.get_network({ body: true });
     expect(result.isError).toBeUndefined();
     expect(result.content[0].text).toBe("xhr-body");
+    expect(result.structuredContent).toEqual({ events: [], body: "xhr-body", requestId: 5 });
   });
 
   it("returns isError when body:true matches multiple events", async () => {

@@ -42,7 +42,8 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 
 - [bun](https://bun.sh) 1.3+ (`curl -fsSL https://bun.sh/install | bash`)
 - [Steel Browser](https://github.com/steel-dev/steel-browser) running (self-hosted or Steel Cloud)
-- Node.js 18+ (runtime only — for `node dist/index.cjs`)
+- Node.js 20+ for the built artifact. Patchright requires this runtime version.
+- `/usr/bin/chromium` for the local headless WebSocket and iframe regression tests on Linux.
 
 ### Build
 
@@ -181,10 +182,23 @@ Tokens expire after five minutes. The cache holds at most 32 tokens and rejects 
 Paginated `maxChars` must be from 1 to 64,000. Continuation is not available with snapshot diffs or text list/file modes.
 
 All MCP text blocks have an untrusted-content fence. Page text cannot close this fence with a forged delimiter.
-The aggregate text limit is 512,000 UTF-8 bytes, including fences and truncation notices.
+Text and serialized structured data share a 512,000-byte UTF-8 budget, including fences and truncation notices.
 Per-tool `maxChars` controls the payload before this envelope. Structured results are also untrusted data.
 
 These features adapt the focused-read, pagination, and provenance-fence methods from upstream v2.0.1 under the existing MIT license.
+
+### MCP result contracts
+
+All 43 tools declare the four safety hints. Hints cover every mode, not only the default mode.
+File output, log clearing, cookie replacement, and arbitrary page interaction do not advertise read-only behavior.
+Browser interactions use conservative destructive hints because page handlers can submit or delete data.
+These hints do not replace authorization checks.
+
+The 18 JSON-producing tools publish output schemas and structured results.
+`evaluate` and `extract_ai` place arbitrary JSON under `result`.
+File results contain `filePath`, not a second inline copy of large data.
+Oversized structured results return an error instead of bypassing the output budget.
+The interception regression uses a strict SDK client for success, empty, and error cases.
 
 ---
 
@@ -386,7 +400,7 @@ src/
     tabs.ts              # list_tabs, new_tab, close_tabs
     profiles.ts          # create_profile, list_profiles, save_profile, delete_profile
     act.ts               # act, extract_ai (gated on ACT_LLM_BASE_URL + ACT_LLM_MODEL)
-  __tests__/             # 18 test files, 437 passed + 12 skipped
+  __tests__/             # Bun tests and local headless browser regressions
 docker/
   Dockerfile        # Custom Steel Browser image (CapSolver + stealth)
   docker-compose.yml # Compose for Steel Browser + optional MCP server

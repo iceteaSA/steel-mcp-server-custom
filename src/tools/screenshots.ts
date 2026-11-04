@@ -187,9 +187,9 @@ CONTEXT BUDGET — default file mode keeps context small. Inline base64 auto-dow
       ...tabTarget,
     },
     annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
       openWorldHint: true,
     },
     handler: async ({

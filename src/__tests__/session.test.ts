@@ -1,5 +1,6 @@
 // Mock-based tests for session tools that do not need a live browser.
 import { describe, it, expect } from "bun:test";
+import { z } from "zod";
 import { register } from "../tools/session.js";
 import type { ToolSpec } from "../tools/shared.js";
 import type { BrowserManager, Env } from "../manager.js";
@@ -87,6 +88,9 @@ describe("smoke_test handler (mock page)", () => {
     expect(text).toContain("Headless detection probe unavailable");
     expect(text).not.toContain("No failures reported");
     expect(result.structuredContent).toBeDefined();
+    expect(z.object(smokeTest.outputSchema!).safeParse(result.structuredContent).success).toBe(
+      true,
+    );
     const hd = result.structuredContent!.headlessDetection;
     expect(hd.available).toBe(false);
     expect(hd.reason).toMatch(/ERR_NAME_NOT_RESOLVED/);

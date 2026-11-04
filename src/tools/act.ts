@@ -75,7 +75,7 @@ CONTEXT BUDGET — returns a plain-text transcript; each step is one line.`,
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -110,10 +110,14 @@ CONTEXT BUDGET — returns JSON inline unless it exceeds MAX_INLINE_BYTES, then 
         .describe("Whether to send the page as extracted text or cleaned outerHTML."),
       ...tabTarget,
     },
+    outputSchema: {
+      result: z.json().optional(),
+      filePath: z.string().optional(),
+    },
     annotations: {
-      readOnlyHint: true,
-      destructiveHint: false,
-      idempotentHint: true,
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: false,
       openWorldHint: true,
     },
     handler: async (args) => {
@@ -122,12 +126,12 @@ CONTEXT BUDGET — returns JSON inline unless it exceeds MAX_INLINE_BYTES, then 
         if (filePath) {
           return {
             content: [{ type: "text", text: `Saved to ${filePath}` }],
-            structuredContent,
+            structuredContent: { filePath },
           };
         }
         return {
           content: [{ type: "text", text }],
-          structuredContent,
+          structuredContent: { result: structuredContent },
         };
       } catch (err) {
         const error = err as Error;

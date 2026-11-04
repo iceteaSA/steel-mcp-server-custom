@@ -162,9 +162,13 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         ),
       ...tabTargetForce,
     },
+    outputSchema: {
+      credential: z.record(z.string(), z.string()).optional(),
+      message: z.string().optional(),
+    },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -208,7 +212,10 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
               info[k] = `***${String(v).slice(-3)} (+${String(v).length} chars)`;
             }
           }
-          return { content: [{ type: "text", text: JSON.stringify(info, null, 2) }] };
+          return {
+            content: [{ type: "text", text: JSON.stringify(info, null, 2) }],
+            structuredContent: { credential: info },
+          };
         }
 
         // Fill the form — uses the real (unmasked) values internally.
@@ -231,6 +238,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         await globalWait(env);
         return {
           content: [{ type: "text", text: `Credential "${name}" applied: ${filled.join(", ")}.` }],
+          structuredContent: { message: `Credential "${name}" applied: ${filled.join(", ")}.` },
         };
       } catch (err) {
         const error = err as Error;

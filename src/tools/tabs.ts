@@ -40,7 +40,7 @@ CONTEXT BUDGET — tab list grows with session activity. Filter with owner or pr
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
-      openWorldHint: false,
+      openWorldHint: true,
     },
     handler: async ({ tabId, owner, profile }) => {
       try {
@@ -128,9 +128,9 @@ CONTEXT BUDGET — tab list grows with session activity. Filter with owner or pr
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
-      openWorldHint: false,
+      openWorldHint: true,
     },
     handler: async ({ url, owner, profile }) => {
       try {

@@ -14,12 +14,12 @@
 | `src/relay.ts` | Authenticated cookie relay |
 | `src/crypto.ts`, `src/credentials-store.ts` | Credential storage and encryption |
 | `src/__tests__/` | Bun unit tests and local regression tests |
-| `scripts/` | Actual MCP tool-list dump and compatibility comparison |
+| `scripts/` | Actual MCP tool-list dump and compatibility checks |
 | `skill/SKILL.md` | Agent entry instructions |
-| `skill/references/workflows.md` | Detailed browser workflows |
+| `skill/references/workflows.md` | Browser workflow instructions |
 | `extension/` | Browser extension for cookie push |
 | `docker/` | Container configuration and browser patches |
-| `dist/` | Ignored build output, including native sidecars |
+| `dist/` | Ignored build output with native sidecars |
 
 Local TypeScript imports use `.js` extensions. Tool modules export registration functions through `src/tools/index.ts`. New tools use the shared registrar.
 

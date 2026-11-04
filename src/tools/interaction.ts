@@ -74,7 +74,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -214,7 +214,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -434,7 +434,7 @@ CONTEXT BUDGET — when readAfterScroll=true, extracted text capped at maxChars 
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -686,7 +686,7 @@ Call without an action to view the current policy and last dialog.`,
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: true,
       openWorldHint: true,
     },
@@ -763,7 +763,7 @@ Errors: missing file paths, path escapes UPLOAD_ROOT, selector timeout, element 
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -935,7 +935,7 @@ page.mouse coordinates are viewport-absolute — the optional frame param is acc
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -992,7 +992,7 @@ page.mouse coordinates are viewport-absolute — the optional frame param is acc
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -1029,7 +1029,7 @@ page.mouse coordinates are viewport-absolute — the optional frame param is acc
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -1066,7 +1066,7 @@ page.mouse coordinates are viewport-absolute — the optional frame param is acc
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
@@ -1116,7 +1116,7 @@ Errors: unknown key name, selector timeout.`,
     },
     annotations: {
       readOnlyHint: false,
-      destructiveHint: false,
+      destructiveHint: true,
       idempotentHint: false,
       openWorldHint: true,
     },
