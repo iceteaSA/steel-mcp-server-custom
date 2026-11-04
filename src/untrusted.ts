@@ -35,7 +35,7 @@ function pageString(tool: string, path: string[]): boolean {
   if (tool === "page_state") return root === "url" || root === "title";
   if (tool === "list_tabs") return root === "tabs" && ["url", "title"].includes(path[2]);
   if (tool === "cookies") return root === "cookies" && !["sameSite"].includes(path[2]);
-  if (tool === "get_network") return root === "body" || root === "events";
+  if (tool === "get_network") return root === "body" || (root === "events" && path[2] === "url");
   return false;
 }
 
@@ -48,8 +48,31 @@ export function fenceToolResult(result: CallToolResult, toolName: string): CallT
       tag.replace("<", "&lt;"),
     );
   const visit = (value: unknown, path: string[] = []): unknown => {
-    if (typeof value === "string")
+    if (typeof value === "string") {
+      if (toolName === "get_network" && path[0] === "events") {
+        if (path[2] === "method")
+          return /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(value) ? value : sanitize(value);
+        if (path[2] === "resourceType")
+          return [
+            "document",
+            "stylesheet",
+            "image",
+            "media",
+            "font",
+            "script",
+            "texttrack",
+            "xhr",
+            "fetch",
+            "eventsource",
+            "websocket",
+            "manifest",
+            "other",
+          ].includes(value)
+            ? value
+            : sanitize(value);
+      }
       return pageString(toolName, path) ? open + sanitize(value) + close : value;
+    }
     if (Array.isArray(value)) return value.map((item, i) => visit(item, [...path, String(i)]));
     if (value && typeof value === "object")
       return Object.fromEntries(

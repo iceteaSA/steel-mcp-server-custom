@@ -63,12 +63,43 @@ function guardDocument(mode: HiddenTextMode, stripControls: (text: string) => st
     }
     return false;
   };
-  const reason = (el: Element): boolean => {
+  const isReader = (el: Element, style: CSSStyleDeclaration, rect: DOMRect): boolean => {
+    // Default control padding can increase the size of a one-pixel screen-reader box.
+    const width = (el as HTMLElement).offsetWidth || rect.width;
+    const height = (el as HTMLElement).offsetHeight || rect.height;
+    const innerWidth =
+      width -
+      parseFloat(style.paddingLeft) -
+      parseFloat(style.paddingRight) -
+      parseFloat(style.borderLeftWidth) -
+      parseFloat(style.borderRightWidth);
+    const innerHeight =
+      height -
+      parseFloat(style.paddingTop) -
+      parseFloat(style.paddingBottom) -
+      parseFloat(style.borderTopWidth) -
+      parseFloat(style.borderBottomWidth);
+    return (
+      ["absolute", "fixed"].includes(style.position) &&
+      innerWidth <= 1 &&
+      innerHeight <= 1 &&
+      style.overflow === "hidden" &&
+      clipsAll(style, rect)
+    );
+  };
+  const reason = (el: Element, textStyles = true): boolean => {
+    if (
+      !el.checkVisibility({
+        checkOpacity: true,
+        checkVisibilityCSS: true,
+        contentVisibilityAuto: true,
+      })
+    )
+      return true;
     const effective = getComputedStyle(el);
     if (
       ["hidden", "collapse"].includes(effective.visibility) ||
-      parseFloat(effective.fontSize) < 2 ||
-      effective.color === "rgba(0, 0, 0, 0)"
+      (textStyles && (parseFloat(effective.fontSize) < 2 || effective.color === "rgba(0, 0, 0, 0)"))
     )
       return true;
     for (let node: Element | null = el; node; node = node.parentElement) {
@@ -76,16 +107,12 @@ function guardDocument(mode: HiddenTextMode, stripControls: (text: string) => st
       const style = getComputedStyle(node);
       const rect = node.getBoundingClientRect();
       const clipped = clipsAll(style, rect);
-      const reader =
-        ["absolute", "fixed"].includes(style.position) &&
-        rect.width <= 1 &&
-        rect.height <= 1 &&
-        style.overflow === "hidden" &&
-        clipped;
+      const reader = isReader(node, style, rect);
       if (style.display === "none" || Number(style.opacity) === 0) return true;
       if (!reader) {
         if (clipped) return true;
-        if (style.display !== "contents" && (rect.width === 0 || rect.height === 0)) return true;
+        if (node === el && style.display !== "contents" && (rect.width === 0 || rect.height === 0))
+          return true;
         // Scrollable content is not hidden merely because it is outside the viewport.
         let scrollable = false;
         for (let parent = node.parentElement; parent; parent = parent.parentElement) {
@@ -107,12 +134,57 @@ function guardDocument(mode: HiddenTextMode, stripControls: (text: string) => st
           return true;
       }
     }
+    if (!textStyles) return false;
     const color = getComputedStyle(el).color;
     for (let node: Element | null = el; node; node = node.parentElement) {
       const bg = getComputedStyle(node).backgroundColor;
       if (bg !== "rgba(0, 0, 0, 0)" && bg !== "transparent") return color === bg;
     }
     return color === "rgb(255, 255, 255)";
+  };
+  const rectsHidden = (parent: Element, rects: DOMRect[]): boolean => {
+    let clipHeight = Infinity;
+    let scrollableX = false;
+    let scrollableY = false;
+    for (let el: Element | null = parent; el; el = el.parentElement) {
+      const style = getComputedStyle(el);
+      const box = el.getBoundingClientRect();
+      if (isReader(el, style, box)) return false;
+      scrollableX ||= /(auto|scroll)/.test(style.overflowX) && el.scrollWidth > el.clientWidth;
+      scrollableY ||= /(auto|scroll)/.test(style.overflowY) && el.scrollHeight > el.clientHeight;
+      const shape = /^(circle|ellipse)\(([^)]+)\)/.exec(style.clipPath);
+      if (shape) {
+        const radii = shape[2]
+          .split(/\s+at\s+/)[0]
+          .trim()
+          .split(/\s+/);
+        const value = radii[shape[1] === "ellipse" ? 1 : 0];
+        const radius = parseFloat(value);
+        const localHeight = (el as HTMLElement).offsetHeight || box.height;
+        const localWidth = (el as HTMLElement).offsetWidth || box.width;
+        const percentBasis =
+          shape[1] === "ellipse" ? localHeight : Math.hypot(localWidth, localHeight) / Math.SQRT2;
+        const height =
+          2 * radius * (value?.endsWith("%") ? percentBasis / 100 : 1) * (box.height / localHeight);
+        if (Number.isFinite(height)) clipHeight = Math.min(clipHeight, height);
+      }
+    }
+    return !rects.some(
+      (rect) =>
+        Math.min(rect.height, clipHeight) >= 2 &&
+        rect.width > 0 &&
+        (scrollableX ||
+          (rect.right + scrollX > 0 &&
+            rect.left + scrollX < document.documentElement.scrollWidth)) &&
+        (scrollableY ||
+          (rect.bottom + scrollY > 0 &&
+            rect.top + scrollY < document.documentElement.scrollHeight)),
+    );
+  };
+  const textHidden = (text: Node): boolean => {
+    const range = document.createRange();
+    range.selectNodeContents(text);
+    return rectsHidden(text.parentElement!, Array.from(range.getClientRects()));
   };
   const walk = (original: Node, copy: Node): string => {
     if (original.nodeType === Node.TEXT_NODE) {
@@ -127,7 +199,7 @@ function guardDocument(mode: HiddenTextMode, stripControls: (text: string) => st
       (original.nodeType === Node.TEXT_NODE &&
         original.textContent?.trim() &&
         original.parentElement &&
-        reason(original.parentElement))
+        (reason(original.parentElement) || textHidden(original)))
     ) {
       hidden++;
       if (original.nodeType === Node.TEXT_NODE || mode === "flag")
@@ -187,7 +259,24 @@ function guardDocument(mode: HiddenTextMode, stripControls: (text: string) => st
       },
     });
   }
-  return { doc, hidden, hiddenTexts, visibleTexts, originals, copies };
+  // Child documents do not inherit their embedding element's rendered state.
+  const frameStates = originals
+    .filter((el) => /^(IFRAME|FRAME)$/.test(el.tagName))
+    .map((el) => {
+      const box = el.getBoundingClientRect();
+      const node = el as HTMLElement;
+      const scaleX = box.width / (node.offsetWidth || box.width || 1);
+      const scaleY = box.height / (node.offsetHeight || box.height || 1);
+      const style = getComputedStyle(el);
+      const rect = new DOMRect(
+        box.left + parseFloat(style.borderLeftWidth) * scaleX,
+        box.top + parseFloat(style.borderTopWidth) * scaleY,
+        el.clientWidth * scaleX,
+        el.clientHeight * scaleY,
+      );
+      return reason(el, false) || rectsHidden(el, [rect]);
+    });
+  return { doc, hidden, hiddenTexts, visibleTexts, originals, copies, frameStates };
 }
 
 const GUARD_SOURCE = `function(mode) { return (${guardDocument})(mode, ${stripUnsafeControls}); }`;
@@ -257,20 +346,41 @@ export function hiddenReadContext<T extends Page | Frame>(ctx: T, mode: HiddenTe
   return { context, state };
 }
 
-export async function guardSnapshot(ctx: Page | Frame, text: string, mode: HiddenTextMode) {
-  if (mode === "off") return { text, hidden: 0, applied: false };
-  const result = await ctx.evaluate(
+interface TextCensus {
+  hidden: number;
+  hiddenTexts: string[];
+  visibleTexts: string[];
+  frameStates: boolean[];
+}
+
+async function collectCensus(ctx: Page | Frame, mode: HiddenTextMode): Promise<TextCensus> {
+  return ctx.evaluate(
     ({ source, mode }) => {
       const data = new Function(`return (${source})`)()(mode);
       return {
         hidden: data.hidden,
         hiddenTexts: data.hiddenTexts,
         visibleTexts: data.visibleTexts,
+        frameStates: data.frameStates,
       };
     },
     { source: GUARD_SOURCE, mode },
   );
-  if (!Array.isArray(result?.hiddenTexts)) return { text, hidden: 0, applied: false };
+}
+
+function unknownSnapshot(text: string, hidden = false, mode: HiddenTextMode = "drop") {
+  if (hidden && mode === "drop") return { text: "", hidden: 1, applied: true };
+  return {
+    text: text
+      .split("\n")
+      .map((line) => (line.trim() ? `${line} [hidden: unknown]` : line))
+      .join("\n"),
+    hidden: 0,
+    applied: true,
+  };
+}
+
+function redactSnapshot(text: string, result: TextCensus, mode: HiddenTextMode): string {
   text = stripUnsafeControls(text);
   const visible = (result.visibleTexts as string[]).map((value) =>
     value.replace(/\s+/g, " ").trim(),
@@ -306,7 +416,114 @@ export async function guardSnapshot(ctx: Page | Frame, text: string, mode: Hidde
     if (mode === "flag" && !present)
       text += `\n- text: [hidden] ${JSON.stringify(normalized)} [/hidden]`;
   }
-  return { text: stripUnsafeControls(text), hidden: result.hidden, applied: true };
+  return stripUnsafeControls(text);
+}
+
+async function guardFrameSnapshot(
+  ctx: Page | Frame,
+  text: string,
+  mode: HiddenTextMode,
+  ancestorHidden: boolean,
+): Promise<{ text: string; hidden: number; applied: boolean }> {
+  if (mode === "off") return { text, hidden: 0, applied: false };
+  const unknown = (text: string) => unknownSnapshot(text, ancestorHidden, mode);
+  let result: TextCensus;
+  try {
+    result = await collectCensus(ctx, mode);
+  } catch {
+    return unknown(text);
+  }
+  if (!Array.isArray(result?.hiddenTexts)) return { text, hidden: 0, applied: false };
+  const lines = text.split("\n");
+  const ownLines: string[] = [];
+  const children = new Map<number, string>();
+  let hidden = result.hidden;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    ownLines.push(line);
+    if (!/^\s*-\s+iframe\b/.test(line)) continue;
+    const indent = line.length - line.trimStart().length;
+    let end = i + 1;
+    while (
+      end < lines.length &&
+      (!lines[end].trim() || lines[end].length - lines[end].trimStart().length > indent)
+    )
+      end++;
+    if (end === i + 1) continue;
+    const childText = lines.slice(i + 1, end).join("\n");
+    let childResult = unknown(childText);
+    const ref = /@((?:f\d+)?e\d+)\s*:?\s*$/.exec(line)?.[1];
+    if (ref) {
+      try {
+        const handle = await ctx.locator(`aria-ref=${ref}`).elementHandle({ timeout: 1000 });
+        try {
+          const frame = await handle?.contentFrame();
+          const index = await handle?.evaluate((el) =>
+            Array.from(document.querySelectorAll("iframe,frame")).findIndex((node) => node === el),
+          );
+          const hiddenFrame = index === undefined ? undefined : result.frameStates?.[index];
+          if (frame && typeof hiddenFrame === "boolean")
+            childResult = await guardFrameSnapshot(
+              frame,
+              childText,
+              mode,
+              ancestorHidden || hiddenFrame,
+            );
+        } finally {
+          await handle?.dispose();
+        }
+      } catch {
+        // A detached or inaccessible frame must not appear to have a clean census.
+      }
+    }
+    hidden += childResult.hidden;
+    children.set(ownLines.length, childResult.text);
+    i = end - 1;
+  }
+  // A frame's visible strings must not exempt hidden strings in another frame.
+  const guarded = redactSnapshot(ownLines.join("\n"), result, mode).split("\n");
+  const output: string[] = [];
+  for (let i = 0; i <= guarded.length; i++) {
+    if (children.has(i)) output.push(children.get(i)!);
+    if (i < guarded.length) output.push(guarded[i]);
+  }
+  if (ancestorHidden)
+    return {
+      text:
+        mode === "drop"
+          ? ""
+          : output.map((line) => (line.trim() ? `${line} [hidden]` : line)).join("\n"),
+      hidden: hidden + Math.max(1, result.visibleTexts.length),
+      applied: true,
+    };
+  return { text: output.join("\n"), hidden, applied: true };
+}
+
+export async function guardSnapshot(ctx: Page | Frame, text: string, mode: HiddenTextMode) {
+  if (mode === "off") return { text, hidden: 0, applied: false };
+  let ancestorHidden = false;
+  if ("parentFrame" in ctx) {
+    try {
+      for (let child: Frame | null = ctx; child?.parentFrame(); child = child.parentFrame()) {
+        const parent = child.parentFrame()!;
+        const result = await collectCensus(parent, mode);
+        const handle = await child.frameElement();
+        try {
+          const index = await handle.evaluate((el) =>
+            Array.from(document.querySelectorAll("iframe,frame")).findIndex((node) => node === el),
+          );
+          const hidden = result.frameStates?.[index];
+          if (typeof hidden !== "boolean") return unknownSnapshot(text);
+          ancestorHidden ||= hidden;
+        } finally {
+          await handle.dispose();
+        }
+      }
+    } catch {
+      return unknownSnapshot(text, ancestorHidden, mode);
+    }
+  }
+  return guardFrameSnapshot(ctx, text, mode, ancestorHidden);
 }
 
 export function hiddenNotice<T extends CallToolResult>(

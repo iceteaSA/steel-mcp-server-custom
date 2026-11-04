@@ -888,7 +888,7 @@ Errors: missing file paths, path escapes UPLOAD_ROOT, selector timeout, element 
             // file picker appeared (wrong target, browser config, etc.).
             // Separate this from a click failure so the agent knows what happened.
             if (/filechooser.*timeout/i.test(raw)) {
-              const currentUrl = page.url().substring(0, 200);
+              const currentUrl = clipText(page.url(), 200);
               return {
                 isError: true,
                 content: [

@@ -1494,7 +1494,15 @@ CONTEXT BUDGET — default 8K chars; scope with selector for big pages.`,
           let framesBlock = "";
           if (childFrames.length > 0) {
             const list = childFrames
-              .map((f, i) => `[${i}] name="${f.name()}" url=${f.url()}`)
+              .map((f, i) => {
+                const url = f.url();
+                const scheme = /^(?:data|blob|javascript):/i.exec(url)?.[0];
+                const shown =
+                  env.STEEL_HIDDEN_TEXT !== "off" && scheme
+                    ? `${scheme}<inline, ${Buffer.byteLength(url.slice(scheme.length), "utf8")} bytes omitted>`
+                    : url;
+                return `[${i}] name="${f.name()}" url=${shown}`;
+              })
               .join("\n");
             framesBlock = `\n--- frames ---\n${list}`;
           }

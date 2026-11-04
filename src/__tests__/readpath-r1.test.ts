@@ -133,6 +133,71 @@ test("M2 visible child-frame names do not exempt hidden text in the top document
   expect(text.split("Shared label")).toHaveLength(2);
 });
 
+for (const [kind, style] of [
+  ["opacity", "opacity:0"],
+  ["zero-size", "width:0;height:0"],
+  ["offscreen", "position:absolute;left:-9999px"],
+]) {
+  test(`M2 a ${kind} embedding iframe hides its own document and all nested frames`, async () => {
+    const child =
+      "<button>embedding-child-token</button>" +
+      frameHtml("<button>embedding-nested-token</button>");
+    await page.setContent(frameHtml(child).replace("<iframe ", `<iframe style="${style}" `));
+    const before = await page.content();
+    const result = await tool("snapshot").handler({ filter: "all", maxChars: 64000 });
+    expect(result.isError).not.toBe(true);
+    const text = result.structuredContent.text;
+    expect(text).not.toContain("embedding-child-token");
+    expect(text).not.toContain("embedding-nested-token");
+    expect(text).toMatch(/hidden: [1-9]\d*/);
+    expect(await page.content()).toBe(before);
+  });
+}
+
+test("M2 a visible embedding iframe keeps names in its document and nested frames", async () => {
+  await page.setContent(
+    frameHtml(
+      "<button>embedding-child-token</button>" +
+        frameHtml("<button>embedding-nested-token</button>"),
+    ),
+  );
+  const result = await tool("snapshot").handler({ filter: "all", maxChars: 64000 });
+  const text = result.structuredContent.text;
+  expect(text).toMatch(/button "embedding-child-token" @f\d+e\d+/);
+  expect(text).toMatch(/button "embedding-nested-token" @f\d+e\d+/);
+  expect(text).toContain("hidden: 0");
+});
+
+test("M2 targeting a child frame still checks the hidden embedding element", async () => {
+  await page.setContent(
+    frameHtml("<button>target-hidden-token</button>").replace(
+      "<iframe ",
+      '<iframe name="target" style="opacity:0" ',
+    ),
+  );
+  const result = await tool("snapshot").handler({
+    frame: "target",
+    filter: "all",
+    maxChars: 64000,
+  });
+  expect(result.isError).not.toBe(true);
+  expect(result.structuredContent.text).not.toContain("target-hidden-token");
+  expect(result.structuredContent.text).toMatch(/hidden: [1-9]\d*/);
+});
+
+test("M2 an iframe's text colour and font size do not hide its separate document", async () => {
+  await page.setContent(
+    frameHtml("<button>frame-colour-kept-token</button>").replace(
+      "<iframe ",
+      '<iframe style="color:transparent;font-size:1px" ',
+    ),
+  );
+  const result = await tool("snapshot").handler({ filter: "all", maxChars: 64000 });
+  expect(result.isError).not.toBe(true);
+  expect(result.structuredContent.text).toContain("frame-colour-kept-token");
+  expect(result.structuredContent.text).toContain("hidden: 0");
+});
+
 test("M2 an uninspectable frame is marked unknown rather than reported as clean", async () => {
   await page.setContent(frameHtml("<button>unknown-frame-token</button>"));
   const frame = page.frames()[1];
