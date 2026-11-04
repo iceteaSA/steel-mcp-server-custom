@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it } from "bun:test";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import type http from "node:http";
+import http from "node:http";
 import { startRelayServer, type PushPayload } from "../relay";
 import { SigninStore } from "../signin";
 import { WebSocket } from "ws";
@@ -151,6 +151,23 @@ it("authenticates a WebSocket through its first message and sends pending state"
   socket.terminate();
 });
 
+it("rejects a correct first secret when the authentication deadline already elapsed", async () => {
+  await store.create(caller, input);
+  const originalNow = Date.now;
+  const socket = new WebSocket(origin.replace("http:", "ws:") + "/signin/events");
+  const outcome = new Promise<number | string>((resolve, reject) => {
+    socket.once("close", (code) => resolve(code));
+    socket.once("message", () => resolve("disclosed pending requests"));
+    socket.once("error", reject);
+  });
+  socket.once("open", () => {
+    Date.now = () => originalNow() + 2100;
+    socket.send(JSON.stringify({ secret: "fake-signin-secret" }));
+  });
+  try { expect(await outcome).toBe(1008); }
+  finally { Date.now = originalNow; socket.terminate(); }
+});
+
 for (const secret of [undefined, "wrong-secret"]) {
   it(`closes WebSocket ${secret === undefined ? "without authentication after two seconds" : "with a wrong secret"} without disclosing requests`, async () => {
     await store.create(caller, input);
@@ -180,6 +197,13 @@ it("closes within one second with authenticated, unauthenticated and idle HTTP c
     expect(server.listening).toBe(false);
     expect(authenticated.readyState).not.toBe(WebSocket.OPEN);
     expect(unauthenticated.readyState).not.toBe(WebSocket.OPEN);
+    const replacement = http.createServer();
+    await new Promise<void>((resolve, reject) => {
+      replacement.once("error", reject);
+      replacement.listen(Number(new URL(origin).port), "127.0.0.1", resolve);
+    });
+    expect(replacement.listening).toBe(true);
+    await new Promise<void>((resolve) => replacement.close(() => resolve()));
   } finally {
     if (deadline) clearTimeout(deadline);
     authenticated.terminate();
