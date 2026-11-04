@@ -6,6 +6,7 @@ import http from "node:http";
 import { startRelayServer, type PushPayload } from "../relay";
 import { SigninStore } from "../signin";
 import { WebSocket } from "ws";
+import { readProfileData } from "../profile-store";
 
 let server: http.Server;
 let directory: string;
@@ -60,6 +61,31 @@ function post(id: string, body: PushPayload = state) {
     method: "POST",
     headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  });
+}
+
+for (const mode of ["manual", "signin"] as const) {
+  async function pushMode() {
+    if (mode === "signin") return post((await store.create(caller, input)).id);
+    return fetch(origin + "/push", {
+      method: "POST",
+      headers: { Authorization: "Bearer fake-signin-secret", "Content-Type": "application/json" },
+      body: JSON.stringify(state),
+    });
+  }
+  it(`${mode} push creates a missing profile without weakening strict reads`, async () => {
+    const file = path.join(directory, "profiles/work.json");
+    await expect(readProfileData(file)).rejects.toThrow();
+    expect((await pushMode()).status).toBe(200);
+    expect((await readProfileData(file)).cookies?.[0].value).toBe("CANARY_PRIVATE");
+  });
+  it(`${mode} push rejects schema-invalid saved state without replacing it`, async () => {
+    const file = path.join(directory, "profiles/work.json");
+    const invalid = JSON.stringify({ cookies: [{ name: "invalid", value: 12 }] });
+    await fs.writeFile(file, invalid);
+    await expect(readProfileData(file)).rejects.toThrow();
+    expect((await pushMode()).status).toBe(400);
+    expect(await fs.readFile(file, "utf8")).toBe(invalid);
   });
 }
 

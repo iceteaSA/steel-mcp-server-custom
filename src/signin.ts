@@ -4,6 +4,7 @@ import { constants } from "node:fs";
 import path from "node:path";
 import { EventEmitter } from "node:events";
 import { isIP } from "node:net";
+import { atomicWriteJson, serialize } from "./profile-store.js";
 import { getDomain } from "tldts";
 import { isValidProfileName } from "./helpers.js";
 
@@ -93,7 +94,6 @@ export function normalizeSite(value: string): { site: string; host: string; doma
 export class SigninStore extends EventEmitter {
   private state: SavedState = { requests: [], grants: [], history: [] };
   private readonly now: () => number;
-  private queue: Promise<unknown> = Promise.resolve();
   private timer?: ReturnType<typeof setInterval>;
   private stopping = false;
   private shutdownPromise?: Promise<void>;
@@ -144,18 +144,10 @@ export class SigninStore extends EventEmitter {
     return path.join(this.options.profilesDir, ".signin-state.json");
   }
   private serial<T>(operation: () => Promise<T>): Promise<T> {
-    const next = this.queue.then(operation);
-    this.queue = next.catch(() => {});
-    return next;
+    return serialize(this, operation);
   }
   private async save(): Promise<void> {
-    const temporary = `${this.stateFile}.${crypto.randomUUID()}.tmp`;
-    try {
-      await fs.writeFile(temporary, JSON.stringify(this.state), { mode: 0o600, flag: "wx" });
-      await fs.rename(temporary, this.stateFile);
-    } finally {
-      await fs.unlink(temporary).catch(() => {});
-    }
+    await atomicWriteJson(this.stateFile, this.state);
     this.emit("change");
   }
   private copy<T>(value: T): T {

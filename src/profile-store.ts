@@ -2,6 +2,37 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import type { BrowserContext } from "patchright";
+import { z } from "zod";
+
+export const domainSchema = z
+  .string()
+  .max(253)
+  .regex(/^\.?[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$/);
+export const originSchema = z.string().refine((value) => {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) && url.origin === value;
+  } catch {
+    return false;
+  }
+});
+export const cookieSchema = z.object({
+  name: z.string(),
+  value: z.string(),
+  domain: domainSchema,
+  path: z.string().startsWith("/"),
+  expires: z.number().optional(),
+  httpOnly: z.boolean().optional(),
+  secure: z.boolean().optional(),
+  sameSite: z
+    .enum(["Strict", "Lax", "None", "No_restriction"])
+    .transform((value) => (value === "No_restriction" ? "None" : value))
+    .optional(),
+});
+export const storageSchema = z.record(originSchema, z.record(z.string(), z.string()));
+const stateSchema = z
+  .object({ cookies: z.array(cookieSchema).optional(), localStorage: storageSchema.optional() })
+  .passthrough();
 
 type Cookie = Parameters<BrowserContext["addCookies"]>[0][number] & {
   domain: string;
@@ -12,14 +43,16 @@ export interface ProfileData {
   localStorage?: Record<string, Record<string, string>>;
   [key: string]: unknown;
 }
-const writes = new Map<string, Promise<unknown>>();
+const writes = new Map<string | object, Promise<unknown>>();
 const revisions = new Map<string, number>();
 
 export function profileRevision(file: string): number {
   return revisions.get(path.resolve(file)) ?? 0;
 }
 export function withProfileWrite<T>(file: string, operation: () => Promise<T>): Promise<T> {
-  const key = path.resolve(file);
+  return serialize(path.resolve(file), operation);
+}
+export function serialize<T>(key: string | object, operation: () => Promise<T>): Promise<T> {
   const next = (writes.get(key) ?? Promise.resolve()).catch(() => {}).then(operation);
   writes.set(key, next);
   const cleanup = () => {
@@ -28,24 +61,27 @@ export function withProfileWrite<T>(file: string, operation: () => Promise<T>): 
   void next.then(cleanup, cleanup);
   return next;
 }
-export async function readProfileData(file: string): Promise<ProfileData> {
+export async function readProfileData(file: string, allowMissing = false): Promise<ProfileData> {
   try {
     const stat = await fs.lstat(file);
     if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Invalid profile file");
-    return JSON.parse(await fs.readFile(file, "utf8")) as ProfileData;
+    return stateSchema.parse(JSON.parse(await fs.readFile(file, "utf8")));
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
+    if (allowMissing && (error as NodeJS.ErrnoException).code === "ENOENT") return {};
     throw error;
   }
 }
 // Callers hold `withProfileWrite` across the read, merge, and atomic write.
 export async function writeProfileData(file: string, state: ProfileData): Promise<void> {
+  await atomicWriteJson(file, state);
+  revisions.set(path.resolve(file), profileRevision(file) + 1);
+}
+export async function atomicWriteJson(file: string, state: unknown): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
     await fs.writeFile(temporary, JSON.stringify(state, null, 2), { mode: 0o600, flag: "wx" });
     await fs.rename(temporary, file);
-    revisions.set(path.resolve(file), profileRevision(file) + 1);
   } finally {
     await fs.unlink(temporary).catch(() => {});
   }

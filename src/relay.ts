@@ -22,7 +22,18 @@ import { encryptJSON, decryptJSON } from "./crypto.js";
 import { assertSafeProfilePath, isValidProfileName } from "./helpers.js";
 import { WebSocket, WebSocketServer } from "ws";
 import { SigninStore, type SigninRequest } from "./signin.js";
-import { withProfileWrite, writeProfileData } from "./profile-store.js";
+import {
+  withProfileWrite,
+  writeProfileData,
+  readProfileData,
+  mergeProfileData,
+  serialize,
+  domainSchema,
+  originSchema,
+  cookieSchema,
+  storageSchema,
+  type ProfileData as ProfileState,
+} from "./profile-store.js";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -72,32 +83,6 @@ export interface RelayConfig {
   onProfileUpdated?: (profile: string) => boolean | void | Promise<boolean | void>;
 }
 
-const domainSchema = z
-  .string()
-  .max(253)
-  .regex(/^\.?[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$/);
-const originSchema = z.string().refine((value) => {
-  try {
-    const url = new URL(value);
-    return ["http:", "https:"].includes(url.protocol) && url.origin === value;
-  } catch {
-    return false;
-  }
-});
-const cookieSchema = z.object({
-  name: z.string(),
-  value: z.string(),
-  domain: domainSchema,
-  path: z.string().startsWith("/"),
-  expires: z.number().optional(),
-  httpOnly: z.boolean().optional(),
-  secure: z.boolean().optional(),
-  sameSite: z
-    .enum(["Strict", "Lax", "None", "No_restriction"])
-    .transform((value) => (value === "No_restriction" ? "None" : value))
-    .optional(),
-});
-const storageSchema = z.record(originSchema, z.record(z.string(), z.string()));
 const pushSchema = z.object({
   profile: z.string().refine(isValidProfileName),
   cookies: z.array(cookieSchema).optional(),
@@ -112,25 +97,6 @@ const pushSchema = z.object({
     })
     .optional(),
 });
-const stateSchema = z
-  .object({
-    cookies: z.array(cookieSchema).optional(),
-    localStorage: storageSchema.optional(),
-  })
-  .passthrough();
-type ProfileState = z.infer<typeof stateSchema>;
-
-async function readProfile(name: string, config: RelayConfig): Promise<ProfileState> {
-  const file = assertSafeProfilePath(name, config.profilesDir);
-  const stat = await fs.lstat(file);
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Invalid profile file");
-  return stateSchema.parse(JSON.parse(await fs.readFile(file, "utf8")));
-}
-
-async function writeProfile(name: string, state: ProfileState, config: RelayConfig): Promise<void> {
-  const file = assertSafeProfilePath(name, config.profilesDir);
-  await writeProfileData(file, state);
-}
 
 function normalizeDomain(domain: string): string {
   return domain.replace(/^\./, "").toLowerCase();
@@ -213,44 +179,14 @@ async function handlePush(payload: PushPayload, config: RelayConfig): Promise<Pu
   // Defense in depth: assertSafeProfilePath validates the name AND confirms
   // the resolved path stays under profilesDir (catches bugs in the regex).
   await withProfileWrite(assertSafeProfilePath(profileName, config.profilesDir), async () => {
-    let existingState: ProfileState = {};
-    try {
-      existingState = await readProfile(profileName, config);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-
-    // Merge cookies: new cookies override existing ones (by name+domain+path)
-    const mergedCookies = [...(existingState.cookies ?? [])];
-    if (cookies?.length) {
-      for (const newCookie of cookies) {
-        const idx = mergedCookies.findIndex(
-          (c) =>
-            c.name === newCookie.name && c.domain === newCookie.domain && c.path === newCookie.path,
-        );
-        if (idx >= 0) {
-          mergedCookies[idx] = newCookie;
-        } else {
-          mergedCookies.push(newCookie);
-        }
-      }
-    }
-
-    // Merge localStorage: new origins override existing, within an origin new keys override
-    const mergedLS: Record<string, Record<string, string>> = { ...existingState.localStorage };
-    if (localStorage) {
-      for (const [origin, entries] of Object.entries(localStorage)) {
-        mergedLS[origin] = { ...mergedLS[origin], ...entries };
-      }
-    }
-
+    const file = assertSafeProfilePath(profileName, config.profilesDir);
+    const existingState = await readProfileData(file, true);
     const state = {
-      cookies: mergedCookies,
-      localStorage: mergedLS,
+      ...mergeProfileData(existingState, { cookies, localStorage }),
       savedAt: new Date().toISOString(),
       pushedFrom: "extension",
     };
-    await writeProfile(profileName, state, config);
+    await writeProfileData(file, state);
   });
 
   // --- Credentials ---
@@ -358,12 +294,7 @@ export function startRelayServer(config: RelayConfig): http.Server {
       ? Promise.resolve(config.signinStore)
       : SigninStore.open({ profilesDir: config.profilesDir }));
   // Each update reads and writes a complete file. Concurrent updates can discard data.
-  let mutations: Promise<unknown> = Promise.resolve();
-  const mutate = <T>(operation: () => Promise<T>): Promise<T> => {
-    const next = mutations.then(operation);
-    mutations = next.catch(() => {});
-    return next;
-  };
+  const mutate = <T>(operation: () => Promise<T>): Promise<T> => serialize(config, operation);
   const srv = http.createServer(async (req, res) => {
     if (refusedHttp.has(req.socket)) return;
     if (!/^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i.test(req.headers.host ?? "")) {
@@ -558,7 +489,7 @@ export function startRelayServer(config: RelayConfig): http.Server {
           jsonResponse(res, 200, result);
           return;
         }
-        await mutations;
+        await mutate(async () => {});
         if (req.method === "GET" && url.pathname === "/profiles") {
           const files = await fs
             .readdir(config.profilesDir)
@@ -573,7 +504,12 @@ export function startRelayServer(config: RelayConfig): http.Server {
             .sort();
           const profiles = [];
           for (const name of names)
-            profiles.push(summarizeProfile(name, await readProfile(name, config)));
+            profiles.push(
+              summarizeProfile(
+                name,
+                await readProfileData(assertSafeProfilePath(name, config.profilesDir)),
+              ),
+            );
           jsonResponse(res, 200, { profiles });
           return;
         }
@@ -586,14 +522,21 @@ export function startRelayServer(config: RelayConfig): http.Server {
           return;
         }
         if (req.method === "GET" && segments.length === 2) {
-          jsonResponse(res, 200, summarizeProfile(name, await readProfile(name, config)));
+          jsonResponse(
+            res,
+            200,
+            summarizeProfile(
+              name,
+              await readProfileData(assertSafeProfilePath(name, config.profilesDir)),
+            ),
+          );
           return;
         }
         if (req.method === "DELETE" && segments.length === 4 && segments[2] === "domains") {
           const domain = normalizeDomain(domainSchema.parse(segments[3]));
           const summary = await mutate(() =>
             withProfileWrite(assertSafeProfilePath(name, config.profilesDir), async () => {
-              const state = await readProfile(name, config);
+              const state = await readProfileData(assertSafeProfilePath(name, config.profilesDir));
               state.cookies = (state.cookies ?? []).filter(
                 (cookie) => normalizeDomain(cookie.domain) !== domain,
               );
@@ -603,7 +546,7 @@ export function startRelayServer(config: RelayConfig): http.Server {
                 ),
               );
               state.savedAt = new Date().toISOString();
-              await writeProfile(name, state, config);
+              await writeProfileData(assertSafeProfilePath(name, config.profilesDir), state);
               return summarizeProfile(name, state);
             }),
           );

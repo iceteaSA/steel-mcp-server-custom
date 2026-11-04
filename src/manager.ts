@@ -1722,7 +1722,7 @@ export class BrowserManager {
         }
       }
 
-      const disk = await readProfileData(savedPath);
+      const disk = await readProfileData(savedPath, true);
       const stale = (this.profileVersions.get(name) ?? 0) !== profileRevision(savedPath);
       // A newer file can contain state that this context has not received.
       const snapshot = { cookies, localStorage };
