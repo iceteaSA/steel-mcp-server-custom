@@ -209,3 +209,32 @@ it("sends one high-priority ntfy message after 60 seconds with a fake clock and 
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+it("does not hold the request store queue while ntfy waits for a response", async () => {
+  const file = path.join(directory, "fake-topic");
+  await fs.writeFile(file, "https://ntfy.invalid/fake-topic", { mode: 0o600 });
+  const notified = await SigninStore.open({ profilesDir: path.join(directory, "nonblocking"), now: () => now, automaticTimers: false, ntfyTopicFile: file });
+  const originalFetch = globalThis.fetch;
+  let entered!: () => void;
+  let release!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const response = new Promise<void>((resolve) => { release = resolve; });
+  globalThis.fetch = (async () => { entered(); await response; return new Response("ok"); }) as typeof fetch;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let sending: Promise<void> | undefined;
+  try {
+    await notified.create(caller, input);
+    now += 60_000;
+    sending = notified.tick();
+    await started;
+    const created = notified.create({ sessionID: "other" }, input).then(() => true);
+    const blocked = new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), 1000); });
+    expect(await Promise.race([created, blocked])).toBe(true);
+  } finally {
+    release();
+    if (timer) clearTimeout(timer);
+    await sending;
+    globalThis.fetch = originalFetch;
+    notified.close();
+  }
+});
