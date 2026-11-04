@@ -16,7 +16,7 @@ import crypto from "crypto";
 import http from "http";
 import fs from "fs/promises";
 import path from "path";
-import type { Socket } from "node:net";
+import type { Duplex } from "node:stream";
 import { z } from "zod";
 import { encryptJSON, decryptJSON } from "./crypto.js";
 import { assertSafeProfilePath, isValidProfileName } from "./helpers.js";
@@ -301,17 +301,26 @@ function readBody(req: http.IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let size = 0;
+    let oversized = false;
     const MAX_BODY = 5 * 1024 * 1024; // 5MB
     req.on("data", (chunk: Buffer) => {
+      if (oversized) return;
       size += chunk.length;
       if (size > MAX_BODY) {
-        req.destroy();
-        reject(new Error("Request body too large"));
+        // An error response before the complete request can cause a connection error.
+        oversized = true;
+        chunks.length = 0;
         return;
       }
       chunks.push(chunk);
     });
-    req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+    req.on("end", () => {
+      if (oversized) {
+        reject(Object.assign(new Error("Request body too large"), { code: "BODY_TOO_LARGE" }));
+        return;
+      }
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
     req.on("error", reject);
   });
 }
@@ -333,7 +342,20 @@ function jsonResponse(res: http.ServerResponse, status: number, body: unknown): 
   res.end(json);
 }
 
+function rejectSocket(socket: Duplex, status: 403 | 503, error: string): void {
+  socket.once("error", () => socket.destroy());
+  const body = JSON.stringify({ error });
+  socket.end(
+    `HTTP/1.1 ${status} ${http.STATUS_CODES[status]}\r\nConnection: close\r\nContent-Type: application/json\r\nContent-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`,
+    () => socket.destroy(),
+  );
+}
+
 export function startRelayServer(config: RelayConfig): http.Server {
+  const accepted = new Set<Duplex>();
+  const httpSockets = new Set<Duplex>();
+  const refusedHttp = new WeakSet<Duplex>();
+  const admittedWebSockets = new Set<WebSocket>();
   let signinStore: Promise<SigninStore> | undefined;
   const getSigninStore = () =>
     (signinStore ??= config.signinStore
@@ -347,6 +369,7 @@ export function startRelayServer(config: RelayConfig): http.Server {
     return next;
   };
   const srv = http.createServer(async (req, res) => {
+    if (refusedHttp.has(req.socket)) return;
     if (!/^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i.test(req.headers.host ?? "")) {
       jsonResponse(res, 403, { error: "Forbidden host." });
       return;
@@ -424,6 +447,9 @@ export function startRelayServer(config: RelayConfig): http.Server {
                 const payload = pushSchema
                   .omit({ credentials: true })
                   .extend({
+                    cookies: z
+                      .array(cookieSchema.extend({ hostOnly: z.boolean().optional() }))
+                      .optional(),
                     remember: z.boolean().optional(),
                     useGrant: z.boolean().optional(),
                     note: z.string().max(1000).optional(),
@@ -443,17 +469,44 @@ export function startRelayServer(config: RelayConfig): http.Server {
                         )
                       )
                         throw new Error("signin_site_mismatch");
+                      for (const cookie of payload.cookies ?? []) {
+                        if (
+                          (cookie.name.startsWith("__Secure-") ||
+                            cookie.name.startsWith("__Host-")) &&
+                          cookie.secure !== true
+                        )
+                          throw new Error("signin_cookie_prefix");
+                        if (
+                          cookie.name.startsWith("__Host-") &&
+                          (cookie.path !== "/" ||
+                            cookie.hostOnly !== true ||
+                            cookie.domain.startsWith(".") ||
+                            normalizeDomain(cookie.domain) !== pending.domains[0])
+                        )
+                          throw new Error("signin_cookie_prefix");
+                      }
                       if (
                         Object.keys(payload.localStorage ?? {}).some(
                           (origin) =>
                             !pending.domains.includes(new URL(origin).hostname) ||
-                            (pending.site.includes("://") && origin !== pending.site),
+                            (pending.site.includes("://")
+                              ? origin !== pending.site
+                              : new URL(origin).protocol !== "https:" ||
+                                new URL(origin).port !== ""),
                         )
                       )
                         throw new Error("signin_site_mismatch");
                     },
                     write: async () => {
-                      await handlePush(payload, config);
+                      await handlePush(
+                        {
+                          ...payload,
+                          cookies: payload.cookies?.map(
+                            ({ hostOnly: _hostOnly, ...cookie }) => cookie,
+                          ),
+                        },
+                        config,
+                      );
                       return {
                         cookieCount: payload.cookies?.length ?? 0,
                         storageKeyCount: Object.values(payload.localStorage ?? {}).reduce(
@@ -482,15 +535,20 @@ export function startRelayServer(config: RelayConfig): http.Server {
                 return;
               }
             } catch (error) {
-              const code =
-                error instanceof Error &&
-                /^signin_(unknown|used|expired|cancelled|denied|site_mismatch|profile_mismatch|grant_required)$/.test(
-                  error.message,
-                )
+              const tooLarge = (error as NodeJS.ErrnoException).code === "BODY_TOO_LARGE";
+              const code = tooLarge
+                ? "body_too_large"
+                : error instanceof Error &&
+                    /^signin_(unknown|used|expired|cancelled|denied|site_mismatch|profile_mismatch|grant_required|cookie_prefix)$/.test(
+                      error.message,
+                    )
                   ? error.message
                   : "signin_invalid";
               await store.audit(request, `rejected:${code}`);
-              jsonResponse(res, code === "signin_used" ? 409 : 400, { error: code });
+              if (tooLarge) res.setHeader("Connection", "close");
+              jsonResponse(res, tooLarge ? 413 : code === "signin_used" ? 409 : 400, {
+                error: code,
+              });
               return;
             }
           }
@@ -555,6 +613,11 @@ export function startRelayServer(config: RelayConfig): http.Server {
         }
         jsonResponse(res, 404, { error: "Not found. Check the relay endpoint." });
       } catch (err) {
+        if ((err as NodeJS.ErrnoException).code === "BODY_TOO_LARGE") {
+          res.setHeader("Connection", "close");
+          jsonResponse(res, 413, { error: "body_too_large" });
+          return;
+        }
         // Parse errors can include sign-in values or private file paths.
         const missing = (err as NodeJS.ErrnoException).code === "ENOENT";
         jsonResponse(res, missing ? 404 : 400, {
@@ -575,12 +638,21 @@ export function startRelayServer(config: RelayConfig): http.Server {
     maxPayload: 4096,
     perMessageDeflate: false,
   });
-  const accepted = new Set<Socket>();
-  srv.on("connection", (socket: Socket) => {
+  srv.on("connection", (socket: Duplex) => {
     accepted.add(socket);
-    socket.once("close", () => accepted.delete(socket));
+    socket.once("close", () => {
+      accepted.delete(socket);
+      httpSockets.delete(socket);
+    });
+    if (httpSockets.size >= 64) {
+      refusedHttp.add(socket);
+      rejectSocket(socket, 503, "connection_limit");
+      return;
+    }
+    httpSockets.add(socket);
   });
   srv.on("upgrade", (req, socket, head) => {
+    if (refusedHttp.has(socket)) return;
     if (
       !/^(?:localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/i.test(req.headers.host ?? "") ||
       req.url !== "/signin/events"
@@ -588,7 +660,26 @@ export function startRelayServer(config: RelayConfig): http.Server {
       socket.destroy();
       return;
     }
-    sockets.handleUpgrade(req, socket, head, (ws) => sockets.emit("connection", ws));
+    if (
+      req.headers.origin !== undefined &&
+      !/^chrome-extension:\/\/[a-p]{32}$/.test(req.headers.origin)
+    ) {
+      rejectSocket(socket, 403, "forbidden_origin");
+      return;
+    }
+    sockets.handleUpgrade(req, socket, head, (ws) => {
+      if (admittedWebSockets.size >= 16) {
+        ws.close(1013, "Relay connection limit");
+        const deadline = setTimeout(() => ws.terminate(), 100);
+        deadline.unref();
+        ws.once("close", () => clearTimeout(deadline));
+        return;
+      }
+      httpSockets.delete(socket);
+      admittedWebSockets.add(ws);
+      ws.once("close", () => admittedWebSockets.delete(ws));
+      sockets.emit("connection", ws);
+    });
   });
   sockets.on("connection", (ws) => {
     let authenticated = false;

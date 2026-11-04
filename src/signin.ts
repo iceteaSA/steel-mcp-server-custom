@@ -493,10 +493,11 @@ export class SigninStore extends EventEmitter {
               }
             })
             .replace(/\p{Cc}/gu, " ");
+        // The `reason` field can contain private data. Do not send it to the notification service.
         const response = await fetch(url, {
           method: "POST",
           headers: { Priority: "high", "Content-Type": "text/plain; charset=utf-8" },
-          body: `${clean(request.caller.agent ?? "Agent")} asks for ${request.site} sign-in into profile ${request.profile}: ${clean(request.reason).slice(0, 100)}`,
+          body: `${clean(request.caller.agent ?? "Agent")} asks for ${request.site} sign-in into profile ${request.profile}`,
           signal: AbortSignal.timeout(5000),
           redirect: "error",
         });

@@ -211,15 +211,14 @@ async function signinData(request, countOnly) {
   const cookies = (await chrome.cookies.getAll({})).filter((cookie) =>
     granted.includes(normalizeDomain(cookie.domain)),
   );
-  const host = siteUrl(
+  const requested = siteUrl(
     request.site.includes("://") ? request.site : `https://${request.site}`,
-  ).hostname;
+  );
+  const host = requested.hostname;
   const tab = (await chrome.tabs.query({})).find((candidate) => {
     try {
       const url = siteUrl(candidate.url);
-      return (
-        url.hostname === host && (!request.site.includes("://") || url.origin === request.site)
-      );
+      return url.hostname === host && url.origin === requested.origin;
     } catch {
       return false;
     }
@@ -256,7 +255,10 @@ export async function pushSignin(request, remember = false, useGrant = false, no
     method: "POST",
     body: {
       profile: validProfile(request.profile),
-      cookies: data.cookies.map(convertCookie),
+      cookies: data.cookies.map((cookie) => ({
+        ...convertCookie(cookie),
+        ...(typeof cookie.hostOnly === "boolean" ? { hostOnly: cookie.hostOnly } : {}),
+      })),
       ...(data.storage.available ? { localStorage: { [data.origin]: data.storage.entries } } : {}),
       remember: remember === true,
       ...(useGrant ? { useGrant: true } : {}),
