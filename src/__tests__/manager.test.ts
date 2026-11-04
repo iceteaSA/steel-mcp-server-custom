@@ -22,6 +22,8 @@ import { makeRegistrar as makeMcpRegistrar } from "../tools/shared.js";
 const mockEnv: Env = {
   STEEL_LANES: "off",
   LANE_IDLE_MS: 900000,
+  LANE_DRAIN_MS: 5000,
+  LANE_MAX: 8,
   BROWSER_MODE: "steel",
   STEEL_API_KEY: undefined,
   STEEL_BASE_URL: "http://localhost:3000",

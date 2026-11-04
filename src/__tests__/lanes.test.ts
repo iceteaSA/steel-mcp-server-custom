@@ -555,7 +555,7 @@ test("saved profile restoration targets the lane context without adding a profil
       ),
     ).toContain("saved-local");
     expect(structured(await f.call("b", "cookies"))).toEqual({ cookies: [] });
-    const profiles = structured(await f.call(undefined, "list_profiles"))?.profiles as Array<
+    const profiles = structured(await f.call("a", "list_profiles"))?.profiles as Array<
       Record<string, unknown>
     >;
     expect(profiles).toContainEqual({

@@ -120,14 +120,24 @@ runServer().catch((error) => {
 
 process.on("SIGINT", async () => {
   console.error("Received SIGINT, cleaning up...");
+  const deadline =
+    env.STEEL_LANES === "on"
+      ? setTimeout(() => process.exit(0), env.LANE_DRAIN_MS + 1500)
+      : undefined;
   await closeLanes?.();
   await rootManager.stop();
+  clearTimeout(deadline);
   process.exit(0);
 });
 
 process.on("SIGTERM", async () => {
   console.error("Received SIGTERM, cleaning up...");
+  const deadline =
+    env.STEEL_LANES === "on"
+      ? setTimeout(() => process.exit(0), env.LANE_DRAIN_MS + 1500)
+      : undefined;
   await closeLanes?.();
   await rootManager.stop();
+  clearTimeout(deadline);
   process.exit(0);
 });

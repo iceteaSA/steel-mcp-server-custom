@@ -38,10 +38,12 @@ return tab;
 - Use `list_lanes` for caller names, ages, and tab counts, not other lanes' URLs.
 - On `not_in_lane`, select one of your tabs through `list_tabs`.
 - On `lane_closed`, discard previous tab IDs and call without `tabId` to open a new lane.
+- On `lanes_full`, use `list_lanes` to inspect usage and `close_lane` to release your lane before a retry.
 - Read closure NOTE lines before the next step. Close, idle, or restart can reset cookies, tabs, and buffers.
 - Save a named profile only when the task must keep state on disk.
 - Load a profile through `new_tab({profile})` only when its saved state applies to the task.
 - Use one shared context for all profile names in a lane.
+- Send caller metadata for credential writes and deletes, even without a browser lane.
 - In legacy mode (`STEEL_LANES=off`), use unique owner labels and do not stop the shared browser.
 
 ## Observation and interaction

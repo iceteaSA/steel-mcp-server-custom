@@ -1,7 +1,11 @@
 import { AsyncLocalStorage } from "node:async_hooks";
+import { randomBytes } from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Page } from "patchright";
 import { BrowserManager, type Env } from "./manager.js";
+
+// A random process offset reduces restart collisions. Leave half the safe range for growth.
+let nextTabId = Number(randomBytes(8).readBigUInt64BE() >> 12n);
 
 type CloseReason = "idle" | "close_lane" | "restart" | "session-ended";
 type Lane = {
@@ -14,6 +18,7 @@ type Lane = {
   queues: Map<number, Promise<void>>;
   pageStarting?: Promise<Page>;
   disposal?: Promise<void>;
+  newlyOpened: boolean;
 };
 
 export interface LaneOptions {
@@ -49,7 +54,7 @@ export class LaneRuntime {
   private readonly opening = new Map<string, Promise<Lane>>();
   private readonly closed = new Map<string, { reason: CloseReason; at: number }>();
   private readonly now: () => number;
-  private nextTabId = Number(process.hrtime.bigint() / 1000n);
+  private readonly profileCaller = new AsyncLocalStorage<string | undefined>();
   private readonly timer: ReturnType<typeof setInterval>;
   private stopping = false;
   private readonly endedCleanup = new Set<Promise<void>>();
@@ -62,7 +67,7 @@ export class LaneRuntime {
     this.unsubscribe = options.manager.onSessionEnded(() => {
       const at = this.now();
       for (const caller of [...this.lanes.keys(), ...this.opening.keys()]) {
-        this.closed.set(caller, { reason: "session-ended", at });
+        this.rememberClosed(caller, "session-ended", at);
       }
       for (const lane of this.lanes.values()) {
         lane.closing = true;
@@ -130,34 +135,45 @@ export class LaneRuntime {
   }
 
   private async listProfiles() {
-    const profiles = new Map((await this.options.manager.listProfiles()).map((p) => [p.name, p]));
-    for (const lane of this.lanes.values()) {
+    const profiles = new Map(
+      (await this.options.manager.listProfiles()).map((p) => [
+        p.name,
+        { ...p, active: false, tabCount: 0 },
+      ]),
+    );
+    const caller = this.profileCaller.getStore();
+    const lane = caller ? this.lanes.get(caller) : undefined;
+    if (lane && !lane.closing) {
       for (const profile of await lane.manager.listProfiles()) {
-        if (!profile.active) continue;
-        const previous = profiles.get(profile.name);
-        profiles.set(profile.name, {
-          ...profile,
-          tabCount: profile.tabCount + (previous?.active ? previous.tabCount : 0),
-        });
+        if (profile.active) profiles.set(profile.name, profile);
       }
     }
     return [...profiles.values()];
   }
 
-  private async open(caller: string): Promise<Lane> {
+  private async open(caller: string, mayWait = true): Promise<Lane> {
     const existing = this.lanes.get(caller);
     if (existing && !existing.closing) return existing;
     const pending = this.opening.get(caller);
     if (pending) return pending;
+    if (existing?.closing && existing.disposal && mayWait && !this.stopping) {
+      await existing.disposal;
+      return this.open(caller, false);
+    }
     if (existing?.closing || this.stopping)
       throw new Error("lane_closed: lane is closing; retry without a tabId.");
+    if (new Set([...this.lanes.keys(), ...this.opening.keys()]).size >= this.options.env.LANE_MAX) {
+      throw new Error(
+        "lanes_full: lane capacity reached. Use list_lanes to inspect usage and close_lane to release your lane, then retry.",
+      );
+    }
     const promise = (async () => {
       let lane: Lane;
       const manager = await this.options.manager.createLane(
         () => {
-          // The monotonic clock keeps IDs distinct across MCP restarts on the same boot.
-          this.nextTabId = Math.max(this.nextTabId + 1, Number(process.hrtime.bigint() / 1000n));
-          return this.nextTabId;
+          if (nextTabId >= Number.MAX_SAFE_INTEGER)
+            throw new Error("lane_closed: numeric tab IDs exhausted; restart the MCP process.");
+          return ++nextTabId;
         },
         (id) => {
           const scope = this.current.getStore();
@@ -178,6 +194,7 @@ export class LaneRuntime {
         closing: false,
         running: new Set(),
         queues: new Map(),
+        newlyOpened: true,
       };
       this.lanes.set(caller, lane);
       return lane;
@@ -203,8 +220,6 @@ export class LaneRuntime {
         );
       }
     }
-    if (!this.closed.has(caller) && !own)
-      this.closed.set(caller, { reason: "restart", at: this.now() });
     throw new Error(
       "lane_closed: tab is closed or predates this MCP process. Omit tabId to open a fresh lane.",
     );
@@ -229,23 +244,47 @@ export class LaneRuntime {
     if (lane.disposal) return lane.disposal;
     lane.closing = true;
     lane.disposal = (async () => {
-      await Promise.allSettled(lane.running);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.allSettled(lane.running),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, this.options.env.LANE_DRAIN_MS);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
+      }
       await lane.manager.stop();
       if (this.lanes.get(lane.caller) === lane) {
-        this.closed.set(lane.caller, { reason, at: this.now() });
+        this.rememberClosed(lane.caller, reason);
         this.lanes.delete(lane.caller);
       }
     })();
     return lane.disposal;
   }
 
+  private pruneClosed(): void {
+    const cutoff = this.now() - 24 * 60 * 60 * 1000;
+    for (const [caller, record] of this.closed) {
+      if (record.at <= cutoff) this.closed.delete(caller);
+    }
+    while (this.closed.size > 1000) this.closed.delete(this.closed.keys().next().value!);
+  }
+
+  private rememberClosed(caller: string, reason: CloseReason, at = this.now()): void {
+    this.closed.delete(caller);
+    this.closed.set(caller, { reason, at });
+    this.pruneClosed();
+  }
+
   async sweep(): Promise<void> {
+    this.pruneClosed();
     await Promise.all(
       [...this.lanes.values()]
         .filter(
           (lane) =>
             !lane.closing &&
-            lane.running.size === 0 &&
             (lane.manager.isLaneClosed ||
               this.now() - lane.touched >= this.options.env.LANE_IDLE_MS),
         )
@@ -259,9 +298,14 @@ export class LaneRuntime {
     meta: Record<string, unknown> | undefined,
     handler: () => Promise<CallToolResult>,
   ): Promise<CallToolResult> {
-    if (STATELESS.has(name)) return handler();
     const caller = meta?.["ai.opencode/sessionID"];
-    if (typeof caller !== "string" || caller.trim().length === 0) {
+    const hasCaller = typeof caller === "string" && caller.trim().length > 0;
+    if (name === "list_profiles")
+      return this.profileCaller.run(hasCaller ? caller : undefined, handler);
+    const credentialWrite =
+      name === "credentials" && typeof args.name === "string" && args.name.length > 0;
+    if (STATELESS.has(name) && !credentialWrite) return handler();
+    if (!hasCaller) {
       return {
         isError: true,
         content: [
@@ -271,6 +315,17 @@ export class LaneRuntime {
           },
         ],
       };
+    }
+    if (credentialWrite) {
+      const result = await handler();
+      if (!result.isError)
+        console.error(
+          JSON.stringify({
+            event: args.remove ? "credentials.delete" : "credentials.write",
+            caller,
+          }),
+        );
+      return result;
     }
     const notes: string[] = [];
     if (args.force !== undefined) notes.push("NOTE: force is accepted and ignored in lane mode.");
@@ -316,13 +371,17 @@ export class LaneRuntime {
       const lane = await this.open(caller);
       if (lane.closing || lane.manager.isLaneClosed)
         throw new Error("lane_closed: lane closed before admission; retry without a tabId.");
+      this.pruneClosed();
       const previous = this.closed.get(caller);
       if (previous) {
         notes.push(
           `NOTE: Previous lane closed (${previous.reason}) at ${new Date(previous.at).toISOString()}; cookies, tabs and buffers were reset.`,
         );
         this.closed.delete(caller);
+      } else if (lane.newlyOpened) {
+        notes.push("NOTE: New lane opened; no previous state was restored.");
       }
+      lane.newlyOpened = false;
       lane.touched = this.now();
       let complete!: () => void;
       const completion = new Promise<void>((resolve) => {

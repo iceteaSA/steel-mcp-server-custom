@@ -117,6 +117,35 @@ test("R1 P2 idle: an expired lane with a hung handler is drained and closed", as
   }
 });
 
+test("R1 a young in-flight call survives the old idle deadline, then drains only after its own idle interval", async () => {
+  const f = fixture();
+  const entered = barrier();
+  const held = barrier();
+  await f.call("a");
+  f.advance(99);
+  const running = f.call("a", "new_tab", async () => {
+    entered.release();
+    await held.promise;
+    return { content: [] };
+  });
+  await entered.promise;
+  const stop = spyOn(f.managers[0], "stop");
+  try {
+    f.advance(2);
+    await f.runtime.sweep();
+    expect(stop).not.toHaveBeenCalled();
+    expect(f.state.lanes.size).toBe(1);
+    f.advance(99);
+    await bounded(f.runtime.sweep());
+    expect(stop).toHaveBeenCalledTimes(1);
+    expect(f.state.lanes.size).toBe(0);
+  } finally {
+    held.release();
+    await running;
+    await f.runtime.close();
+  }
+});
+
 test("R1 P3b: no-ID admission waits for the sweep's held disposal then reopens once", async () => {
   const f = fixture();
   const entered = barrier();

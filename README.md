@@ -117,6 +117,8 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 The SDK supplies this value as `extra._meta` to the tool handler. Tool arguments cannot select a different caller.
 A stateful call without this value gives `no_caller` with a hint.
 `list_profiles`, `credentials`, and `captcha_status` operate without a lane.
+Credential writes and deletes still require caller metadata. Each successful request records only its operation and caller on stderr.
+`list_profiles` shows active tab counts only for the caller. Anonymous calls show the saved catalogue without active usage.
 
 The first stateful call opens a new BrowserContext for its caller. The default context and Steel's primary tab stay with the operator.
 Agents cannot address the operator's tabs. A popup stays in the lane of its context.
@@ -143,7 +145,19 @@ All tabs in that lane then share that storage. `list_profiles` keeps the same re
 Profile files stay shared. Profile leases and encrypted profile storage are different work.
 
 The idle lease closes a lane after `LANE_IDLE_MS`. It does not close individual idle tabs.
+The lease defaults to 15 minutes. A new call resets its activity clock.
+A running call can expire only after at least that interval since its admission.
+Lane closure waits up to `LANE_DRAIN_MS` (default 5000 ms) for admitted calls, then closes the context to interrupt pending browser work.
+Signal shutdown has a final exit deadline of the drain grace plus 1500 ms.
 Lane closure does not save cookies. The next call without `tabId` opens a new lane and reports the previous closure in a NOTE line.
+Closure details stay for at most 24 hours and 1000 callers. Without those details, the call gets a plain new-lane NOTE.
+
+`LANE_MAX` limits active and opening lanes to 8 by default.
+At capacity, a new caller gets `lanes_full`. Use `list_lanes` to inspect usage and `close_lane` to close your lane.
+Existing lanes still work at capacity.
+
+Tab IDs start at a cryptographically random process offset and increase within the process.
+Restart alias resistance is probabilistic. The allocator does not use process-relative clock time as a restart identity.
 
 Previous tab IDs stay invalid. An MCP restart clears in-memory lanes, tabs, queues, and buffers.
 The hub must keep the child alive during idle periods (`servers.steel.idleSeconds: 0`).

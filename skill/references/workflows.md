@@ -186,6 +186,11 @@ Give `tabId` to select a page. In lane mode, `owner` is only a label.
 
 ## Concurrent agents and lanes
 
+- On `lanes_full`, use `list_lanes` to inspect the active lanes. Close only your lane with `close_lane`.
+- Expect lane closure to interrupt browser work after `LANE_DRAIN_MS` (default 5000 ms).
+- Use caller metadata with `list_profiles` to see your active usage. Anonymous calls show only saved catalogue data.
+- Send caller metadata for credential writes and deletes. Reads do not require it.
+
 - Use the caller identity that the hub sends in `params._meta["ai.opencode/sessionID"]`.
 - On `no_caller`, repair request metadata. Do not use an owner label as a replacement.
 - Keep work in your lane's BrowserContext. The operator keeps Steel's default context and primary tab.
