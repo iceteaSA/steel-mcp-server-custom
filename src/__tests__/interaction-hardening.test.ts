@@ -119,8 +119,18 @@ for (const kind of ["select", "selectLabel", "selectIndex"]) {
 
 for (const kind of ["select", "selectLabel", "selectIndex"]) {
   test(`fill ${kind} waits for an option added after the call starts`, async () => {
-    await page.setContent('<select id="country" data-changes="0" onchange="this.dataset.changes=String(Number(this.dataset.changes)+1)"><option value="ca">Canada</option></select>');
-    const pending = tools()("fill").handler({ fields: [{ selector: "#country", kind, value: kind === "selectLabel" ? "United States" : kind === "selectIndex" ? "1" : "us" }] });
+    await page.setContent(
+      '<select id="country" data-changes="0" onchange="this.dataset.changes=String(Number(this.dataset.changes)+1)"><option value="ca">Canada</option></select>',
+    );
+    const pending = tools()("fill").handler({
+      fields: [
+        {
+          selector: "#country",
+          kind,
+          value: kind === "selectLabel" ? "United States" : kind === "selectIndex" ? "1" : "us",
+        },
+      ],
+    });
     await page.evaluate(() => {
       setTimeout(() => {
         const select = document.querySelector("select")!;

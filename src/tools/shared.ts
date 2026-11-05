@@ -15,7 +15,7 @@ import {
   detectFieldsInPage,
   interpretCheckboxValue,
 } from "../helpers.js";
-import { afterAction } from "../utils.js";
+import { afterAction, sleep } from "../utils.js";
 import { fenceToolResult } from "../untrusted.js";
 import { LaneRuntime, type LaneOptions } from "../lanes.js";
 import type { BrowserManager } from "../manager.js";
@@ -442,21 +442,41 @@ export async function execFillField(
     if (kind === "selectIndex" && Number.isNaN(index)) {
       throw new Error(`selectIndex expects numeric value, got "${opts.value}"`);
     }
-    const found = await locator.evaluate(
-      (element, choice) => {
-        if (!(element instanceof HTMLSelectElement)) throw new Error("Element is not a select");
-        return Array.from(element.options).some((option, i) =>
-          choice.kind === "selectIndex"
-            ? i === choice.index
-            : choice.kind === "selectLabel"
-              ? option.label === choice.value
-              : option.value === choice.value,
+    const deadline = Date.now() + timeout;
+    let available = { found: false, count: 0, labels: [] as string[] };
+    for (;;) {
+      try {
+        available = await locator.evaluate(
+          (element, choice) => {
+            if (!(element instanceof HTMLSelectElement)) throw new Error("Element is not a select");
+            const options = Array.from(element.options);
+            return {
+              found: options.some((option, i) =>
+                choice.kind === "selectIndex"
+                  ? i === choice.index
+                  : choice.kind === "selectLabel"
+                    ? option.label === choice.value
+                    : option.value === choice.value,
+              ),
+              count: options.length,
+              labels: options.slice(0, 5).map((option) => option.label.slice(0, 120)),
+            };
+          },
+          { kind, value: opts.value, index },
+          { timeout: Math.max(1, deadline - Date.now()) },
         );
-      },
-      { kind, value: opts.value, index },
-      { timeout },
-    );
-    if (!found) throw new Error(`Option not found: "${opts.value}" in ${sel}`);
+      } catch (error) {
+        if (Date.now() >= deadline && error instanceof Error && /timeout/i.test(error.message))
+          break;
+        throw error;
+      }
+      if (available.found || Date.now() >= deadline) break;
+      await sleep(Math.min(50, deadline - Date.now()));
+    }
+    if (!available.found)
+      throw new Error(
+        `Option not found: "${opts.value}" in ${sel}. ${available.count} options; first labels: ${JSON.stringify(available.labels)}`,
+      );
   }
 
   switch (kind) {
