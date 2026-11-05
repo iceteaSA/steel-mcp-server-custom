@@ -19,6 +19,8 @@ import { afterAction } from "../utils.js";
 import { fenceToolResult } from "../untrusted.js";
 import { LaneRuntime, type LaneOptions } from "../lanes.js";
 import type { BrowserManager } from "../manager.js";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { HandoffController, assertAgentOperation, type HandoffOptions } from "../handoff.js";
 
 // Re-exported because @modelcontextprotocol/sdk 1.29 doesn't re-export
 // ToolAnnotations from the server/mcp module.
@@ -86,11 +88,13 @@ export interface ToolSpec {
 
 export type ToolRegistrar = ((spec: ToolSpec) => void) & {
   signin?: { store: Promise<import("../signin.js").SigninStore>; getCaller: () => string };
+  handoff?: { controller: HandoffController; getCaller: () => string; getAgent: () => string };
 };
 
 export interface RegistrarHandle {
   register: ToolRegistrar;
   manager?: BrowserManager;
+  handoff?: HandoffController;
   close?: () => Promise<void>;
   getCaller(): string;
   applyProfileUpdated(profile: string): Promise<boolean>;
@@ -101,10 +105,35 @@ export interface RegistrarHandle {
 export function makeRegistrar(
   server: McpServer,
   activeToolsets: ReadonlySet<Toolset>,
-  lanes?: LaneOptions,
+  lanes?: LaneOptions & { handoff?: Partial<HandoffOptions> },
 ): RegistrarHandle {
   let count = 0;
+  const callerScope = new AsyncLocalStorage<{ caller: string; agent: string }>();
   const runtime = lanes && lanes.env.STEEL_LANES === "on" ? new LaneRuntime(lanes) : undefined;
+  const handoff = lanes
+    ? new HandoffController({
+        ntfyTopicFile: lanes.env.STEEL_NTFY_TOPIC_FILE,
+        ...lanes.handoff,
+        resync: () => (runtime ? runtime.resyncHandoff() : lanes.manager.resyncHandoff()),
+      })
+    : undefined;
+  const unsubscribe = handoff && lanes?.manager.onSessionEnded(() => handoff.browserLost());
+  handoff?.on("change", () => runtime?.setHandoffActive(handoff.snapshot().state !== "AGENT"));
+  const baseManager = runtime?.manager ?? lanes?.manager;
+  const manager =
+    baseManager &&
+    new Proxy(baseManager, {
+      get(target, property) {
+        assertAgentOperation();
+        const value = Reflect.get(target, property);
+        return typeof value === "function"
+          ? (...args: unknown[]) => {
+              assertAgentOperation();
+              return value.apply(target, args);
+            }
+          : value;
+      },
+    });
 
   const register = (spec: ToolSpec): void => {
     // "core" tools are always active; others are gated by the active set.
@@ -155,17 +184,70 @@ export function makeRegistrar(
       // Handler type is intentionally loose — the SDK validates args at
       // runtime against inputSchema; compile-time narrowing would need
       // per-tool generics that defeat the wrapper's purpose.
-      (async (args: Record<string, unknown>, extra: { _meta?: Record<string, unknown> }) =>
-        fenceToolResult(
-          runtime
-            ? await runtime.run(spec.name, args, extra?._meta, () => spec.handler(args))
-            : await spec.handler(args),
-          spec.name,
-        )) as Parameters<McpServer["registerTool"]>[2],
+      (async (args: Record<string, unknown>, extra: { _meta?: Record<string, unknown> }) => {
+        const caller = String(extra?._meta?.["ai.opencode/sessionID"] ?? "single-process");
+        const invoke = () => {
+          assertAgentOperation();
+          if (!handoff || !baseManager) return spec.handler(args);
+          const metadata = [
+            "request_human",
+            "wait_for_human",
+            "request_signin",
+            "signin_status",
+            "cancel_signin",
+            "list_lanes",
+            "close_lane",
+            "list_profiles",
+            "credentials",
+            "captcha_status",
+          ].includes(spec.name);
+          return metadata
+            ? spec.handler(args)
+            : handoff.withRefs(
+                spec.name,
+                caller,
+                args,
+                typeof args.tabId === "number" ? args.tabId : baseManager.activeTabId,
+                () => spec.handler(args),
+              );
+        };
+        const execute = async () =>
+          runtime ? await runtime.run(spec.name, args, extra?._meta, invoke) : invoke();
+        const display = extra?._meta?.["legion/caller"];
+        const agent =
+          display &&
+          typeof display === "object" &&
+          "agent" in display &&
+          typeof display.agent === "string"
+            ? display.agent
+            : "Agent";
+        let result = await callerScope.run({ caller, agent }, () =>
+          handoff ? handoff.run(spec.name, execute) : execute(),
+        );
+        if (
+          spec.outputSchema &&
+          result.isError &&
+          ["human_control", "stale_ref"].includes(String(result.structuredContent?.error)) &&
+          !z.object(spec.outputSchema).strict().safeParse(result.structuredContent).success
+        ) {
+          const { structuredContent: _structured, ...error } = result;
+          result = error;
+        }
+        return fenceToolResult(result, spec.name);
+      }) as Parameters<McpServer["registerTool"]>[2],
     );
     count++;
   };
 
+  if (handoff)
+    register.handoff = {
+      controller: handoff,
+      getCaller: () =>
+        runtime
+          ? (runtime.getCaller() ?? "")
+          : (callerScope.getStore()?.caller ?? "single-process"),
+      getAgent: () => callerScope.getStore()?.agent ?? "Agent",
+    };
   if (runtime) {
     register({
       name: "use_profile",
@@ -220,6 +302,17 @@ export function makeRegistrar(
   }
   return {
     register,
+    ...(handoff
+      ? {
+          handoff,
+          manager,
+          close: async () => {
+            handoff.shutdown();
+            unsubscribe?.();
+            await runtime?.close();
+          },
+        }
+      : {}),
     toolCount: () => count,
     getCaller: () => {
       if (!runtime) return "single-process";
@@ -230,7 +323,6 @@ export function makeRegistrar(
       runtime
         ? runtime.applyProfileUpdated(profile)
         : (lanes?.manager.applyProfileUpdated(profile) ?? Promise.resolve(false)),
-    ...(runtime ? { manager: runtime.manager, close: () => runtime.close() } : {}),
   };
 }
 

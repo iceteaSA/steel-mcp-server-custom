@@ -49,6 +49,7 @@ const expectedToolNames = [
   "new_tab",
   "page_state",
   "press_key",
+  "request_human",
   "request_signin",
   "save_profile",
   "scroll",
@@ -61,6 +62,7 @@ const expectedToolNames = [
   "upload_file",
   "use_credential",
   "wait_for",
+  "wait_for_human",
 ];
 
 function specs(mgr: Partial<BrowserManager> = {}, overrides: Record<string, string> = {}) {
@@ -95,7 +97,7 @@ test("every tool explicitly declares all four MCP safety hints", async () => {
   await client.close();
   await server.close();
   await handle.close?.();
-  expect(tools).toHaveLength(50);
+  expect(tools).toHaveLength(52);
   expect(tools.map((tool) => tool.name).sort()).toEqual(
     [...expectedToolNames, "list_lanes", "close_lane", "use_profile"].sort(),
   );
@@ -185,8 +187,9 @@ test("annotations cover mutating modes, arbitrary page effects, and remote navig
   }
 });
 
-test("the complete 47-tool annotation policy matches every declared mode", () => {
+test("the complete 49-tool annotation policy matches every declared mode", () => {
   const readOnly = new Set([
+    "wait_for_human",
     "signin_status",
     "captcha_status",
     "extract",
@@ -198,8 +201,15 @@ test("the complete 47-tool annotation policy matches every declared mode", () =>
     "snapshot",
     "wait_for",
   ]);
-  const nonDestructive = new Set([...readOnly, "smoke_test", "start_browser", "request_signin"]);
+  const nonDestructive = new Set([
+    ...readOnly,
+    "smoke_test",
+    "start_browser",
+    "request_signin",
+    "request_human",
+  ]);
   const idempotent = new Set([
+    "wait_for_human",
     "cancel_signin",
     "signin_status",
     "captcha_status",
@@ -218,6 +228,8 @@ test("the complete 47-tool annotation policy matches every declared mode", () =>
     "wait_for",
   ]);
   const closedWorld = new Set([
+    "request_human",
+    "wait_for_human",
     "cancel_signin",
     "signin_status",
     "close_tabs",
@@ -231,7 +243,7 @@ test("the complete 47-tool annotation policy matches every declared mode", () =>
     "stop_browser",
   ]);
   const tools = specs();
-  expect(tools).toHaveLength(47);
+  expect(tools).toHaveLength(49);
   expect(tools.map((tool) => tool.name).sort()).toEqual(expectedToolNames);
   for (const tool of tools) {
     expect(tool.annotations.readOnlyHint, tool.name).toBe(readOnly.has(tool.name));
@@ -244,6 +256,8 @@ test("the complete 47-tool annotation policy matches every declared mode", () =>
 test("all JSON-producing tools publish an output schema", () => {
   const tools = specs();
   for (const name of [
+    "request_human",
+    "wait_for_human",
     "request_signin",
     "signin_status",
     "cancel_signin",

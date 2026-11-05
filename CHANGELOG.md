@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- Add `request_human` and `wait_for_human` for browser-wide operator handoff in the two lane modes.
+- Add authenticated HTTP control, heartbeat, handback, and decline endpoints, plus WebSocket state snapshots.
+- Stop agent tools during operator control. Drain for at most 130 seconds, then close only pages with unfinished operations.
+- Keep Steel's primary tab open in compatibility mode. Stop active JavaScript execution and list that tab in `fenced_not_closed`.
+- Keep disconnected viewer claims `PAUSED` until an explicit operator step. Release input and invalidate cached reads before agent control resumes.
+- Release only server-held keys and buttons. Supply a bounded viewer hook for human input release in the X server.
+- Stop automatic lane closure when the state is not `AGENT`. Restart each lane's full `LANE_IDLE_MS` period when `AGENT` resumes.
+- Do not include the viewer image or extension controls in this server change.
+
 - Refuse a first profile binding after stateful lane use with `lane_not_fresh`. Keep empty `about:blank` tabs permitted.
 - Check cookies and origin entries before binding. Keep the used mark after pages close or cookies clear. Do not clear state on refusal.
 - Use the caller's held lease for saved-file deletion. Give `profile_busy` for a different holder and `profile_lease_required` without a holder.

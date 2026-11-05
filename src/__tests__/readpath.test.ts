@@ -172,10 +172,16 @@ test("all tool outputSchema JSON bytes equal the pre-hardening catalog", () => {
     name: s.name,
     outputSchema: s.outputSchema ? z.toJSONSchema(z.object(s.outputSchema)) : null,
   }));
-  const added = new Set(["request_signin", "signin_status", "cancel_signin"]);
+  const added = new Set([
+    "request_signin",
+    "signin_status",
+    "cancel_signin",
+    "request_human",
+    "wait_for_human",
+  ]);
   const legacy = schemas.filter((s) => !added.has(s.name));
   expect(legacy).toHaveLength(44);
-  expect(schemas).toHaveLength(47);
+  expect(schemas).toHaveLength(49);
   expect(
     schemas
       .filter((s) => added.has(s.name))
@@ -186,8 +192,13 @@ test("all tool outputSchema JSON bytes equal the pre-hardening catalog", () => {
   expect(new Bun.CryptoHasher("sha256").update(json).digest("hex")).toBe(
     "26dd4401cb071fbf71dbcf628d8252aaf8c99b44e2154ac052032a7f2abacf76",
   );
-  expect(new Bun.CryptoHasher("sha256").update(JSON.stringify(schemas)).digest("hex")).toBe(
+  const preHandoff = schemas.filter((s) => !["request_human", "wait_for_human"].includes(s.name));
+  expect(preHandoff).toHaveLength(47);
+  expect(new Bun.CryptoHasher("sha256").update(JSON.stringify(preHandoff)).digest("hex")).toBe(
     "37d4d60a6c71ab170c9a2e1846cc3834e1b6a828cd64f1e377157d1fc749d62d",
+  );
+  expect(new Bun.CryptoHasher("sha256").update(JSON.stringify(schemas)).digest("hex")).toBe(
+    "2b5f6d5ff1d60af613586a001cb92cf359f794777465b5e9f749907604265959",
   );
 });
 

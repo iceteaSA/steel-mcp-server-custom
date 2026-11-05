@@ -3,8 +3,8 @@ name: steel-browser
 skill-memory:
   enabled: true
 description: >
-  Use before browser work through Steel in Code Mode. Covers navigation, extraction,
-  screenshots, forms, caller lanes, and human handoff.
+  Use before Steel browser work. Covers navigation, extraction, screenshots, forms,
+  caller lanes, and human handoff.
 ---
 
 # Steel Browser
@@ -74,7 +74,7 @@ return tab;
 - After a CAPTCHA failure, use `solve_captcha({ tabId, owner })` for an explicit API attempt when permitted. Read [CAPTCHA instructions](references/workflows.md#captcha-solving) for supported types and spend risks.
 - Do not run `solve_captcha` in parallel with actions on the same tab. Do not add CAPTCHA sleep or retry loops.
 - Stop retries when the result shows a bot wall or error-loop warning.
-- Use the interactive URL from `start_browser` for human CAPTCHA or login handoff.
+- For operator input, use `request_human`. Read [handoff](references/workflows.md#human-handoff).
 
 ```javascript
 return await tools["steel"].snapshot({ tabId: 7, owner: "agent:research" });

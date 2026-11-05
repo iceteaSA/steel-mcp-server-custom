@@ -22,6 +22,7 @@ import { encryptJSONAsync, decryptJSONAsync } from "./crypto.js";
 import { assertSafeProfilePath, isValidProfileName } from "./helpers.js";
 import { WebSocket, WebSocketServer } from "ws";
 import { SigninStore, type SigninRequest } from "./signin.js";
+import type { HandoffController } from "./handoff.js";
 import {
   withProfileWrite,
   writeProfileData,
@@ -80,6 +81,7 @@ export interface RelayConfig {
   credentialsFile: string;
   credentialsPassphrase?: string;
   signinStore?: SigninStore;
+  handoff?: HandoffController;
   onProfileUpdated?: (profile: string) => boolean | void | Promise<boolean | void>;
 }
 
@@ -319,7 +321,13 @@ export function startRelayServer(config: RelayConfig): http.Server {
 
     const profilesRoute = url.pathname === "/profiles" || url.pathname.startsWith("/profiles/");
     const signinRoute = url.pathname === "/signin" || url.pathname.startsWith("/signin/");
-    if ((req.method === "POST" && url.pathname === "/push") || profilesRoute || signinRoute) {
+    const handoffRoute = url.pathname === "/handoff" || url.pathname.startsWith("/handoff/");
+    if (
+      (req.method === "POST" && url.pathname === "/push") ||
+      profilesRoute ||
+      signinRoute ||
+      handoffRoute
+    ) {
       // Auth check — timing-safe to avoid leaking the expected secret length
       // or the position of the first mismatch byte.
       const authHeader = req.headers.authorization;
@@ -339,6 +347,68 @@ export function startRelayServer(config: RelayConfig): http.Server {
       }
 
       try {
+        if (handoffRoute) {
+          const handoff = config.handoff;
+          if (!handoff) {
+            jsonResponse(res, 503, { error: "handoff_unavailable" });
+            return;
+          }
+          try {
+            if (req.method === "GET" && url.pathname === "/handoff") {
+              jsonResponse(res, 200, handoff.snapshot());
+              return;
+            }
+            if (req.method === "POST") {
+              const input: unknown = JSON.parse(await readBody(req));
+              let result: ReturnType<HandoffController["snapshot"]>;
+              if (url.pathname === "/handoff/take")
+                result = handoff.take(
+                  z
+                    .object({
+                      reason: z.string().min(1).max(1000).optional(),
+                      tabId: z.number().int().min(1).optional(),
+                    })
+                    .strict()
+                    .parse(input),
+                );
+              else if (url.pathname === "/handoff/heartbeat")
+                result = handoff.beat(
+                  z
+                    .object({ token: z.string().max(200) })
+                    .strict()
+                    .parse(input).token,
+                );
+              else if (url.pathname === "/handoff/back")
+                result = await handoff.back(
+                  z
+                    .object({ token: z.string().max(200) })
+                    .strict()
+                    .parse(input).token,
+                );
+              else if (url.pathname === "/handoff/decline")
+                result = handoff.decline(
+                  z
+                    .object({ id: z.string().max(100).optional() })
+                    .strict()
+                    .parse(input).id,
+                );
+              else {
+                jsonResponse(res, 404, { error: "handoff_unknown" });
+                return;
+              }
+              jsonResponse(res, 200, result);
+              return;
+            }
+            jsonResponse(res, 405, { error: "method_not_allowed" });
+          } catch (error) {
+            const code =
+              error instanceof Error && /^handoff_[a-z_]+$/.test(error.message)
+                ? error.message
+                : "handoff_invalid";
+            jsonResponse(res, code === "handoff_invalid" ? 400 : 409, { error: code });
+          }
+          return;
+        }
         if (signinRoute) {
           const store = await getSigninStore();
           const segments = url.pathname.split("/").slice(1).map(decodeURIComponent);
@@ -676,8 +746,17 @@ export function startRelayServer(config: RelayConfig): http.Server {
             .catch(() => ws.close(1011, "Store unavailable"));
         };
         store.on("change", sendPending);
-        unsubscribe = () => store.removeListener("change", sendPending);
+        const sendHandoff = () => {
+          if (config.handoff && ws.readyState === WebSocket.OPEN)
+            ws.send(JSON.stringify({ type: "handoff", ...config.handoff.snapshot() }));
+        };
+        config.handoff?.on("change", sendHandoff);
+        unsubscribe = () => {
+          store.removeListener("change", sendPending);
+          config.handoff?.removeListener("change", sendHandoff);
+        };
         sendPending();
+        sendHandoff();
       } catch {
         ws.close(1008, "Authentication failed");
       }

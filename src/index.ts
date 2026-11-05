@@ -29,6 +29,7 @@ import {
   registerAct,
   registerCaptcha,
   registerSignin,
+  registerHandoff,
 } from "./tools/index.js";
 import { llmConfigured } from "./llm.js";
 import { SigninStore } from "./signin.js";
@@ -74,6 +75,7 @@ const {
   close: closeLanes,
   getCaller,
   applyProfileUpdated,
+  handoff,
 } = makeRegistrar(server, activeToolsets, { manager: rootManager, env });
 const mgr = manager ?? rootManager;
 
@@ -90,6 +92,7 @@ registerIntercept(register, mgr, env);
 registerCaptcha(register, mgr);
 register.signin = { store: signinStore, getCaller };
 registerSignin(register, mgr, env);
+registerHandoff(register, mgr, env);
 if (llmConfigured(env)) {
   registerAct(register, mgr, env);
 }
@@ -122,6 +125,7 @@ async function runServer() {
         credentialsFile: env.CREDENTIALS_FILE,
         credentialsPassphrase: env.CREDENTIALS_PASSPHRASE,
         signinStore: store,
+        handoff,
         onProfileUpdated: applyProfileUpdated,
       });
     }

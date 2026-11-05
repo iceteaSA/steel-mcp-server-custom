@@ -22,7 +22,15 @@ import {
 import path from "path";
 import { sleep } from "./utils.js";
 
-import { chromium, Browser, BrowserContext, Page, Request, Response } from "patchright";
+import {
+  chromium,
+  Browser,
+  BrowserContext,
+  Page,
+  Request,
+  Response,
+  type CDPSession,
+} from "patchright";
 import { Steel } from "steel-sdk";
 import { z } from "zod";
 import { EnvSchema } from "./env";
@@ -34,6 +42,7 @@ import {
   assertSafeProfilePath,
 } from "./helpers";
 import { clearSnapshot, clearAllSnapshots } from "./snapshot.js";
+import { assertAgentOperation, hasAgentOperation, trackAgentPage } from "./handoff.js";
 import { SETTLE_INIT_SCRIPT } from "./settle.js";
 
 // Inferred type of the parsed env object.
@@ -139,6 +148,12 @@ export class BrowserManager {
   private sessionEnded = false;
   private sessionEndListeners = new Set<() => void>();
   private watchedBrowsers = new WeakSet<Browser>();
+  private readonly inputPages = new WeakSet<Page>();
+  private readonly cancellationSessions = new WeakMap<Page, Promise<CDPSession>>();
+  private readonly heldInput = new Map<
+    Page,
+    { keys: Set<string>; buttons: Set<"left" | "middle" | "right"> }
+  >();
 
   // Tab management — integer IDs starting at 1.
   // Concurrency: multiple agents can share one browser. Tabs carry an
@@ -233,9 +248,70 @@ export class BrowserManager {
     };
   }
 
+  async resyncHandoff(): Promise<void> {
+    for (const [page, held] of this.heldInput) {
+      if (page.isClosed()) continue;
+      for (const key of held.keys) await page.keyboard.up(key);
+      for (const button of held.buttons) await page.mouse.up({ button });
+    }
+    clearAllSnapshots();
+    this.consoleLogs = [];
+    this.networkEvents = [];
+    this.responsesById.clear();
+  }
+
+  private trackInput(page: Page): void {
+    if (this.inputPages.has(page) || !page.keyboard?.down || !page.mouse?.down) return;
+    this.inputPages.add(page);
+    const held = { keys: new Set<string>(), buttons: new Set<"left" | "middle" | "right">() };
+    this.heldInput.set(page, held);
+    const keyDown = page.keyboard.down.bind(page.keyboard);
+    const keyUp = page.keyboard.up.bind(page.keyboard);
+    const mouseDown = page.mouse.down.bind(page.mouse);
+    const mouseUp = page.mouse.up.bind(page.mouse);
+    page.keyboard.down = async (key) => {
+      await keyDown(key);
+      held.keys.add(key);
+    };
+    page.keyboard.up = async (key) => {
+      await keyUp(key);
+      held.keys.delete(key);
+    };
+    page.mouse.down = async (options) => {
+      await mouseDown(options);
+      held.buttons.add(options?.button ?? "left");
+    };
+    page.mouse.up = async (options) => {
+      await mouseUp(options);
+      held.buttons.delete(options?.button ?? "left");
+    };
+  }
+
+  private async operationPage(page: Page, id: number): Promise<Page> {
+    const primary =
+      !this.laneContext && this.env.BROWSER_MODE === "steel" && id === this.primaryTabId;
+    let terminate: (() => Promise<unknown>) | undefined;
+    if (primary && hasAgentOperation()) {
+      let pending = this.cancellationSessions.get(page);
+      if (!pending) {
+        // A CDP session attached after a renderer loop starts cannot stop that loop.
+        pending = page.context().newCDPSession(page);
+        this.cancellationSessions.set(page, pending);
+      }
+      const session = await pending;
+      terminate = () => session.send("Runtime.terminateExecution");
+    }
+    return trackAgentPage(page, id, primary, terminate);
+  }
+
   private watchBrowser(): void {
     const browser = this.browser;
-    if (!this.lanesEnabled || !browser || this.watchedBrowsers.has(browser)) return;
+    if (
+      (!this.lanesEnabled && this.sessionEndListeners.size === 0) ||
+      !browser ||
+      this.watchedBrowsers.has(browser)
+    )
+      return;
     this.watchedBrowsers.add(browser);
     const disconnected = () => {
       if (this.browser !== browser) return;
@@ -478,6 +554,8 @@ export class BrowserManager {
         }
       }
       this.tabLastActivity.set(existing, Date.now());
+      if (!this.lanesEnabled && (this.laneContext || this.initialized))
+        trackAgentPage(page, existing);
       return existing;
     }
 
@@ -488,6 +566,8 @@ export class BrowserManager {
     this.attachConsoleListener(page);
     this.attachPageListeners(page, id);
     this.pageToTabId.set(page, id);
+    this.trackInput(page);
+    if (!this.lanesEnabled && (this.laneContext || this.initialized)) trackAgentPage(page, id);
     return id;
   }
 
@@ -623,7 +703,10 @@ export class BrowserManager {
     const priorProfile = this.tabToProfile.get(tabId);
     const replacePage = async (page: Page): Promise<Page> => {
       const oldPage = this.tabs.get(tabId);
-      if (oldPage) this.pageToTabId.delete(oldPage);
+      if (oldPage) {
+        this.pageToTabId.delete(oldPage);
+        this.heldInput.delete(oldPage);
+      }
 
       // Route the replacement page through the idempotent allocation path.
       // The context "page" listener fires for context.newPage() too, so it
@@ -700,6 +783,7 @@ export class BrowserManager {
    */
   private clearTabState(id: number): void {
     const page = this.tabs.get(id);
+    if (page) this.heldInput.delete(page);
 
     this.tabs.delete(id);
     this.tabOwners.delete(id);
@@ -893,6 +977,7 @@ export class BrowserManager {
   }
 
   async initialize() {
+    assertAgentOperation();
     if (this.laneClosed)
       throw new Error("lane_closed: context closed; open a fresh lane without a tabId.");
     if (this.initializing) return this.initializing;
@@ -1226,6 +1311,7 @@ export class BrowserManager {
   async getPage(tabId?: number): Promise<Page>;
   async getPage(opts: { tabId?: number; owner?: string; force?: boolean }): Promise<Page>;
   async getPage(arg?: number | { tabId?: number; owner?: string; force?: boolean }): Promise<Page> {
+    assertAgentOperation();
     await this.initialize();
     if (
       this.laneContext &&
@@ -1258,11 +1344,11 @@ export class BrowserManager {
         }
         this.touchTab(resolved, owner);
         this.tabLastUrl.set(resolved, recovered.url());
-        return recovered;
+        return this.operationPage(recovered, resolved);
       }
       this.touchTab(resolved, owner);
       this.tabLastUrl.set(resolved, page.url());
-      return page;
+      return this.operationPage(page, resolved);
     }
 
     // Legacy path: getPage() with no args at all
@@ -1270,7 +1356,7 @@ export class BrowserManager {
     if (!this.isPageDead(page)) {
       this.touchTab(this.currentTabId);
       this.tabLastUrl.set(this.currentTabId, page!.url());
-      return page!;
+      return this.operationPage(page!, this.currentTabId);
     }
 
     // Current tab missing or closed/crashed — recreate in-place and retry once.
@@ -1280,7 +1366,7 @@ export class BrowserManager {
     }
     this.touchTab(this.currentTabId);
     this.tabLastUrl.set(this.currentTabId, recovered.url());
-    return recovered;
+    return this.operationPage(recovered, this.currentTabId);
   }
 
   /**
@@ -1301,15 +1387,20 @@ export class BrowserManager {
     profileName?: string,
     activate = true,
   ): Promise<{ tabId: number; page: Page }> {
+    assertAgentOperation();
     await this.initialize();
     try {
-      return await this._doNewTab(url, owner, profileName, activate);
+      const result = await this._doNewTab(url, owner, profileName, activate);
+      trackAgentPage(result.page, result.tabId);
+      return result;
     } catch (err) {
       if (!isBrowserClosedError(err)) throw err;
       await this.softReset();
       await sleep(2000);
       await this.initialize();
-      return await this._doNewTab(url, owner, profileName, activate);
+      const result = await this._doNewTab(url, owner, profileName, activate);
+      trackAgentPage(result.page, result.tabId);
+      return result;
     }
   }
 

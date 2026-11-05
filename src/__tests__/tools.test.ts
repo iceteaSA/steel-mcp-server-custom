@@ -133,7 +133,7 @@ describe("non-browser tools", () => {
   it("tools/list returns expected tools with correct names", async () => {
     const r = await client.call(100, "tools/list");
     const names = r.result?.tools?.map((t) => t.name).sort() || [];
-    expect(names.length).toBe(45);
+    expect(names.length).toBe(47);
     expect(names).toEqual([
       "cancel_signin",
       "captcha_status",
@@ -168,6 +168,7 @@ describe("non-browser tools", () => {
       "new_tab",
       "page_state",
       "press_key",
+      "request_human",
       "request_signin",
       "save_profile",
       "scroll",
@@ -180,6 +181,7 @@ describe("non-browser tools", () => {
       "upload_file",
       "use_credential",
       "wait_for",
+      "wait_for_human",
     ]);
 
     // Verify removed tools are gone
@@ -241,11 +243,11 @@ describe("non-browser tools", () => {
       const documented = [...section.matchAll(/^\| `([a-z_]+)` \|/gm)]
         .map((match) => match[1])
         .sort();
-      expect(names).toHaveLength(47);
+      expect(names).toHaveLength(49);
       expect(documented).toEqual(names);
       expect(new Set(documented).size).toBe(documented.length);
-      expect(readme).toContain("45 default, 47 with AI tools");
-      expect(readme).toContain("**48 browser tools** (50 with AI tools) in lane mode");
+      expect(readme).toContain("47 default, 49 with AI tools");
+      expect(readme).toContain("**50 browser tools** (52 with AI tools) in lane mode");
     } finally {
       allTools.kill();
     }

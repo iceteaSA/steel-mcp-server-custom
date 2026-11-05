@@ -136,7 +136,7 @@ context-budget-constrained agents:
 
 | Group    | Includes                                                          |
 |----------|-------------------------------------------------------------------|
-| `core`   | Always active. `go_to_url`, `history`, `click`, `click_at`, `fill`, `scroll`, `wait_for`, `press_key`, `handle_dialog`, `upload_file`, `snapshot`, `page_state`, `get_page_text`, `mouse_move`, `mouse_down`, `mouse_up`, `start_browser`, `stop_browser`, `solve_captcha`. Lane mode adds `list_lanes` and `close_lane`. |
+| `core`   | Always active. See README for the tool inventory and handoff. |
 | `tabs`   | `list_tabs`, `new_tab`, `close_tabs`.                              |
 | `extract`| `get_links`, `get_attrs`, `evaluate`, `extract`, `fetch_urls`.     |
 | `media`  | `get_screenshot`, `download_file`.                                 |
@@ -149,12 +149,16 @@ context-budget-constrained agents:
 Precedence: `--toolsets a,b` CLI flag > `TOOLSETS` env var > all toolsets.
 Unknown names fail startup with a list of valid values.
 
-All 9 toolsets are active by default. Lane mode has 48 tools, or 50 with AI tools.
-Compatibility mode (`STEEL_LANES=off`) has 45 tools, or 47 with AI tools.
+All 9 toolsets are active by default. Lane mode has 50 tools, or 52 with AI tools.
+Compatibility mode (`STEEL_LANES=off`) has 47 tools, or 49 with AI tools.
 The `ai` toolset operates only with `ACT_LLM_BASE_URL` and `ACT_LLM_MODEL`.
 Without these values, the server has no `act` or `extract_ai`, with or without `--toolsets=ai`.
 
 ### Concurrency — multi-agent sessions
+
+- On `human_control`, use `wait_for_human`, not browser tools. All lanes stop.
+- After `human_done`, read a new snapshot before ref use. Check closed tab IDs.
+- Give viewer write access only to the current claim in `HUMAN`. See README.
 
 `STEEL_LANES=on` is the default concurrency design.
 
