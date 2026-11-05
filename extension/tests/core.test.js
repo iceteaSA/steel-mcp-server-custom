@@ -417,3 +417,80 @@ describe("requested host patterns fit the manifest one pattern at a time", () =>
     }
   });
 });
+
+// http://*/* and https://*/* contain https://*/*, so a "*" host from a forged relay request
+// would ask Chrome for all sites. The old *://*/* form was refused by Chrome before the prompt.
+describe("host patterns are built only from one exact hostname", () => {
+  const bad = [
+    "*",
+    "*.example.com",
+    "exa*mple.com",
+    "",
+    "example.com:443",
+    "https://example.com",
+    "example.com/path",
+    "a b",
+    "example..com",
+    ".example.com",
+    "example.com.",
+    "[::1",
+    "user@example.com",
+  ];
+  const good = [
+    "example.com",
+    "login.example.co.uk",
+    "localhost",
+    "127.0.0.1",
+    "[::1]",
+    "my_host.example.com",
+    "xn--bcher-kva.example",
+  ];
+  it("refuses wildcard, empty, scheme, port, path and malformed hosts", () => {
+    for (const host of bad) {
+      expect({
+        host,
+        threw: (() => {
+          try {
+            core.domainPatterns(host);
+            return false;
+          } catch {
+            return true;
+          }
+        })(),
+      }).toEqual({ host, threw: true });
+    }
+    expect(() => core.signinPatterns({ domains: ["example.com", "*"] })).toThrow();
+  });
+  it("accepts exact DNS names, IPv4 and bracketed IPv6 hosts", () => {
+    for (const host of good) {
+      expect(core.domainPatterns(host)).toEqual([`https://${host}/*`, `http://${host}/*`]);
+    }
+  });
+  it("sends no permission request for a wildcard sign-in domain", async () => {
+    const requests = [];
+    globalThis.chrome = {
+      permissions: {
+        request: async (input) => {
+          requests.push(input);
+          return true;
+        },
+        contains: async () => true,
+      },
+    };
+    const signin = {
+      id: "r1",
+      domains: ["*"],
+      site: "https://example.com",
+      profile: "work",
+      expires: Date.now() + 60000,
+    };
+    let error;
+    try {
+      await core.approveSignin(signin);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(Error);
+    expect(requests).toEqual([]);
+  });
+});
