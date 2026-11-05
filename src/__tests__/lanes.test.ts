@@ -454,6 +454,62 @@ test("Part 3: first bind waits for an in-flight real cookie write before checkin
   }
 });
 
+for (const tool of ["use_profile", "create_profile"] as const) {
+  test(`Part 3 lease generation: late ${tool} error cannot release a replacement holder`, async () => {
+    const directory = await mkdtemp(join(tmpdir(), "profile-late-lease-"));
+    const f = await fixture("on", { PROFILES_DIR: directory, LANE_DRAIN_MS: "20" });
+    const entered = barrier();
+    const release = barrier();
+    const create = f.root.createLane.bind(f.root);
+    let captured = false;
+    let restore: (() => void) | undefined;
+    const creation = spyOn(f.root, "createLane").mockImplementation(async (...args) => {
+      const lane = await create(...args);
+      if (!captured) {
+        captured = true;
+        const context = lane.context!;
+        const snapshot = context.storageState.bind(context);
+        const held = spyOn(context, "storageState").mockImplementation(async (options) => {
+          const state = await snapshot(options);
+          entered.release();
+          await release.promise;
+          return state;
+        });
+        restore = () => held.mockRestore();
+      }
+      return lane;
+    });
+    let pending: ReturnType<typeof f.call> | undefined;
+    try {
+      pending = f.call("a", tool, { name: "shared" });
+      await entered.promise;
+      expect((await f.call("a", "close_lane")).isError).not.toBe(true);
+      expect((await f.call("b", "use_profile", { name: "shared" })).isError).not.toBe(true);
+      await f.call("b", "cookies", {
+        setCookies: [
+          { name: "holder", value: "REPLACEMENT_HOLDER", domain: "example.test", path: "/" },
+        ],
+      });
+      release.release();
+      expect((await pending).isError).toBe(true);
+      const third = await f.call("c", "use_profile", { name: "shared" });
+      expect(third.isError).toBe(true);
+      expect(text(third)).toContain("profile_busy");
+      expect((await f.call("b", "save_profile", { name: "shared" })).isError).not.toBe(true);
+      expect(await readFile(join(directory, "shared.json"), "utf8")).toContain(
+        "REPLACEMENT_HOLDER",
+      );
+    } finally {
+      release.release();
+      if (pending) await pending;
+      restore?.();
+      creation.mockRestore();
+      await f.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+}
+
 test("Part 3 S3: saved deletion requires the caller's lease and refuses a busy holder", async () => {
   const directory = await mkdtemp(join(tmpdir(), "profile-delete-lease-"));
   const f = await fixture("on", { PROFILES_DIR: directory });
