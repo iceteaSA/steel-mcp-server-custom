@@ -8,14 +8,15 @@ export const domainSchema = z
   .string()
   .max(253)
   .regex(/^\.?[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$/);
-export const originSchema = z.string().refine((value) => {
+export function httpOrigin(value: string): string | undefined {
   try {
     const url = new URL(value);
-    return ["http:", "https:"].includes(url.protocol) && url.origin === value;
+    return ["http:", "https:"].includes(url.protocol) ? url.origin : undefined;
   } catch {
-    return false;
+    return undefined;
   }
-});
+}
+const originSchema = z.string().refine((value) => httpOrigin(value) === value);
 export const cookieSchema = z.object({
   name: z.string(),
   value: z.string(),
@@ -24,6 +25,7 @@ export const cookieSchema = z.object({
   expires: z.number().optional(),
   httpOnly: z.boolean().optional(),
   secure: z.boolean().optional(),
+  partitionKey: z.string().optional(),
   sameSite: z
     .enum(["Strict", "Lax", "None", "No_restriction"])
     .transform((value) => (value === "No_restriction" ? "None" : value))
@@ -101,7 +103,10 @@ export function mergeProfileData(before: ProfileData, after: ProfileData): Profi
   for (const cookie of after.cookies ?? []) {
     const index = cookies.findIndex(
       (item) =>
-        item.name === cookie.name && item.domain === cookie.domain && item.path === cookie.path,
+        item.name === cookie.name &&
+        item.domain === cookie.domain &&
+        item.path === cookie.path &&
+        item.partitionKey === cookie.partitionKey,
     );
     if (index < 0) cookies.push(cookie);
     else cookies[index] = cookie;

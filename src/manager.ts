@@ -13,6 +13,7 @@ import fs from "fs/promises";
 import {
   withProfileWrite,
   readProfileData,
+  httpOrigin,
   writeProfileData,
   removeProfileData,
   profileRevision,
@@ -1684,7 +1685,7 @@ export class BrowserManager {
 
   /**
    * Save a profile's cookies + localStorage to disk as JSON.
-   * localStorage is captured from all origins the profile has visited.
+   * Read localStorage from open HTTP and HTTPS pages.
    */
   async saveProfile(name: string): Promise<string> {
     if (!isValidProfileName(name)) {
@@ -1698,14 +1699,15 @@ export class BrowserManager {
     const state = await withProfileWrite(savedPath, async () => {
       const cookies = await profile.context.cookies();
 
-      // Collect localStorage from all open pages in this profile
+      // Read localStorage only from open HTTP and HTTPS pages.
       const localStorage: Record<string, Record<string, string>> = {};
       for (const tabId of profile.tabIds) {
         const page = this.tabs.get(tabId);
         if (!page || page.isClosed()) continue;
         try {
-          const origin = new URL(page.url()).origin;
-          if (origin === "about:" || origin === "chrome:") continue;
+          // A page can have storage without an HTTP or HTTPS URL.
+          const origin = httpOrigin(page.url());
+          if (origin === undefined) continue;
           const ls = await page.evaluate(() => {
             const entries: Record<string, string> = {};
             for (let i = 0; i < window.localStorage.length; i++) {

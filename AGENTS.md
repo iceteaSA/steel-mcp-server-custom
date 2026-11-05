@@ -39,7 +39,7 @@ bun run format:check   # or `bun run format` to write
 bun run test
 ```
 
-**Tests:** Run `bun run test` for the 34 source test files. Run `cd extension && bun test tests/`
+**Tests:** Run `bun run test` for the 35 source test files. Run `cd extension && bun test tests/`
 for the extension tests. Local browser tests launch Chromium. Read the runner output for current case counts.
 
 Use `STEEL_TEST_CHROMIUM` to select a test browser. If unset, tests use the Playwright path or system Chromium.
@@ -234,7 +234,7 @@ src/
     captcha.ts           # solve_captcha
     intercept.ts         # intercept
     act.ts               # act, extract_ai (gated on ACT_LLM_BASE_URL + ACT_LLM_MODEL)
-  __tests__/             # 34 test files; shared local-browser helpers
+  __tests__/             # 35 test files; shared local-browser helpers
 ```
 
 **Key class — `BrowserManager`** (in `src/manager.ts`):

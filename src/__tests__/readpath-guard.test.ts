@@ -57,9 +57,9 @@ for (const name of ["get_page_text", "extract", "snapshot"]) {
     expect(await page.content()).toBe(before);
   });
   for (const [id, style, token] of [
-    ["S2", "text-indent:-9999px", "indent-token"],
-    ["S3", "clip-path:circle(0.001px)", "circle-token"],
-    ["S4", "transform:scale(0.01)", "scale-token"],
+    ["indented", "text-indent:-9999px", "indent-token"],
+    ["circular clipping", "clip-path:circle(0.001px)", "circle-token"],
+    ["scaled", "transform:scale(0.01)", "scale-token"],
   ]) {
     test(`${id} ${name} drops text whose own painted area is offscreen or sub-2px`, async () => {
       await page.setContent(

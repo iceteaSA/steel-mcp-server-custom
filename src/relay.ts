@@ -46,6 +46,7 @@ export interface RelayCookie {
   expires?: number; // epoch seconds (-1 or omitted = session cookie)
   httpOnly?: boolean;
   secure?: boolean;
+  partitionKey?: string;
   sameSite?: "Strict" | "Lax" | "None";
 }
 
@@ -288,6 +289,7 @@ export function startRelayServer(config: RelayConfig): http.Server {
   const refusedHttp = new WeakSet<Duplex>();
   const admittedWebSockets = new Set<WebSocket>();
   let signinStore: Promise<SigninStore> | undefined;
+  // Supply the process store for notifications. The fallback store has no topic.
   const getSigninStore = () =>
     (signinStore ??= config.signinStore
       ? Promise.resolve(config.signinStore)

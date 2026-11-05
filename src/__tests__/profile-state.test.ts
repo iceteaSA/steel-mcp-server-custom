@@ -7,7 +7,8 @@ import { BrowserManager } from "../manager.js";
 import { EnvSchema } from "../env.js";
 import {
   mergeProfileData,
-  originSchema,
+  httpOrigin,
+  storageSchema,
   readProfileData,
   withProfileWrite,
   writeProfileData,
@@ -73,7 +74,18 @@ test("profile save excludes inherited about:blank storage keys and restores the 
   expect(saved.localStorage).not.toHaveProperty("null");
   expect(saved.localStorage?.[origin]?.httpToken).toBe("CANARY_HTTP");
   for (const key of Object.keys(saved.localStorage ?? {}))
-    expect(originSchema.safeParse(key).success).toBe(true);
+    expect(storageSchema.safeParse({ [key]: {} }).success).toBe(true);
+  expect(httpOrigin(origin + "/path")).toBe(origin);
+  expect(httpOrigin("https://example.test/path")).toBe("https://example.test");
+  for (const url of [
+    "about:blank",
+    "data:text/html,profile",
+    "chrome://settings",
+    "chrome-extension://example/page.html",
+    "file:///profile.html",
+    "blob:https://example.test/id",
+  ])
+    expect(httpOrigin(url)).toBeUndefined();
   await manager.deleteProfile("state");
   const restored = await manager.createProfile("state", origin);
   expect(restored.restored).toBe(true);
