@@ -85,9 +85,11 @@ export interface ToolSpec {
 // makeRegistrar — build a gated registration function from server + active set
 // -----------------------------------------------------------------------------
 
-export type ToolRegistrar = ((spec: ToolSpec) => void) & {
+export type ToolRegistrar = (spec: ToolSpec) => void;
+
+export interface ToolDependencies {
   signin?: { store: Promise<import("../signin.js").SigninStore>; getCaller: () => string };
-};
+}
 
 export interface RegistrarHandle {
   register: ToolRegistrar;

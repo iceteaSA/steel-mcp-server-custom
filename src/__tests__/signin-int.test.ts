@@ -334,9 +334,11 @@ test("INT live profile pushes update only holding lane contexts; absent membersh
   const server = new McpServer({ name: "signin-live", version: "1" });
   const handle = makeRegistrar(server, new Set(ALL_TOOLSETS), { manager: root, env });
   for (const register of Object.values(groups))
-    register(handle.register, handle.manager ?? root, env);
+    if (register !== groups.registerSignin) register(handle.register, handle.manager ?? root, env);
   const store = await SigninStore.open({ profilesDir: directory, automaticTimers: false });
-  handle.register.signin = { store: Promise.resolve(store), getCaller: () => handle.getCaller() };
+  groups.registerSignin(handle.register, handle.manager ?? root, env, {
+    signin: { store: Promise.resolve(store), getCaller: () => handle.getCaller() },
+  });
   const relay = startRelayServer({
     port: 0,
     bindAddr: "127.0.0.1",
