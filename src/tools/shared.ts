@@ -19,6 +19,7 @@ import { afterAction } from "../utils.js";
 import { fenceToolResult } from "../untrusted.js";
 import { LaneRuntime, type LaneOptions } from "../lanes.js";
 import type { BrowserManager } from "../manager.js";
+import { NoCallerError } from "../caller.js";
 
 // Re-exported because @modelcontextprotocol/sdk 1.29 doesn't re-export
 // ToolAnnotations from the server/mcp module.
@@ -224,7 +225,8 @@ export function makeRegistrar(
     getCaller: () => {
       if (!runtime) return "single-process";
       const caller = runtime.getCaller();
-      return caller ?? "";
+      if (!caller) throw new NoCallerError();
+      return caller;
     },
     applyProfileUpdated: (profile) =>
       runtime

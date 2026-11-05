@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolRegistrar } from "./shared.js";
 import type { BrowserManager, Env } from "../manager.js";
+import { NoCallerError } from "../caller.js";
 
 function result(request: SigninRequest) {
   const { id, status, site, profile, created, expires, counts, note } = request;
@@ -78,6 +79,7 @@ export function register(register: ToolRegistrar, _manager: BrowserManager, _env
         structuredContent: value,
       };
     } catch (error) {
+      if (error instanceof NoCallerError) return error.result;
       const code =
         error instanceof Error &&
         /^(?:signin_[a-z_]+|no_caller|rate_limited|invalid_wait|invalid_caller|invalid_request|invalid_site)$/.test(

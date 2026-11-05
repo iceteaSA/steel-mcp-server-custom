@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Page } from "patchright";
 import { BrowserManager, type Env } from "./manager.js";
+import { NoCallerError } from "./caller.js";
 
 // A random process offset reduces restart collisions. Leave half the safe range for growth.
 let nextTabId = Number(randomBytes(8).readBigUInt64BE() >> 12n);
@@ -106,7 +107,7 @@ export class LaneRuntime {
         if (property === "listProfiles") return () => this.listProfiles();
         const scope = this.current.getStore();
         if (!scope)
-          throw new Error('no_caller: send _meta["ai.opencode/sessionID"] on tools/call.');
+          throw new NoCallerError();
         const { lane, tabId } = scope;
         if (property === "closeTabsByOwner" && scope.closeTabIds) {
           return async (owner: string) => {
@@ -506,16 +507,7 @@ export class LaneRuntime {
       name === "credentials" && typeof args.name === "string" && args.name.length > 0;
     if (STATELESS.has(name) && !credentialWrite) return handler();
     if (!hasCaller) {
-      return {
-        isError: true,
-        ...(SIGNIN_TOOLS.has(name) ? { structuredContent: { error: "no_caller" } } : {}),
-        content: [
-          {
-            type: "text",
-            text: 'no_caller: send params._meta["ai.opencode/sessionID"] on every tools/call; no shared fallback lane exists.',
-          },
-        ],
-      };
+      return new NoCallerError().result;
     }
     if (credentialWrite) {
       const result = await handler();
