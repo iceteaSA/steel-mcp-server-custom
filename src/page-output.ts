@@ -27,6 +27,10 @@ interface Continuation {
 export class PageTextStore {
   private readonly entries = new Map<string, Continuation>();
 
+  clear(): void {
+    this.entries.clear();
+  }
+
   constructor(
     private readonly now: () => number = Date.now,
     private readonly capacity = 32,

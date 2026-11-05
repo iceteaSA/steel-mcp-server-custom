@@ -32,7 +32,13 @@ export interface LaneOptions {
 }
 
 const STATELESS = new Set(["list_profiles", "credentials", "captcha_status"]);
-const SIGNIN_TOOLS = new Set(["request_signin", "signin_status", "cancel_signin"]);
+const SIGNIN_TOOLS = new Set([
+  "request_signin",
+  "signin_status",
+  "cancel_signin",
+  "request_human",
+  "wait_for_human",
+]);
 const CONTEXT_TOOLS = new Set([
   "block_site",
   "new_tab",
@@ -80,6 +86,7 @@ export class LaneRuntime {
   private readonly profileCaller = new AsyncLocalStorage<string | undefined>();
   private readonly timer: ReturnType<typeof setInterval>;
   private stopping = false;
+  private handoffActive = false;
   private readonly endedCleanup = new Set<Promise<void>>();
   private readonly unsubscribe: () => void;
   readonly manager: BrowserManager;
@@ -189,6 +196,14 @@ export class LaneRuntime {
 
   getCaller(): string | undefined {
     return this.profileCaller.getStore() ?? this.current.getStore()?.lane.caller;
+  }
+
+  setHandoffActive(active: boolean): void {
+    if (this.handoffActive && !active) {
+      const now = this.now();
+      for (const lane of this.lanes.values()) lane.touched = now;
+    }
+    this.handoffActive = active;
   }
 
   private releaseLease(name: string, lane: Lane, token: symbol): void {
@@ -479,6 +494,7 @@ export class LaneRuntime {
   }
 
   async sweep(): Promise<void> {
+    if (this.handoffActive) return;
     this.pruneClosed();
     const settled = await Promise.allSettled(
       [...this.lanes.values()]
@@ -521,6 +537,17 @@ export class LaneRuntime {
           }),
         );
       return result;
+    }
+    if (name === "request_human" && typeof args.tabId === "number") {
+      try {
+        this.checkTab(caller, args.tabId);
+      } catch {
+        return {
+          isError: true,
+          structuredContent: { error: "not_in_lane" },
+          content: [{ type: "text", text: "not_in_lane: handoff tab is not in your lane." }],
+        };
+      }
     }
     if (SIGNIN_TOOLS.has(name) || name === "list_lanes" || name === "close_lane")
       return this.profileCaller.run(caller, handler);
@@ -688,5 +715,13 @@ export class LaneRuntime {
     await Promise.allSettled(this.opening.values());
     await Promise.all([...this.lanes.values()].map((lane) => this.dispose(lane, "close_lane")));
     await Promise.allSettled(this.endedCleanup);
+  }
+
+  async resyncHandoff(): Promise<void> {
+    await Promise.all(
+      [this.options.manager, ...[...this.lanes.values()].map((lane) => lane.manager)].map(
+        (manager) => manager.resyncHandoff(),
+      ),
+    );
   }
 }

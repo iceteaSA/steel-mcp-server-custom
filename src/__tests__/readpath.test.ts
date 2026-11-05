@@ -168,18 +168,23 @@ test("all tool outputSchema JSON bytes equal the pre-hardening catalog", () => {
   });
   for (const register of Object.values(groups))
     register((s) => specs.push(s), {} as BrowserManager, env);
-  expect(specs).toHaveLength(48);
+  expect(specs).toHaveLength(50);
   expect(specs.find((s) => s.name === "block_site")?.outputSchema).toBeDefined();
-  const schemas = specs
-    .filter((s) => s.name !== "block_site")
-    .map((s) => ({
-      name: s.name,
-      outputSchema: s.outputSchema ? z.toJSONSchema(z.object(s.outputSchema)) : null,
-    }));
-  const added = new Set(["request_signin", "signin_status", "cancel_signin"]);
+  const schemas = specs.map((s) => ({
+    name: s.name,
+    outputSchema: s.outputSchema ? z.toJSONSchema(z.object(s.outputSchema)) : null,
+  }));
+  const added = new Set([
+    "request_signin",
+    "signin_status",
+    "cancel_signin",
+    "request_human",
+    "wait_for_human",
+    "block_site",
+  ]);
   const legacy = schemas.filter((s) => !added.has(s.name));
   expect(legacy).toHaveLength(44);
-  expect(schemas).toHaveLength(47);
+  expect(schemas).toHaveLength(50);
   expect(
     schemas
       .filter((s) => added.has(s.name))
@@ -190,8 +195,20 @@ test("all tool outputSchema JSON bytes equal the pre-hardening catalog", () => {
   expect(new Bun.CryptoHasher("sha256").update(json).digest("hex")).toBe(
     "26dd4401cb071fbf71dbcf628d8252aaf8c99b44e2154ac052032a7f2abacf76",
   );
-  expect(new Bun.CryptoHasher("sha256").update(JSON.stringify(schemas)).digest("hex")).toBe(
+  const preHandoff = schemas.filter(
+    (s) => !["block_site", "request_human", "wait_for_human"].includes(s.name),
+  );
+  expect(preHandoff).toHaveLength(47);
+  expect(new Bun.CryptoHasher("sha256").update(JSON.stringify(preHandoff)).digest("hex")).toBe(
     "37d4d60a6c71ab170c9a2e1846cc3834e1b6a828cd64f1e377157d1fc749d62d",
+  );
+  const handoffCatalog = schemas.filter((s) => s.name !== "block_site");
+  expect(handoffCatalog).toHaveLength(49);
+  expect(new Bun.CryptoHasher("sha256").update(JSON.stringify(handoffCatalog)).digest("hex")).toBe(
+    "2b5f6d5ff1d60af613586a001cb92cf359f794777465b5e9f749907604265959",
+  );
+  expect(new Bun.CryptoHasher("sha256").update(JSON.stringify(schemas)).digest("hex")).toBe(
+    "3e97d5d654d7493d20bedc3ae247f014e8e301de5146dc4ca8c62851547a3333",
   );
 });
 

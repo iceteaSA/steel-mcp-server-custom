@@ -57,6 +57,30 @@ All saved-state writers use that queue. A stale browser snapshot cannot replace 
 After persistence, live apply selects only lanes that hold the target `profile`. If none hold it, the next load reads the file.
 Shutdown cancels pending requests, flushes state, and closes HTTP and WebSocket connections in the drain bound.
 
+## Browser handoff
+
+`src/handoff.ts` owns one browser-wide state machine and the current viewer claim.
+The registrar stops admission before lane selection and suppresses late results from cancelled calls.
+An async call scope records each operation's pages. After a 130-second drain, only unfinished operations' pages close.
+Cancelled scopes cannot start more manager operations. A bounded operation keeps its page.
+
+The lane sweeper stops when the handoff state is not `AGENT`.
+The lane runtime sets each lane's last-activity time when `AGENT` resumes.
+
+Steel's primary tab stays open in compatibility mode. CDP stops its active execution, and `fenced_not_closed` records that tab.
+
+The HTTP server supplies an ownership token only from `/handoff/take`. Heartbeat and handback use that token and HTTP authentication.
+`/handoff/take` supplies its result immediately in `DRAINING`. Authenticated WebSocket snapshots and `GET /handoff` report the change to `HUMAN`.
+Heartbeat disconnection changes the state to `PAUSED`. Timers cannot give control to agents.
+
+Handback ends the claim before CDP input release and cache removal in `RESYNC`.
+All lane managers release only keys and buttons held through the server's input APIs.
+The `releaseHumanInput` viewer hook has a five-second bound and a no-op default. The viewer lane must supply X-server input release.
+The shared extraction store removes continuation captures.
+The registrar checks for a new snapshot before ref use on each tab.
+
+The future viewer adapter must check state and claim ownership. The server does not supply a viewer transport or image.
+
 ## Settle path
 
 1. Tab allocation attaches a `domcontentloaded` listener to each page.

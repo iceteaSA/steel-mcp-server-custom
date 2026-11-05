@@ -19,6 +19,17 @@
 - Add lane budgets for requests, redirects, and document load time. Keep off-mode budgets disabled unless configured.
 - Refuse non-regular deny files. Add IP and Unicode domain entries, measured redirect errors, and policy-route restoration after media changes.
 - Stop manual HTTP loops after 20 redirects with `redirect_loop`. Keep lower configured budgets and document route-only IPv6 subresource guards.
+- Limit pending human requests to eight across all callers. Refuse a ninth request with `handoff_busy`. Send at most one count-summary notification for each tick.
+- Refuse HTTP `Origin` headers that are not from a Chrome extension on handoff routes. Use `handoff_displaced` for the eight most recent replaced operator claims.
+
+- Add `request_human` and `wait_for_human` for browser-wide operator handoff in the two lane modes.
+- Add authenticated HTTP control, heartbeat, handback, and decline endpoints, plus WebSocket state snapshots.
+- Stop agent tools during operator control. Drain for at most 130 seconds, then close only pages with unfinished operations.
+- Keep Steel's primary tab open in compatibility mode. Stop active JavaScript execution and list that tab in `fenced_not_closed`.
+- Keep disconnected viewer claims `PAUSED` until an explicit operator step. Release input and invalidate cached reads before agent control resumes.
+- Release only server-held keys and buttons. Supply a bounded viewer hook for human input release in the X server.
+- Stop automatic lane closure when the state is not `AGENT`. Restart each lane's full `LANE_IDLE_MS` period when `AGENT` resumes.
+- Do not include the viewer image or extension controls in this server change.
 
 - Refuse a first profile binding after stateful lane use with `lane_not_fresh`. Keep empty `about:blank` tabs permitted.
 - Check cookies and origin entries before binding. Keep the used mark after pages close or cookies clear. Do not clear state on refusal.

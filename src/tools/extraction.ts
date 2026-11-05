@@ -317,6 +317,7 @@ export const snapshotFilterSchema = z
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   const pageTextStore = new PageTextStore();
+  register.handoff?.controller.on("resync", () => pageTextStore.clear());
   const continuationParams = {
     query: z
       .string()

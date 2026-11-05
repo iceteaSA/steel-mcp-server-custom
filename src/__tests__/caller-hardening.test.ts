@@ -88,7 +88,7 @@ test("SDK clients accept missing-caller errors without changes to tool output sc
       createHash("sha256")
         .update(JSON.stringify([...before].sort((a, b) => a.name.localeCompare(b.name))))
         .digest("hex"),
-    ).toBe("dddb71ea2a568138057bca258ea6920f2b2c6ccb3cc2b9069c64d099ef59abc8");
+    ).toBe("1413d6629ad33a03f330c6d9cdb4fbd6446156c54ecc4f7669c93dfcfddae3b0");
     for (const [name, args, structured] of [
       ["list_tabs", {}, false],
       [

@@ -8,7 +8,7 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 
 ## Features
 
-- **49 browser tools** (51 with AI tools) in lane mode. Each caller has different tabs and browser storage. `STEEL_LANES=off` uses the legacy tool set.
+- **51 browser tools** (53 with AI tools) in lane mode. Each caller has different tabs and browser storage. `STEEL_LANES=off` uses the legacy tool set.
 - **Patchright browser engine** — drops the `Runtime.enable` CDP fingerprint that vanilla Playwright leaks; native binary stays compatible with all standard Playwright page APIs
 - **Snapshot-first paradigm** — `snapshot` returns an accessibility tree with stable `[ref=eN]` tokens; refs feed `click`/`fill`/`scroll`/`get_attrs`/`extract`/`press_key` directly without re-discovering selectors
 - **MCP 2025 best practices** — `server.registerTool` with `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` annotations and `outputSchema` → `structuredContent` on JSON tools
@@ -285,7 +285,60 @@ Concurrent calls share one new browser startup. `SESSION_TIMEOUT_MS` stays uncha
 Set `STEEL_LANES=off` to restore the legacy shared context, owner-based targeting, `force` override, tab sweeper, and whole-browser stop.
 Restart the MCP process to change this switch. The restart does not keep lanes from the previous process.
 
-## Tools (46 default, 48 with AI tools, legacy mode)
+## Browser handoff
+
+`request_human({reason, tabId?})` supplies a request ID without waiting for the operator.
+`wait_for_human({timeout})` waits at most 120 seconds and supplies `human_done`, `human_declined`, `paused`, or `timeout`.
+Requests with the same caller, `reason`, and tab merge. Each caller can have three pending requests and ten requests for each hour.
+
+The server can have at most eight pending requests in total. When eight requests are pending, a new request gets `handoff_busy` with the pending count.
+It does not remove a different caller's request.
+
+The handoff applies to all browser contexts in the two lane modes.
+The states are `AGENT`, `HUMAN_REQUESTED`, `DRAINING`, `HUMAN`, `RESYNC`, and `PAUSED`.
+`HUMAN_REQUESTED` keeps agent tools available: the operator has not accepted control, and `wait_for_human` has a time limit.
+During `DRAINING`, `HUMAN`, `RESYNC`, or `PAUSED`, agent tools supply `human_control:` with the `reason`.
+Only `wait_for_human`, `signin_status`, and `list_lanes` stay available. No page data is available through these reads.
+
+The previous output schemas stay unchanged. Errors use text when the tool's schema does not accept the error object.
+
+All `/handoff` endpoints use the HTTP server's Bearer secret and the same localhost Host guard as `/push`.
+Accept only a Chrome extension `Origin` header, as on the WebSocket.
+The `Origin` header is optional for CLI and server clients.
+
+| Endpoint | Body and result |
+|---|---|
+| `GET /handoff` | Current state, pending requests, and closed tab IDs. No ownership token. |
+| `POST /handoff/take` | Optional `{reason, tabId}`. Gives `DRAINING`, an ownership `token`, and `inFlight` immediately. |
+| `POST /handoff/heartbeat` | `{token}` from Take control. Accepted during `DRAINING` and `HUMAN`. |
+| `POST /handoff/back` | `{token}`. Ends viewer write access before `RESYNC`. |
+| `POST /handoff/decline` | Optional `{id}`. Declines one pending request. |
+
+Agent operations can drain for 130 seconds. At the deadline, only pages with unfinished agent operations close, not contexts or other pages.
+The status and wait results list `closedTabIds` and `requestedTabClosed`.
+
+In compatibility mode, Steel's primary tab stays open. CDP stops its active JavaScript execution, and `fenced_not_closed` lists that tab.
+The authenticated `/signin/events` WebSocket sends `type: "handoff"` snapshots, without authentication secrets or ownership tokens.
+With `STEEL_NTFY_TOPIC_FILE`, a push follows after 60 seconds without a decision.
+Each timer tick sends at most one push with the pending count and one request's agent, `reason`, and tab.
+
+The eight most recent claims replaced by a new holder get `handoff_displaced`.
+Other incorrect tokens get `handoff_owner`.
+
+Send a heartbeat less than 15 seconds apart. A missed heartbeat gives `PAUSED`. Agents stay stopped.
+The operator must start a new claim or hand back explicitly.
+
+Handback releases only server-held keys and mouse buttons, clears snapshots and continuation caches, and invalidates refs in all lanes.
+After `human_done`, read a new snapshot before interaction. Browser disconnection and shutdown supply `paused` to waiters.
+When the state is not `AGENT`, automatic lane closure stops.
+After `AGENT` resumes, each lane gets a full `LANE_IDLE_MS` period.
+
+The viewer image and extension controls are not included. A viewer adapter must grant write access only in `HUMAN` to the token holder.
+
+The `releaseHumanInput` adapter hook must release human input in the X server. Its default does nothing. A five-second hook timeout keeps agents `PAUSED`.
+The legacy Steel viewer does not use this protocol. Do not use it for concurrent writes.
+
+## Tools (48 default, 50 with AI tools, legacy mode)
 
 This table lists the legacy tool set, which lane mode also includes. The lane rules above replace its shared-state behavior.
 
@@ -332,6 +385,8 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 | `intercept` | List, fulfill, abort, continue, or remove per-tab request routes in the caller's lane. |
 | **Sessions & Auth** | |
 | `request_signin` | Request operator approval for one site and `profile`. Optional `wait` is seconds, at most 120. |
+| `request_human` | Request browser-wide operator control without waiting. |
+| `wait_for_human` | Wait at most 120 seconds for the handoff result. |
 | `signin_status` | Read your request status and counts, not state values. |
 | `cancel_signin` | Cancel your pending request. Saved state stays unchanged. |
 | `create_profile` | Load a named profile in the lane. Legacy mode uses a different BrowserContext. |

@@ -949,24 +949,20 @@ wait_for(text: "Welcome", tabId: 7)
 
 `fill` replaces N separate tool calls with one. Pass `skipMissing: true` if some fields are conditionally rendered. Mix `ref` and `selector` per field; force a specific dispatch per field with `kind: "text"|"check"|"radio"|"select"|"selectLabel"|"selectIndex"`.
 
-## Human-in-the-Loop (HITL)
+## Human handoff
 
-For a failed CAPTCHA solve, 2FA, or a login that needs human input, hand off:
-
-1. `start_browser()` → returns **Session Viewer** + **Interactive URL**
-2. Send user the Interactive URL + task description
-3. Wait for user confirmation
-4. Continue — cookies/auth preserved
-
-```
-start_browser()
-→ "Interactive URL: https://steel.example.com/v1/sessions/debug?..."
-[user logs in]
-wait_for(text: "Dashboard", timeout: 60000)
-list_tabs()
-```
-
-Never handle 2FA / credentials yourself.
+- Call `request_human({reason, tabId?})` when operator input is necessary, such as 2FA or a CAPTCHA failure.
+- Keep the request ID. The call ends before the operator gets control.
+- Call `wait_for_human({timeout})` with at most 120 seconds for each wait.
+- On `human_control`, stop browser operations in all lanes. Use only status reads and `wait_for_human`.
+- On `human_done`, discard previous refs and cursors. Read a new snapshot before interaction.
+- Read `closedTabIds` and `requestedTabClosed`. A page with an unfinished operation can close after the 130-second drain.
+- Read `fenced_not_closed` for primary tabs in compatibility mode. These tabs stay open after execution cancellation.
+- On `human_declined` or `paused`, report the result. Do not resume browser work without an explicit operator step.
+- On `timeout`, report that the wait ended without a decision. A timeout does not give browser control.
+- Do not operate the viewer or HTTP control endpoints for the operator.
+- Do not type 2FA codes or disclose credentials.
+- Use only a viewer adapter that checks the handoff claim. The legacy Steel viewer does not check it.
 
 ### Persist / restore an auth session
 

@@ -11,6 +11,8 @@
 | `src/site-policy.ts` | Shared and lane deny lists, HTTP routes, CDP guards, and navigation budgets |
 | `config/site-deny.txt` | Reviewed shared domains, empty by default |
 | `src/signin.ts` | Sign-in requests, grants, audit, and notifications |
+| `src/handoff.ts` | Browser-wide handoff states, call scopes, viewer claim, and notifications |
+| `src/tools/handoff.ts` | Agent request and bounded wait tools |
 | `src/profile-store.ts` | Shared schema, queue for each file, merge, and atomic JSON writes |
 | `src/untrusted.ts` | Output fences and unsafe-control removal |
 | `src/env.ts` | Validated environment schema and derived paths |

@@ -11,3 +11,4 @@ export { register as registerIntercept } from "./intercept.js";
 export { register as registerAct } from "./act.js";
 export { register as registerCaptcha } from "./captcha.js";
 export { register as registerSignin } from "./signin.js";
+export { register as registerHandoff } from "./handoff.js";
