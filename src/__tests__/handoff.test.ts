@@ -15,7 +15,7 @@ import { makeRegistrar, ALL_TOOLSETS } from "../tools/shared.js";
 import * as groups from "../tools/index.js";
 import { startRelayServer } from "../relay.js";
 import { WebSocket } from "ws";
-import type { HandoffOptions } from "../handoff.js";
+import { HandoffController, type HandoffOptions } from "../handoff.js";
 
 async function fixture(mode: "on" | "off", topic?: string, handoff: Partial<HandoffOptions> = {}) {
   const directory = await mkdtemp(join(tmpdir(), "handoff-"));
@@ -186,6 +186,7 @@ async function fixture(mode: "on" | "off", topic?: string, handoff: Partial<Hand
     return result.body.token as string;
   };
   return {
+    url,
     call,
     endpoint,
     take,
@@ -218,6 +219,32 @@ async function fixture(mode: "on" | "off", topic?: string, handoff: Partial<Hand
     },
   };
 }
+
+test("handoff security: 2500 rotated callers cannot exceed eight pending requests", () => {
+  const controller = new HandoffController({ automaticTimers: false, resync: async () => {} });
+  try {
+    const first = controller.request("same-caller", { reason: "r" });
+    let accepted = 0;
+    const refused: string[] = [];
+    for (let i = 0; i < 2500; i++) {
+      try {
+        controller.request(`caller-${i}`, { reason: "r" });
+        accepted++;
+      } catch (error) {
+        refused.push(error instanceof Error ? error.message : String(error));
+      }
+    }
+    expect(accepted).toBe(7);
+    expect(refused).toHaveLength(2493);
+    expect(new Set(refused)).toEqual(new Set(["handoff_busy: 8 pending requests (limit 8)"]));
+    expect(controller.snapshot().requests).toHaveLength(8);
+    expect(controller.snapshot().requests[0].id).toBe(first.id);
+    expect(controller.request("same-caller", { reason: "r" })).toEqual(first);
+    expect(JSON.stringify(controller.snapshot()).length).toBeLessThan(4000);
+  } finally {
+    controller.shutdown();
+  }
+});
 
 test("handoff idle: HUMAN keeps lanes for twice the idle period and handback restarts the full idle clock", async () => {
   const f = await fixture("on");
@@ -525,6 +552,105 @@ for (const mode of ["off", "on"] as const) {
       expect((await waiting).structuredContent).toMatchObject({ status: "paused" });
     } finally {
       await shutdown.close();
+    }
+  }, 15000);
+
+  test(`handoff ${mode}: security bounds rotated MCP callers and all snapshot channels`, async () => {
+    const f = await fixture(mode);
+    try {
+      const ids: unknown[] = [];
+      for (let i = 0; i < 8; i++) {
+        const after = f.events.length;
+        const result = await f.call("request_human", { reason: `reason-${i}` }, `rotated-${i}`);
+        ids.push(result.structuredContent?.id);
+        const event = await f.state("HUMAN_REQUESTED", after);
+        expect(event.requests).toHaveLength(i + 1);
+      }
+      const refused = await f.call("request_human", { reason: "extra" }, "rotated-extra");
+      expect(refused.isError).toBe(true);
+      expect(refused.structuredContent).toMatchObject({
+        error: "handoff_busy: 8 pending requests (limit 8)",
+      });
+      const status = (await f.endpoint("")).body;
+      expect((status.requests as Array<{ id: unknown }>).map((request) => request.id)).toEqual(ids);
+      expect(
+        (await f.call("wait_for_human", { timeout: 0 })).structuredContent?.requests,
+      ).toHaveLength(8);
+      const token = await f.take();
+      expect((await f.call("probe")).structuredContent?.requests).toHaveLength(8);
+      for (const event of f.events)
+        if (Array.isArray(event.requests)) expect(event.requests.length).toBeLessThanOrEqual(8);
+      await f.endpoint("back", { token });
+    } finally {
+      await f.close();
+    }
+  }, 15000);
+
+  test(`handoff ${mode}: security rejects foreign HTTP origins and identifies a displaced holder`, async () => {
+    const f = await fixture(mode);
+    try {
+      const statuses: number[] = [];
+      for (const action of ["", "take", "heartbeat", "back", "decline"])
+        statuses.push(
+          (
+            await f.endpoint(
+              action,
+              {},
+              { Authorization: "Bearer synthetic-relay", Origin: "https://evil.example" },
+            )
+          ).status,
+        );
+      expect(statuses).toEqual([403, 403, 403, 403, 403]);
+      expect(
+        (
+          await fetch(`${f.url}/handoff/take`, {
+            method: "OPTIONS",
+            headers: { Origin: "https://evil.example" },
+          })
+        ).status,
+      ).toBe(403);
+      expect((await f.endpoint("")).status).toBe(200);
+      const extension = {
+        Authorization: "Bearer synthetic-relay",
+        Origin: `chrome-extension://${"a".repeat(32)}`,
+      };
+      expect((await f.endpoint("", {}, extension)).status).toBe(200);
+      const oldToken = await f.take();
+      await f.advance(1001);
+      const token = await f.take();
+      for (const action of ["heartbeat", "back"])
+        expect((await f.endpoint(action, { token: oldToken })).body.error).toBe(
+          "handoff_displaced",
+        );
+      expect((await f.endpoint("back", { token }, extension)).body.state).toBe("AGENT");
+    } finally {
+      await f.close();
+    }
+  }, 15000);
+
+  test(`handoff ${mode}: security aggregates eight due notifications into one push per tick`, async () => {
+    const received: Array<{ body: string; title: string | null }> = [];
+    const ntfy = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: async (request) => {
+        received.push({ body: await request.text(), title: request.headers.get("title") });
+        return new Response("ok");
+      },
+    });
+    const f = await fixture(mode, `http://127.0.0.1:${ntfy.port}/synthetic-topic`);
+    try {
+      for (let i = 0; i < 8; i++)
+        await f.call("request_human", { reason: `reason-${i}` }, `rotated-${i}`);
+      await f.advance(60000);
+      expect(received).toHaveLength(1);
+      expect(received[0].title).toBe("8 pending human requests");
+      expect(received[0].body).toContain("8 pending requests");
+      await f.advance(60000);
+      expect(received).toHaveLength(1);
+    } finally {
+      await f.close();
+      await ntfy.stop(true);
     }
   }, 15000);
 
