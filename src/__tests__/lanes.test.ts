@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { chromium } from "patchright";
 import { z } from "zod";
-import { mkdtemp, writeFile, readFile, rm } from "node:fs/promises";
+import { link, mkdir, mkdtemp, writeFile, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { chromiumPath, retainedBrowserCount, bun13 } from "./browser-processes.js";
@@ -117,6 +117,126 @@ function tab(result: Awaited<ReturnType<Client["callTool"]>>) {
 
 function structured(result: Awaited<ReturnType<Client["callTool"]>>) {
   return result.structuredContent as Record<string, unknown> | undefined;
+}
+
+for (const mode of ["on", "off"] as const) {
+  for (const vector of [
+    "evaluate-profile",
+    "evaluate-credentials",
+    "evaluate-new",
+    "screenshot",
+    "upload-credentials",
+    "upload-profile",
+    "upload-topic",
+    "upload-aliases",
+    "upload-directory",
+    "download-credentials",
+    "download-traversal",
+  ] as const) {
+    test(`reserved store tools: ${mode} ${vector}`, async () => {
+      const root = await mkdtemp(join(tmpdir(), "reserved-tool-"));
+      const separate = vector === "download-traversal";
+      const output = separate ? join(root, "out") : root;
+      const profiles = join(root, "profiles");
+      const credentials = join(root, "credentials.json");
+      const topic = join(root, "notify.topic");
+      const f = await fixture(mode, {
+        OUTPUT_DIR: output,
+        ...(separate ? { PROFILES_DIR: profiles, CREDENTIALS_FILE: credentials } : {}),
+        STEEL_NTFY_TOPIC_FILE: topic,
+      });
+      const profile = join(profiles, "x.json");
+      const site = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        fetch: (request) => {
+          if (new URL(request.url).pathname === "/download")
+            return new Response("download-body", {
+              headers: {
+                "Content-Disposition": `attachment; filename="${separate ? "../profiles/x.json" : "credentials.json"}"`,
+                "Content-Type": "application/octet-stream",
+              },
+            });
+          return new Response(
+            '<input id="file" type="file"><input id="folder" type="file" webkitdirectory>',
+            { headers: { "Content-Type": "text/html" } },
+          );
+        },
+      });
+      try {
+        await mkdir(output, { recursive: true });
+        await mkdir(profiles, { recursive: true });
+        for (const file of [profile, credentials, topic])
+          await writeFile(file, "SERVER_ONLY_CANARY");
+        const id = tab(await f.call("a", "new_tab", { url: site.url.origin }));
+        let result: Awaited<ReturnType<typeof f.call>>;
+        if (vector.startsWith("evaluate")) {
+          const target =
+            vector === "evaluate-profile"
+              ? profile
+              : vector === "evaluate-credentials"
+                ? credentials
+                : join(profiles, "new", "x.json");
+          result = await f.call("a", "evaluate", {
+            tabId: id,
+            expression: "({cookies: []})",
+            outputMode: "file",
+            outputPath: target,
+          });
+        } else if (vector === "screenshot") {
+          result = await f.call("a", "get_screenshot", {
+            tabId: id,
+            outputMode: "file",
+            outputPath: join(profiles, "image.png"),
+          });
+        } else if (vector.startsWith("upload")) {
+          let paths = [
+            vector === "upload-profile" ? profile : vector === "upload-topic" ? topic : credentials,
+          ];
+          if (vector === "upload-aliases") {
+            await symlink(credentials, join(output, "alias.json"));
+            await link(profile, join(output, "linked.json"));
+            paths = [join(output, "alias.json"), join(output, "linked.json")];
+          }
+          if (vector === "upload-directory") paths = [root];
+          result = await f.call("a", "upload_file", {
+            tabId: id,
+            selector: vector === "upload-directory" ? "#folder" : "#file",
+            files: paths,
+          });
+        } else {
+          if (separate)
+            for (const context of f.contexts())
+              context.on("page", (page) =>
+                page.on("download", (download) => {
+                  spyOn(download, "suggestedFilename").mockReturnValue("../profiles/x.json");
+                }),
+              );
+          result = await f.call("a", "download_file", { url: `${site.url.origin}/download` });
+        }
+        expect(result.isError).toBe(true);
+        expect(text(result)).toContain("reserved_store");
+        expect(text(result)).not.toContain("SERVER_ONLY_CANARY");
+        for (const file of [profile, credentials, topic])
+          expect(await readFile(file, "utf8")).toBe("SERVER_ONLY_CANARY");
+        expect(await Bun.file(join(profiles, "new", "x.json")).exists()).toBe(false);
+        expect(await Bun.file(join(profiles, "image.png")).exists()).toBe(false);
+        if (vector.startsWith("upload"))
+          expect(
+            text(
+              await f.call("a", "evaluate", {
+                tabId: id,
+                expression: "document.querySelector('input').files.length",
+              }),
+            ),
+          ).toContain('"result":0');
+      } finally {
+        site.stop(true);
+        await f.close();
+        await rm(root, { recursive: true, force: true });
+      }
+    });
+  }
 }
 
 test("one bound profile per lane refuses X1 alias mixing and never passes alpha state to beta", async () => {
