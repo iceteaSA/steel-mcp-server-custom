@@ -121,7 +121,7 @@ test("L10: an unrelated lane succeeds when an idle lane's autosave times out", a
     f.advance(101);
     const unrelated = await bounded(f.call("b"));
     expect(unrelated.isError).not.toBe(true);
-    expect(f.state.lanes.has("a")).toBe(false);
+    expect(f.state.lanes.has("short:a")).toBe(false);
     expect(save).toHaveBeenCalledTimes(1);
     expect(log).toHaveBeenCalledTimes(1);
     expect(
@@ -282,8 +282,8 @@ test("closed records evict oldest callers at 1000 and expire after 24 hours", as
       await f.call(String(i), "close_lane");
     }
     expect(f.state.closed.size).toBe(1000);
-    expect(f.state.closed.has("0")).toBe(false);
-    expect(f.state.closed.has("1004")).toBe(true);
+    expect(f.state.closed.has("short:0")).toBe(false);
+    expect(f.state.closed.has("short:1004")).toBe(true);
     f.advance(24 * 60 * 60 * 1000 + 1);
     await f.runtime.sweep();
     expect(f.state.closed.size).toBe(0);

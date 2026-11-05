@@ -20,7 +20,7 @@ import { afterAction, sleep } from "../utils.js";
 import { fenceToolResult } from "../untrusted.js";
 import { LaneRuntime, type LaneOptions } from "../lanes.js";
 import type { BrowserManager } from "../manager.js";
-import { NoCallerError, errorForTool } from "../caller.js";
+import { NoCallerError, callerKey, errorForTool } from "../caller.js";
 import { policyErrorResult } from "../site-policy.js";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { HandoffController, assertAgentOperation, type HandoffOptions } from "../handoff.js";
@@ -191,7 +191,13 @@ export function makeRegistrar(
       // runtime against inputSchema; compile-time narrowing would need
       // per-tool generics that defeat the wrapper's purpose.
       (async (args: Record<string, unknown>, extra: { _meta?: Record<string, unknown> }) => {
-        const caller = String(extra?._meta?.["ai.opencode/sessionID"] ?? "single-process");
+        const rawCaller = extra?._meta?.["ai.opencode/sessionID"];
+        if (typeof rawCaller === "string" && !rawCaller.isWellFormed())
+          return fenceToolResult(
+            errorForTool(new NoCallerError().result, spec.outputSchema),
+            spec.name,
+          );
+        const caller = callerKey(String(rawCaller ?? "single-process"));
         const invoke = () => {
           assertAgentOperation();
           if (!handoff || !baseManager) return spec.handler(args);
@@ -319,7 +325,7 @@ export function makeRegistrar(
       : {}),
     toolCount: () => count,
     getCaller: () => {
-      if (!runtime) return "single-process";
+      if (!runtime) return callerKey("single-process");
       const caller = runtime.getCaller();
       if (!caller) throw new NoCallerError();
       return caller;

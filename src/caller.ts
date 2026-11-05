@@ -1,5 +1,18 @@
+/// <reference lib="es2024.string" />
+
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { createHash } from "node:crypto";
 import { z } from "zod";
+
+export function callerKey(id: string): string {
+  return Buffer.byteLength(id, "utf8") > 128
+    ? `long:${createHash("sha256").update(id).digest("hex")}`
+    : `short:${id}`;
+}
+
+export function callerLabel(key: string): string {
+  return key.startsWith("long:") ? `sha256:${key.slice(5, 21)}` : key.slice(6);
+}
 
 export function errorForTool(
   result: CallToolResult,

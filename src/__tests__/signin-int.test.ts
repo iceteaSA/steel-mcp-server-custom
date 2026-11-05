@@ -133,7 +133,9 @@ for (const mode of ["on", "off"] as const) {
         response.json(),
       );
       expect(pending.requests).toHaveLength(1);
-      expect(pending.requests[0].caller.sessionID).toBe(mode === "on" ? "a" : "single-process");
+      expect(pending.requests[0].caller.sessionID).toBe(
+        mode === "on" ? "short:a" : "short:single-process",
+      );
       if (mode === "on") {
         expect(data(await call(f.client, "b", "signin_status", { id }))).toEqual({
           error: "signin_unknown",
@@ -164,12 +166,12 @@ for (const mode of ["on", "off"] as const) {
           parallelPending.requests.find(
             (request: { id: string }) => request.id === data(parallel[0])?.id,
           )?.caller.sessionID,
-        ).toBe("a");
+        ).toBe("short:a");
         expect(
           parallelPending.requests.find(
             (request: { id: string }) => request.id === data(parallel[1])?.id,
           )?.caller.sessionID,
-        ).toBe("b");
+        ).toBe("short:b");
       } else
         expect(data(await call(f.client, "b", "signin_status", { id }))?.status).toBe("pending");
       const waiting = call(f.client, "a", "request_signin", {

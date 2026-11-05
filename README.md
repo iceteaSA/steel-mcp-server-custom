@@ -296,6 +296,7 @@ It does not remove a different caller's request.
 
 The handoff applies to all browser contexts in the two lane modes.
 The states are `AGENT`, `HUMAN_REQUESTED`, `DRAINING`, `HUMAN`, `RESYNC`, and `PAUSED`.
+
 `HUMAN_REQUESTED` keeps agent tools available: the operator has not accepted control, and `wait_for_human` has a time limit.
 During `DRAINING`, `HUMAN`, `RESYNC`, or `PAUSED`, agent tools supply `human_control:` with the `reason`.
 Only `wait_for_human`, `signin_status`, and `list_lanes` stay available. No page data is available through these reads.

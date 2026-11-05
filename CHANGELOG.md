@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Bound caller keys with different short-ID and full-SHA-256 namespaces. Show long IDs as `sha256:<hex16>`.
+- Refuse ill-formed Unicode caller IDs with the same `no_caller` result in the two lane modes.
+- Keep previous pending sign-in records with their raw caller IDs. They expire by TTL without migration. New caller keys cannot access these records.
+
 - Request HTTP and HTTPS host access independently so Chrome accepts site and sign-in grants (`7b2c90b`).
 - Refuse wildcard and malformed hostnames from sign-in requests before the permission prompt (`ee32511`).
 - Correct profile-name validation for Chrome's Unicode Sets regular expressions. Keep the same permitted names.

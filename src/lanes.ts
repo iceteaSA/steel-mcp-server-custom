@@ -3,7 +3,7 @@ import { randomBytes } from "node:crypto";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Page } from "patchright";
 import { BrowserManager, type Env } from "./manager.js";
-import { NoCallerError } from "./caller.js";
+import { NoCallerError, callerKey, callerLabel } from "./caller.js";
 import { policyErrorResult } from "./site-policy.js";
 
 // A random process offset reduces restart collisions. Leave half the safe range for growth.
@@ -299,7 +299,7 @@ export class LaneRuntime {
       await this.sweep();
       if (name === "list_lanes") {
         const lanes = [...this.lanes.values()].map((lane) => ({
-          caller: lane.caller,
+          caller: callerLabel(lane.caller),
           ageSeconds: Math.max(0, (this.now() - lane.created) / 1000),
           tabCount: lane.manager.tabIds.length,
         }));
@@ -517,8 +517,10 @@ export class LaneRuntime {
     meta: Record<string, unknown> | undefined,
     handler: () => Promise<CallToolResult>,
   ): Promise<CallToolResult> {
-    const caller = meta?.["ai.opencode/sessionID"];
-    const hasCaller = typeof caller === "string" && caller.trim().length > 0;
+    const rawCaller = meta?.["ai.opencode/sessionID"];
+    const hasCaller =
+      typeof rawCaller === "string" && rawCaller.trim().length > 0 && rawCaller.isWellFormed();
+    const caller = hasCaller ? callerKey(rawCaller) : "";
     if (name === "list_profiles")
       return this.profileCaller.run(hasCaller ? caller : undefined, handler);
     const credentialWrite =
@@ -533,7 +535,7 @@ export class LaneRuntime {
         console.error(
           JSON.stringify({
             event: args.remove ? "credentials.delete" : "credentials.write",
-            caller,
+            caller: callerLabel(caller),
           }),
         );
       return result;

@@ -79,6 +79,8 @@ test("caller keys use the UTF-8 byte boundary and cannot collide with literal na
       "x".repeat(128),
       "é".repeat(64),
       "é".repeat(65),
+      "🙂".repeat(32),
+      "🙂".repeat(33),
       "x".repeat(8 * 1024 * 1024),
     ]) {
       const digest = createHash("sha256").update(id).digest("hex");
@@ -119,6 +121,35 @@ for (const mode of ["on", "off"] as const)
       expect(
         (await f.call(label, "wait_for_human", { timeout: 0 })).structuredContent?.status,
       ).toBe("timeout");
+    } finally {
+      await f.close();
+    }
+  });
+
+for (const mode of ["on", "off"] as const)
+  test(`ill-formed short and long caller IDs receive unified no_caller errors: ${mode}`, async () => {
+    const f = await fixture(mode);
+    try {
+      for (const id of ["\ud800", "x".repeat(129) + "\udfff"])
+        for (const name of ["request_human", "request_signin"]) {
+          const result = await f.call(
+            id,
+            name,
+            name === "request_human"
+              ? { reason: "fixture" }
+              : { site: "example.com", profile: "work", reason: "fixture" },
+          );
+          expect(result.isError).toBe(true);
+          expect(result.structuredContent).toEqual({ error: "no_caller" });
+          expect(
+            result.content
+              .filter((part) => part.type === "text")
+              .map((part) => part.text)
+              .join("\n"),
+          ).toContain('no_caller: send params._meta["ai.opencode/sessionID"]');
+        }
+      expect(await f.store.pending()).toEqual([]);
+      expect(f.handle.handoff!.snapshot().requests).toEqual([]);
     } finally {
       await f.close();
     }
