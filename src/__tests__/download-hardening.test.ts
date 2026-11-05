@@ -40,13 +40,13 @@ for (const forceFetch of [true, false]) {
         await mkdir(profiles);
         await fs.writeFile(path.join(profiles, "saved.json"), "SERVER_ONLY_CANARY");
         if (race) spy = spyOn(fs, "mkdir").mockImplementation(async (...args: Parameters<typeof fs.mkdir>) => {
-          const result = await mkdir(...args);
+          await mkdir(...args);
           if (!swapped && args[0] === output) {
             swapped = true;
             await fs.rename(output, path.join(root, "original"));
             await fs.symlink(profiles, output);
           }
-          return result;
+          return undefined;
         });
         const result = await specs.find((s) => s.name === "download_file")!.handler({ url: `${site.url.origin}/saved.json`, forceFetch, timeout: 2000 });
         if (race) {

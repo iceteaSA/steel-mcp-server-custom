@@ -13,7 +13,7 @@ import {
   validateCookies,
   validateUrlPattern,
 } from "../helpers.js";
-import { assertNotReservedStore } from "../reserved-stores.js";
+import { assertNotReservedStore, writeReservedSafeOutput } from "../reserved-stores.js";
 import { withBackgroundTab, writeToFile } from "../utils.js";
 import type { ToolRegistrar } from "./shared.js";
 import { tabTarget, tabTargetForce } from "./shared.js";
@@ -339,8 +339,7 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
           if (ext) suggested += ext;
         }
         const savePath = await resolveSavePath(suggested);
-        await fs.mkdir(path.dirname(savePath), { recursive: true });
-        await fs.writeFile(savePath, body);
+        await writeReservedSafeOutput(savePath, body, env);
         const stat = await fs.stat(savePath);
         return `Downloaded ${suggested} [via ${via}]\nSaved to: ${savePath}\nSize: ${stat.size.toLocaleString()} bytes`;
       };
@@ -371,9 +370,14 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
             ]);
             const suggested = download.suggestedFilename() || deriveDownloadFilename(url);
             const savePath = await resolveSavePath(suggested);
-            await fs.mkdir(path.dirname(savePath), { recursive: true });
             try {
-              await download.saveAs(savePath);
+              const stream = await download.createReadStream();
+              if (!stream) throw new Error("Download stream is unavailable.");
+              try {
+                await writeReservedSafeOutput(savePath, stream, env);
+              } finally {
+                stream.destroy();
+              }
             } catch (saveErr) {
               const sMsg = (saveErr as Error).message;
               if (/ENOENT|no such file or directory|copyfile/i.test(sMsg)) {

@@ -111,13 +111,13 @@ test("parent replacement after output validation cannot overwrite server state",
     await mkdir(profiles);
     await writeFile(join(profiles, "saved.json"), "SERVER_ONLY_CANARY");
     const spy = spyOn(fs, "mkdir").mockImplementation(async (...args: Parameters<typeof fs.mkdir>) => {
-      const result = await mkdir(...args);
+      await mkdir(...args);
       if (!swapped && args[0] === output) {
         swapped = true;
         await fs.rename(output, join(root, "original"));
         await symlink(profiles, output);
       }
-      return result;
+      return undefined;
     });
     try { await writeToFile("untrusted", "saved.json", env).catch(() => {}); }
     finally { spy.mockRestore(); }

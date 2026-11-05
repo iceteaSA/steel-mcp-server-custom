@@ -14,7 +14,7 @@ function inside(file: string, directory: string): boolean {
 
 export async function writeReservedSafeOutput(
   file: string,
-  data: Buffer | string,
+  data: Buffer | string | AsyncIterable<Uint8Array>,
   env: ReservedStoreEnv & Pick<Env, "OUTPUT_ROOT">,
 ): Promise<void> {
   if (process.platform !== "linux")
@@ -45,7 +45,8 @@ export async function writeReservedSafeOutput(
       await assertNotReservedStore(`/proc/self/fd/${leaf.fd}`, env);
       await assertInsideRoot(`/proc/self/fd/${leaf.fd}`, env.OUTPUT_ROOT, "outputPath");
       await leaf.truncate(0);
-      await leaf.writeFile(data);
+      if (typeof data === "string" || Buffer.isBuffer(data)) await leaf.writeFile(data);
+      else for await (const chunk of data) await leaf.writeFile(chunk);
     } finally { await leaf.close(); }
   } finally { await parent.close(); }
 }
