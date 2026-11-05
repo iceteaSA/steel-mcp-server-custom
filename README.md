@@ -146,6 +146,10 @@ With other active lanes, `stop_browser` refuses the call. With no other active l
 
 `new_tab({profile})` loads the saved profile into the lane's context through the same load path as legacy mode.
 All tabs in that lane then share that storage. `list_profiles` keeps the same result format.
+
+One lane context can hold only one named profile. A different name gives `lane_profile_conflict` with the held profile name.
+Use `close_lane` or a different lane to change profiles. After `delete_profile`, the live context keeps its profile binding.
+
 Profile files stay shared. Profile leases and encrypted profile storage are different work.
 
 The idle lease closes a lane after `LANE_IDLE_MS`. It does not close individual idle tabs.

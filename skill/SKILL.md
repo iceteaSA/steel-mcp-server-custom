@@ -42,7 +42,7 @@ return tab;
 - Read closure NOTE lines before the next step. Close, idle, or restart can reset cookies, tabs, and buffers.
 - Save a named profile only when the task must keep state on disk.
 - Load a profile through `new_tab({profile})` only when its saved state applies to the task.
-- Use one shared context for all profile names in a lane.
+- Use only one named `profile` in each lane. On `lane_profile_conflict`, close the lane or use a different lane. After `delete_profile`, the context keeps its binding.
 - Send caller metadata for credential writes and deletes, even without a browser lane.
 - In legacy mode (`STEEL_LANES=off`), use unique owner labels and do not stop the shared browser.
 

@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Keep one named profile in each lane context. Refuse a different profile name with `lane_profile_conflict` to prevent saved-state mixing.
+
 - Use caller lanes by default, with isolated browser contexts and bounded closure. Set `STEEL_LANES=off` for compatibility mode.
 - Add `list_lanes`, `close_lane`, `request_signin`, `signin_status`, and `cancel_signin`.
 - Guard hidden text with `STEEL_HIDDEN_TEXT=drop` by default. Keep unsafe-control removal and output fences in each mode.

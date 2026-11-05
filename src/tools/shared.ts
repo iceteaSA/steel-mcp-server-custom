@@ -112,11 +112,11 @@ export function makeRegistrar(
 
     const laneDescriptions: Record<string, string> = {
       new_tab:
-        "Open a new tab in the caller's lane and return its global tab ID. owner is an optional label. A profile loads saved state into the lane's existing context; it does not create a separate context.",
+        "Open a new tab in the caller's lane and return its global tab ID. owner is an optional label. A profile loads saved state into the lane's existing context. One profile name per lane context; a different name returns lane_profile_conflict. Use close_lane or another lane to change profiles.",
       stop_browser:
         "Refuse while another lane is active. Otherwise close only the caller's lane, not the shared Steel session or operator context. force is accepted and ignored with a NOTE line.",
       create_profile:
-        "Create a named profile in the caller's lane and restore saved cookies and localStorage through the existing restore path. Return the initial tab ID. All lane tabs share one context; profile leases are not implemented.",
+        "Create a named profile in the caller's lane and restore saved cookies and localStorage through the existing restore path. Return the initial tab ID. One profile name per lane context; a different name returns lane_profile_conflict. Use close_lane or another lane to change profiles.",
       delete_profile:
         "Close the named profile's tabs in the caller's lane. Keep the lane context open. Optionally remove the shared saved profile file from disk.",
       get_console:

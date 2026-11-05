@@ -122,11 +122,17 @@ function structured(result: Awaited<ReturnType<Client["callTool"]>>) {
 test("one bound profile per lane refuses X1 alias mixing and never passes alpha state to beta", async () => {
   const directory = await mkdtemp(join(tmpdir(), "lane-profile-bound-"));
   const f = await fixture("on", { PROFILES_DIR: directory });
-  const beta = JSON.stringify({ cookies: [{ name: "beta_token", value: "BETA_SECRET", domain: "example.test", path: "/" }] });
+  const beta = JSON.stringify({
+    cookies: [{ name: "beta_token", value: "BETA_SECRET", domain: "example.test", path: "/" }],
+  });
   try {
     await writeFile(join(directory, "beta.json"), beta);
     expect((await f.call("a", "new_tab", { profile: "alpha" })).isError).not.toBe(true);
-    await f.call("a", "cookies", { setCookies: [{ name: "alpha_token", value: "ALPHA_SECRET", domain: "example.test", path: "/" }] });
+    await f.call("a", "cookies", {
+      setCookies: [
+        { name: "alpha_token", value: "ALPHA_SECRET", domain: "example.test", path: "/" },
+      ],
+    });
     for (const [name, args] of [
       ["new_tab", { profile: "beta" }],
       ["create_profile", { name: "beta" }],
@@ -155,23 +161,34 @@ test("one bound profile per lane refuses X1 alias mixing and never passes alpha 
     expect(seen).not.toContain("ALPHA_SECRET");
     expect((await f.call("b", "save_profile", { name: "beta" })).isError).not.toBe(true);
     expect(await readFile(join(directory, "beta.json"), "utf8")).not.toContain("ALPHA_SECRET");
-  } finally { await f.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("a deleted profile stays bound to its live lane context and concurrent profile opens cannot mix", async () => {
   const directory = await mkdtemp(join(tmpdir(), "lane-profile-sticky-"));
   const f = await fixture("on", { PROFILES_DIR: directory });
   try {
-    const results = await Promise.all([f.call("a", "new_tab", { profile: "alpha" }), f.call("a", "new_tab", { profile: "beta" })]);
+    const results = await Promise.all([
+      f.call("a", "new_tab", { profile: "alpha" }),
+      f.call("a", "new_tab", { profile: "beta" }),
+    ]);
     expect(results.filter((result) => result.isError)).toHaveLength(1);
     expect(results.filter((result) => !result.isError)).toHaveLength(1);
     const held = results[0].isError ? "beta" : "alpha";
     const other = held === "alpha" ? "beta" : "alpha";
     expect((await f.call("a", "delete_profile", { name: held })).isError).not.toBe(true);
-    expect(text(await f.call("a", "new_tab", { profile: other }))).toContain("lane_profile_conflict");
+    expect(text(await f.call("a", "new_tab", { profile: other }))).toContain(
+      "lane_profile_conflict",
+    );
     await f.call("a", "close_lane");
     expect((await f.call("a", "new_tab", { profile: other })).isError).not.toBe(true);
-  } finally { await f.close(); await rm(directory, { recursive: true, force: true }); }
+  } finally {
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("lane requests require SDK request metadata, while profile listing is stateless", async () => {

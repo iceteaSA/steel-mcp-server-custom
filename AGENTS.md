@@ -165,7 +165,7 @@ Without these values, the server has no `act` or `extract_ai`, with or without `
 - Use `close_tabs` for selected tabs, or `close_lane` for the caller's context. Use `list_lanes` for ages and tab counts.
 - Do not use `stop_browser` for shared cleanup. It refuses while a different lane is active.
 - Respect `LANE_IDLE_MS`, `LANE_DRAIN_MS`, and `LANE_MAX`. Active calls prevent closure until the bounded drain condition applies.
-- Use the same context for all named `profile` values in one lane. There is no lease between processes.
+- Use only one named `profile` in each lane context. On `lane_profile_conflict`, use `close_lane` or a different lane. After `delete_profile`, the context keeps this binding.
 
 For compatibility mode (`STEEL_LANES=off`):
 

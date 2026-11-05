@@ -130,6 +130,7 @@ export class BrowserManager {
   public initialized = false;
   private initializing: Promise<void> | undefined;
   private laneContext = false;
+  private laneProfileName?: string;
   private laneClosed = false;
   private lanesEnabled = false;
   private allocateId: (() => number) | undefined;
@@ -1313,6 +1314,7 @@ export class BrowserManager {
     // If a profile is specified, open the tab in that profile's context
     let context = this.browserContext!;
     if (profileName) {
+      this.assertLaneProfile(profileName);
       if (this.laneContext && !this.profiles.has(profileName)) {
         const previousTab = this.currentTabId;
         const { tabId } = await this.createProfile(profileName, url);
@@ -1555,9 +1557,15 @@ export class BrowserManager {
         `Invalid profile name "${name}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
       );
     }
+    this.assertLaneProfile(name);
     if (this.profiles.has(name)) {
+      if (this.laneContext) {
+        const { tabId } = await this.newTab(url, undefined, name);
+        return { tabId, restored: false };
+      }
       throw new Error(`Profile "${name}" already exists. Use delete_profile first.`);
     }
+    if (this.laneContext) this.laneProfileName = name;
     // The Steel image enables extension access in incognito contexts.
     // A second init script would conflict with that fingerprint and break WebSockets.
     const context = this.laneContext
@@ -1627,8 +1635,16 @@ export class BrowserManager {
     return { tabId, restored };
   }
 
+  assertLaneProfile(name: string): void {
+    if (this.laneContext && this.laneProfileName && this.laneProfileName !== name)
+      throw new Error(
+        `lane_profile_conflict: lane holds profile "${this.laneProfileName}". Use close_lane or another lane.`,
+      );
+  }
+
   hasProfile(name: string): boolean {
     return (
+      (!this.laneContext || this.laneProfileName === name) &&
       this.profiles.has(name) &&
       this.initialized &&
       !this.laneClosed &&
@@ -1688,6 +1704,7 @@ export class BrowserManager {
    * Read localStorage from open HTTP and HTTPS pages.
    */
   async saveProfile(name: string): Promise<string> {
+    this.assertLaneProfile(name);
     if (!isValidProfileName(name)) {
       throw new Error(
         `Invalid profile name "${name}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
@@ -1807,6 +1824,7 @@ export class BrowserManager {
    * Delete a profile: close its context + all tabs, optionally remove saved state.
    */
   async deleteProfile(name: string, removeSaved = false): Promise<void> {
+    this.assertLaneProfile(name);
     if (!isValidProfileName(name)) {
       throw new Error(
         `Invalid profile name "${name}". Must be 1-64 alphanumeric, hyphens, or underscores.`,
