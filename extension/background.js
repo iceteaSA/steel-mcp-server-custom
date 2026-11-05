@@ -15,6 +15,7 @@ import {
   DISCOVERY_ORIGINS,
 } from "./core.js";
 import { startSigninWorker } from "./signin-worker.js";
+import { createBadgeRenderer } from "./badge.js";
 
 let running = false;
 const ALARM = "steel-pinned-sync";
@@ -22,6 +23,7 @@ const ALARM = "steel-pinned-sync";
 const DISCOVERY_ALARM = "steel-discovery-deadline";
 const DISCOVERY_LIMIT = 60000;
 let discovering = false;
+const fallbackBadge = createBadgeRenderer();
 
 async function finishDiscovery() {
   await revokeDiscoveryAccess();
@@ -74,36 +76,8 @@ async function initialize() {
 }
 
 async function setResults(results) {
-  const failed = results.some((result) => !result.ok);
-  const warning = results.some((result) => result.warning);
   await chrome.storage.local.set({ lastResults: results, lastSync: new Date().toISOString() });
-  await chrome.action.setBadgeText({
-    text: signinWorker?.relayDisconnected
-      ? "!"
-      : signinWorker?.pending.length
-        ? String(signinWorker.pending.length)
-        : failed
-          ? "ERR"
-          : warning
-            ? "!"
-            : "OK",
-  });
-  await chrome.action.setBadgeBackgroundColor({
-    color: signinWorker?.relayDisconnected
-      ? "#805500"
-      : failed
-        ? "#b42318"
-        : warning
-          ? "#805500"
-          : "#167044",
-  });
-  await chrome.action.setTitle({
-    title: failed
-      ? "Steel: push failed. Open for recovery steps."
-      : warning
-        ? "Steel: cookies pushed; storage incomplete."
-        : "Steel: last push completed",
-  });
+  await (signinWorker?.refreshBadge ?? fallbackBadge)(true);
 }
 
 async function pushSites(sites, profile, includeStorage, previousResults = []) {

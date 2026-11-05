@@ -370,8 +370,7 @@ describe("transfer boundaries", () => {
 
 // Chrome accepts permissions.request and permissions.contains only when ONE declared pattern
 // contains each requested pattern (URLPattern::Contains / UnpackOriginPermissions).
-// A "*://" request is not inside
-// "http://*/*" or "https://*/*" alone, so Chrome refuses it with
+// A "*://" request is not inside "http://*/*" or "https://*/*" alone, so Chrome refuses it with
 // "Only permissions specified in the manifest may be requested."
 function chromeContains(declared, requested) {
   const parse = (pattern) => {

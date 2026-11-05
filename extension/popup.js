@@ -30,9 +30,11 @@ function renderRelayState(state) {
     : "unknown";
   $("relayState").textContent = down
     ? `Relay down since ${time} — requests cannot arrive`
-    : state?.status === "connected"
-      ? "Relay connected"
-      : "Checking sign-in relay…";
+    : state?.status === "unconfigured"
+      ? "Set the relay URL and secret in Settings"
+      : state?.status === "connected"
+        ? "Relay connected"
+        : "Checking sign-in relay…";
   $("relayState").className = `notice ${down ? "error" : "muted"}`;
 }
 function destination() {

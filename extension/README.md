@@ -13,7 +13,9 @@ The relay accepts only loopback `Host` headers: `localhost`, `127.0.0.1`, or `[:
 
 The background worker sends data after you close the popup. The badge shows `OK`, `!` for storage warnings, or `ERR` for failures. Open the popup for recovery steps. Results stay in local extension storage and contain domains, counts, and status only.
 
-The popup also shows the sign-in connection state. If the connection is down, the popup shows the outage start time in local hours and minutes. Requests cannot get through until the connection is available. The worker retries at 30-second intervals. The `!` badge replaces the pending count while the connection is down. Session storage holds only the connection state and outage start time, not the server URL or secret.
+The popup also shows the sign-in connection state. If the connection is down, the popup shows the outage start time in local hours and minutes. Requests cannot get through until the connection is available. The worker retries at 30-second intervals.
+
+The `!` badge replaces the pending count and the last push result while the connection is down. With no pending requests, the last push result is available again after reconnection. Before setup, the popup gives a Settings instruction without an outage warning. Session storage holds only the connection state and outage start time, not the server URL or secret.
 
 The page follows the system light or dark theme. You can use the keyboard for all controls. **Alt+Shift+S** and the page context menu push to the last selected profile. Grant site access in the popup first. Change the shortcut at `chrome://extensions/shortcuts`.
 

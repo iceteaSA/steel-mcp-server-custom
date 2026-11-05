@@ -95,7 +95,14 @@ it("keeps the down marker when a manual push writes its result badge", async () 
   try {
     const page = await context.newPage();
     await page.goto(`${origin}/popup.html`);
-    await worker.evaluate(() => chrome.storage.session.set({ signinRelay: { status: "disconnected", since: Date.now() } }));
+    await page.waitForFunction(async () =>
+      ["unconfigured", "disconnected"].includes(
+        (await chrome.storage.session.get("signinRelay")).signinRelay?.status,
+      ),
+    );
+    await worker.evaluate(() =>
+      chrome.storage.session.set({ signinRelay: { status: "disconnected", since: Date.now() } }),
+    );
     await page.waitForFunction(
       async () =>
         (await chrome.storage.session.get("signinRelay")).signinRelay?.status === "disconnected",

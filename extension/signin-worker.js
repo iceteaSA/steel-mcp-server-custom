@@ -1,4 +1,5 @@
 import { getSettings, relayUrl, hostPattern, relayRequest, pushSignin } from "./core.js";
+import { createBadgeRenderer } from "./badge.js";
 
 export function startSigninWorker() {
   const alarmName = "steel-signin-poll";
@@ -8,7 +9,7 @@ export function startSigninWorker() {
   let pending = [];
   let updates = Promise.resolve();
   let relayState;
-  let badgeText;
+  const badge = createBadgeRenderer(() => pending.length);
   let stopped = false;
   const relayReady = chrome.storage.session.get("signinRelay").then(({ signinRelay }) => {
     if (signinRelay?.status === "disconnected" && Number.isFinite(signinRelay.since))
@@ -17,22 +18,13 @@ export function startSigninWorker() {
   const applying = new Set();
   const completed = new Map();
 
-  async function badge() {
-    await relayReady;
-    const text =
-      relayState?.status === "disconnected" ? "!" : pending.length ? String(pending.length) : "";
-    if (text === badgeText) return;
-    await chrome.action.setBadgeText({ text });
-    await chrome.action.setBadgeBackgroundColor({ color: "#805500" });
-    badgeText = text;
-  }
   function relay(status) {
     updates = updates
       .catch(() => {})
       .then(async () => {
         await relayReady;
         if (relayState?.status !== status) {
-          relayState = status === "connected" ? { status } : { status, since: Date.now() };
+          relayState = status === "disconnected" ? { status, since: Date.now() } : { status };
           await chrome.storage.session.set({ signinRelay: relayState });
         }
         await badge();
@@ -105,12 +97,12 @@ export function startSigninWorker() {
     try {
       const settings = await getSettings();
       if (!settings.serverSecret) {
-        await relay("disconnected");
+        await relay("unconfigured");
         return;
       }
       const origin = relayUrl(settings.serverUrl);
       if (!(await chrome.permissions.contains({ origins: [hostPattern(origin)] }))) {
-        await relay("disconnected");
+        await relay("unconfigured");
         return;
       }
       const current = new WebSocket(origin.replace(/^http/, "ws") + "/signin/events");
@@ -164,6 +156,8 @@ export function startSigninWorker() {
     if (id.startsWith("signin:")) return review(id.slice(7));
   });
   chrome.storage.onChanged.addListener((changes, area) => {
+    if ((area === "session" && changes.signinRelay) || (area === "local" && changes.lastResults))
+      return badge().catch(() => {});
     if (area !== "local" || (!changes.serverUrl && !changes.serverSecret)) return;
     socket?.close();
     socket = undefined;
@@ -174,6 +168,7 @@ export function startSigninWorker() {
     start,
     poll,
     update,
+    refreshBadge: badge,
     get pending() {
       return pending;
     },
