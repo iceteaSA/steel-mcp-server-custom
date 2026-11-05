@@ -71,6 +71,15 @@ async function fixture(mode: "on" | "off") {
   };
 }
 
+test("handoff caller fallback outside request scope uses the canonical process key", async () => {
+  const f = await fixture("off");
+  try {
+    expect(f.handle.register.handoff!.getCaller()).toBe("short:single-process");
+  } finally {
+    await f.close();
+  }
+});
+
 test("caller keys use the UTF-8 byte boundary and cannot collide with literal namespaces", async () => {
   const f = await fixture("on");
   try {

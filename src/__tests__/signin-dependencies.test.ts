@@ -44,3 +44,35 @@ test("sign-in registration uses explicit shared dependencies and resolves the ca
     await fs.rm(directory, { recursive: true, force: true });
   }
 });
+
+test("sign-in caller fallback from injected dependencies uses the canonical process key", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "signin-fallback-"));
+  const env = EnvSchema.parse({ BROWSER_MODE: "local", OUTPUT_DIR: directory, RELAY_PORT: 0 });
+  const manager = new BrowserManager(env);
+  const store = await SigninStore.open({ profilesDir: directory, automaticTimers: false });
+  const specs: ToolSpec[] = [];
+  Reflect.apply(signin, undefined, [
+    (spec: ToolSpec) => specs.push(spec),
+    manager,
+    env,
+    { signin: { store: Promise.resolve(store), getCaller: () => undefined } },
+  ]);
+  try {
+    const request = specs.find((spec) => spec.name === "request_signin")!;
+    const result = await request.handler({
+      site: "https://example.test",
+      profile: "fallback",
+      reason: "fixture",
+    });
+    expect(result.isError).not.toBe(true);
+    expect(result.structuredContent.status).toBe("pending");
+    expect((await store.pending()).map((request) => request.caller.sessionID)).toEqual([
+      "short:single-process",
+    ]);
+    expect(manager.tabIds).toEqual([]);
+  } finally {
+    store.close();
+    await manager.stop();
+    await fs.rm(directory, { recursive: true, force: true });
+  }
+});
