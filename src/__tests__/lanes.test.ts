@@ -240,6 +240,250 @@ for (const mode of ["on", "off"] as const) {
   }
 }
 
+test("Part 3: each first-bind path refuses pre-profile cookies, browsing, and blank-page evaluate without clearing state", async () => {
+  const site = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response("<body>freshness</body>"),
+  });
+  try {
+    for (const kind of ["cookies", "navigation", "evaluate"]) {
+      for (const [name, args] of [
+        ["use_profile", { name: "shared", autosave: true }],
+        ["new_tab", { profile: "shared" }],
+        ["create_profile", { name: "shared" }],
+      ] as const) {
+        const directory = await mkdtemp(join(tmpdir(), "profile-first-bind-"));
+        const f = await fixture("on", { PROFILES_DIR: directory });
+        try {
+          const id = tab(
+            await f.call("a", "new_tab", kind === "navigation" ? { url: site.url.origin } : {}),
+          );
+          if (kind === "cookies")
+            await f.call("a", "cookies", {
+              setCookies: [
+                { name: "anonymous", value: "ANON_SECRET", domain: "example.test", path: "/" },
+              ],
+            });
+          if (kind === "evaluate")
+            expect(
+              (await f.call("a", "evaluate", { tabId: id, expression: "2 + 2" })).isError,
+            ).not.toBe(true);
+          const result = await f.call("a", name, args);
+          expect(result.isError).toBe(true);
+          expect(text(result)).toContain("lane_not_fresh");
+          expect(text(result)).toContain("close_lane");
+          expect(text(result)).toContain("profile first");
+          if (kind === "cookies")
+            expect(text(await f.call("a", "cookies"))).toContain("ANON_SECRET");
+          expect(text(await f.call("a", "save_profile", { name: "shared" }))).toContain(
+            "profile_lease_required",
+          );
+          expect(await Bun.file(join(directory, "shared.json")).exists()).toBe(false);
+          expect((await f.call("a", "close_lane")).isError).not.toBe(true);
+          expect(await Bun.file(join(directory, "shared.json")).exists()).toBe(false);
+          expect((await f.call("a", "use_profile", { name: "shared" })).isError).not.toBe(true);
+          expect((await f.call("a", "evaluate", { expression: "2 + 2" })).isError).not.toBe(true);
+          expect((await f.call("a", name, args)).isError).not.toBe(true);
+        } finally {
+          await f.close();
+          await rm(directory, { recursive: true, force: true });
+        }
+      }
+    }
+  } finally {
+    site.stop(true);
+  }
+});
+
+test("Part 3 S1+S2: anonymous lane state never enters a shared file or its next holder", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "profile-anonymous-handoff-"));
+  const f = await fixture("on", { PROFILES_DIR: directory });
+  const original = JSON.stringify({
+    cookies: [{ name: "seed", value: "SAVED_SEED", domain: "example.test", path: "/" }],
+  });
+  try {
+    await writeFile(join(directory, "shared.json"), original);
+    await f.call("a", "new_tab");
+    await f.call("a", "cookies", {
+      setCookies: [{ name: "anonymous", value: "ANON_SECRET", domain: "example.test", path: "/" }],
+    });
+    expect(text(await f.call("a", "new_tab", { profile: "shared" }))).toContain("lane_not_fresh");
+    expect(text(await f.call("a", "save_profile", { name: "shared" }))).toContain(
+      "profile_lease_required",
+    );
+    expect(await readFile(join(directory, "shared.json"), "utf8")).toBe(original);
+    expect((await f.call("b", "use_profile", { name: "shared" })).isError).not.toBe(true);
+    expect(text(await f.call("b", "cookies"))).not.toContain("ANON_SECRET");
+    expect(text(await f.call("a", "use_profile", { name: "shared", autosave: true }))).toContain(
+      "profile_busy",
+    );
+    await f.call("b", "cookies", {
+      setCookies: [{ name: "holder", value: "HOLDER_STATE", domain: "example.test", path: "/" }],
+    });
+    expect((await f.call("b", "save_profile", { name: "shared" })).isError).not.toBe(true);
+    await f.call("b", "close_lane");
+    expect(text(await f.call("a", "use_profile", { name: "shared", autosave: true }))).toContain(
+      "lane_not_fresh",
+    );
+    await f.call("a", "close_lane");
+    const saved = await readFile(join(directory, "shared.json"), "utf8");
+    expect(saved).toContain("HOLDER_STATE");
+    expect(saved).not.toContain("ANON_SECRET");
+    expect((await f.call("c", "use_profile", { name: "shared" })).isError).not.toBe(true);
+    expect(text(await f.call("c", "cookies"))).toContain("HOLDER_STATE");
+    expect(text(await f.call("c", "cookies"))).not.toContain("ANON_SECRET");
+  } finally {
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Part 3: sticky use survives browsing back to blank and clearing cookies and localStorage", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "profile-used-history-"));
+  const f = await fixture("on", { PROFILES_DIR: directory });
+  const site = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response("<body>history</body>"),
+  });
+  try {
+    const id = tab(await f.call("a", "new_tab", { url: site.url.origin }));
+    const cleared = await f.call("a", "evaluate", {
+      tabId: id,
+      expression:
+        "(() => { localStorage.setItem('anonymous', 'ANON_STORAGE'); localStorage.clear(); return 'cleared'; })()",
+    });
+    expect(cleared.isError).not.toBe(true);
+    expect(text(cleared)).toContain("cleared");
+    await f.call("a", "go_to_url", { tabId: id, url: "about:blank" });
+    const context = f.contexts().find((candidate) => candidate !== f.operator)!;
+    await context.clearCookies();
+    expect(await context.cookies()).toEqual([]);
+    expect(context.pages().every((page) => page.url() === "about:blank")).toBe(true);
+    expect(text(await f.call("a", "use_profile", { name: "saved" }))).toContain("lane_not_fresh");
+    expect(await Bun.file(join(directory, "saved.json")).exists()).toBe(false);
+  } finally {
+    site.stop(true);
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Part 3: IndexedDB-only pre-profile use cannot bind after its page closes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "profile-used-idb-"));
+  const f = await fixture("on", { PROFILES_DIR: directory });
+  const site = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response("<body>idb</body>"),
+  });
+  try {
+    const id = tab(await f.call("a", "new_tab", { url: site.url.origin }));
+    const result = await f.call("a", "evaluate", {
+      tabId: id,
+      expression: `new Promise((resolve, reject) => { const request = indexedDB.open('anonymous', 1); request.onupgradeneeded = () => request.result.createObjectStore('state'); request.onerror = () => reject(request.error); request.onsuccess = () => { const db = request.result; const transaction = db.transaction('state', 'readwrite'); transaction.objectStore('state').put('IDB_ONLY_STATE', 'key'); transaction.oncomplete = () => { db.close(); resolve('idb-created'); }; }; })`,
+    });
+    expect(result.isError).not.toBe(true);
+    expect(text(result)).toContain("idb-created");
+    await f.call("a", "close_tabs", { tabId: id });
+    const context = f.contexts().find((candidate) => candidate !== f.operator)!;
+    const snapshot = await context.storageState();
+    expect(snapshot.cookies).toEqual([]);
+    expect(snapshot.origins.flatMap((origin) => origin.localStorage)).toEqual([]);
+    expect(text(await f.call("a", "use_profile", { name: "saved" }))).toContain("lane_not_fresh");
+    expect(await Bun.file(join(directory, "saved.json")).exists()).toBe(false);
+  } finally {
+    site.stop(true);
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Part 3: first bind waits for an in-flight real cookie write before checking freshness", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "profile-freshness-race-"));
+  const f = await fixture("on", { PROFILES_DIR: directory });
+  const entered = barrier();
+  const release = barrier();
+  let lane: BrowserManager | undefined;
+  const create = f.root.createLane.bind(f.root);
+  const creation = spyOn(f.root, "createLane").mockImplementation(async (...args) => {
+    lane = await create(...args);
+    return lane;
+  });
+  let write: ReturnType<typeof f.call> | undefined;
+  let binding: ReturnType<typeof f.call> | undefined;
+  try {
+    await f.call("a", "new_tab");
+    const context = f.contexts().find((candidate) => candidate !== f.operator)!;
+    const addCookies = context.addCookies.bind(context);
+    const held = spyOn(context, "addCookies").mockImplementation(async (cookies) => {
+      entered.release();
+      await release.promise;
+      await addCookies(cookies);
+    });
+    const bind = spyOn(lane!, "createProfile");
+    try {
+      write = f.call("a", "cookies", {
+        setCookies: [
+          { name: "anonymous", value: "RACING_ANON", domain: "example.test", path: "/" },
+        ],
+      });
+      await entered.promise;
+      binding = f.call("a", "use_profile", { name: "saved", autosave: true });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(bind).not.toHaveBeenCalled();
+      release.release();
+      expect((await write).isError).not.toBe(true);
+      expect(text(await binding)).toContain("lane_not_fresh");
+      expect(text(await f.call("a", "cookies"))).toContain("RACING_ANON");
+      expect(text(await f.call("a", "save_profile", { name: "saved" }))).toContain(
+        "profile_lease_required",
+      );
+      expect(await Bun.file(join(directory, "saved.json")).exists()).toBe(false);
+    } finally {
+      release.release();
+      await Promise.allSettled([write, binding].filter((value) => value !== undefined));
+      held.mockRestore();
+      bind.mockRestore();
+    }
+  } finally {
+    creation.mockRestore();
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("Part 3 S3: saved deletion requires the caller's lease and refuses a busy holder", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "profile-delete-lease-"));
+  const f = await fixture("on", { PROFILES_DIR: directory });
+  const file = join(directory, "victim.json");
+  const original = JSON.stringify({ cookies: [] });
+  try {
+    await writeFile(file, original);
+    const unleased = await f.call("a", "delete_profile", { name: "victim", removeSaved: true });
+    expect(unleased.isError).toBe(true);
+    expect(text(unleased)).toContain("profile_lease_required");
+    expect(await readFile(file, "utf8")).toBe(original);
+    expect(
+      (await f.call("a", "delete_profile", { name: "victim", removeSaved: false })).isError,
+    ).not.toBe(true);
+    expect(await readFile(file, "utf8")).toBe(original);
+    expect((await f.call("b", "use_profile", { name: "victim" })).isError).not.toBe(true);
+    expect(
+      text(await f.call("a", "delete_profile", { name: "victim", removeSaved: true })),
+    ).toContain("profile_busy");
+    expect(await readFile(file, "utf8")).toBe(original);
+    expect(
+      (await f.call("b", "delete_profile", { name: "victim", removeSaved: true })).isError,
+    ).not.toBe(true);
+    expect(await Bun.file(file).exists()).toBe(false);
+  } finally {
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("list_profiles decrypts each saved profile only once for a caller with an active profile", async () => {
   const directory = await mkdtemp(join(tmpdir(), "profile-list-once-"));
   const f = await fixture("on", {
