@@ -287,6 +287,50 @@ test("one bound profile per lane refuses X1 alias mixing and never passes alpha 
   }
 });
 
+test("profile leases exclude another lane and release on close, idle, and browser loss", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "lease-"));
+  const f = await fixture("on", { PROFILES_DIR: directory, LANE_IDLE_MS: "10000" });
+  try {
+    expect((await f.call("secret-session-a", "use_profile", { name: "shared" })).isError).not.toBe(true);
+    const busy = text(await f.call("b", "new_tab", { profile: "shared" }));
+    expect(busy).toContain("profile_busy");
+    expect(busy).toContain("ageSeconds");
+    expect(busy).not.toContain("secret-session-a");
+    expect(text(await f.call("b", "use_profile", { name: "shared", wait: 0.01 }))).toContain("profile_busy");
+    const waiting = f.call("b", "use_profile", { name: "shared", wait: 2 });
+    await f.call("secret-session-a", "close_lane");
+    expect((await waiting).isError).not.toBe(true);
+    await f.call("b", "close_lane");
+    expect((await f.call("c", "use_profile", { name: "shared" })).isError).not.toBe(true);
+    f.advance(10001);
+    expect((await f.call("d", "use_profile", { name: "shared" })).isError).not.toBe(true);
+    await f.endSession();
+    expect((await f.call("e", "use_profile", { name: "shared" })).isError).not.toBe(true);
+  } finally {
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("profile autosave is opt-in and save requires a lease", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "lease-save-"));
+  const f = await fixture("on", { PROFILES_DIR: directory });
+  try {
+    expect(text(await f.call("a", "save_profile", { name: "shared" }))).toContain("profile_lease_required");
+    for (const autosave of [false, true]) {
+      expect((await f.call("a", "use_profile", { name: "shared", autosave })).isError).not.toBe(true);
+      await f.call("a", "cookies", { setCookies: [{ name: "token", value: "CANARY", domain: "example.test", path: "/" }] });
+      await f.call("a", "close_lane");
+      const file = Bun.file(join(directory, "shared.json"));
+      expect(await file.exists()).toBe(autosave);
+      if (autosave) expect(await file.text()).toContain("CANARY");
+    }
+  } finally {
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("a deleted profile stays bound to its live lane context and concurrent profile opens cannot mix", async () => {
   const directory = await mkdtemp(join(tmpdir(), "lane-profile-sticky-"));
   const f = await fixture("on", { PROFILES_DIR: directory });
@@ -309,6 +353,19 @@ test("a deleted profile stays bound to its live lane context and concurrent prof
     await f.close();
     await rm(directory, { recursive: true, force: true });
   }
+});
+
+test("closing a lane during a profile wait cancels acquisition without leaking a lease", async () => {
+  const f = await fixture("on", { LANE_DRAIN_MS: "10" });
+  try {
+    expect((await f.call("a", "use_profile", { name: "contended" })).isError).not.toBe(true);
+    await f.call("b", "new_tab");
+    const waiting = f.call("b", "use_profile", { name: "contended", wait: 2 });
+    await f.call("b", "close_lane");
+    expect(text(await waiting)).toContain("lane_closed");
+    await f.call("a", "close_lane");
+    expect((await f.call("c", "use_profile", { name: "contended" })).isError).not.toBe(true);
+  } finally { await f.close(); }
 });
 
 test("lane requests require SDK request metadata, while profile listing is stateless", async () => {
