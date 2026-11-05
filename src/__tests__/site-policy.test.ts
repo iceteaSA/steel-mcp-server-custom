@@ -485,6 +485,34 @@ for (const tool of ["fetch_urls", "download_file"] as const)
     }
   });
 
+for (const invalid of ["malformed", "unreadable"] as const)
+  test(`invalid shared policy fails before allocating a lane context: ${invalid}`, async () => {
+    const f = await fixture("on", invalid === "malformed" ? "com\n" : "");
+    try {
+      if (invalid === "unreadable") await rm(f.env.STEEL_SITE_DENY_FILE);
+      const before = f.browser.contexts().length;
+      const result = await f.call("a", "new_tab");
+      expect(f.browser.contexts()).toHaveLength(before);
+      expect(result.isError).toBe(true);
+      expect(JSON.stringify(result)).toContain("site_policy_invalid");
+    } finally {
+      await f.close();
+    }
+  });
+
+test("shared policy validates once and subsequent lanes use its cached snapshot", async () => {
+  const f = await fixture("on", "example.com\n");
+  try {
+    await f.call("a", "new_tab");
+    await writeFile(f.env.STEEL_SITE_DENY_FILE, "com\n");
+    expect(
+      (await f.call("b", "new_tab", { url: f.url("example.com") })).structuredContent,
+    ).toMatchObject({ error: "site_blocked", domain: "example.com", source: "shared" });
+  } finally {
+    await f.close();
+  }
+});
+
 test("domain bypass corpus matches canonical domains without substring false matches", async () => {
   const f = await fixture("on", "example.com\n");
   try {

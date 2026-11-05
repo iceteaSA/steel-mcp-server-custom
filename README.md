@@ -129,7 +129,9 @@ The agent cannot remove entries. They expire with the lane. With lanes off, entr
 
 Use `block_site({})` for the shared and lane entries. The shared file ships with comments only.
 Ship `config/site-deny.txt` with the built package, or set `STEEL_SITE_DENY_FILE` to a reviewed file.
-The process reads the file one time for each lane. Restart the process to apply shared-file changes to all lanes.
+
+The process validates the file at startup, before browser allocation. Each lane uses that cached list.
+An unreadable or malformed file gives `site_policy_invalid`. Restart the process to apply shared-file changes.
 
 Context routes and page CDP guards deny HTTP requests without a proxy fetch or a change to the browser's TLS identity.
 Navigation errors contain `site_blocked`, `domain`, and `source` (`shared` or `lane`).

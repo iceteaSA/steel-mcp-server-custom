@@ -5,6 +5,7 @@ import type { Env } from "./manager.js";
 import { normalizeSite } from "./signin.js";
 
 type Entry = { domain: string; source: "shared" | "lane"; reason?: string };
+const sharedLists = new Map<string, Promise<Map<string, Entry>>>();
 type Failure =
   | { error: "site_blocked"; domain: string; source: "shared" | "lane"; popup?: boolean }
   | {
@@ -76,16 +77,31 @@ export class SitePolicy {
 
   private load() {
     return (this.loaded ??= (async () => {
-      const text = await readFile(this.env.STEEL_SITE_DENY_FILE, "utf8");
-      for (const line of text.split(/\r?\n/)) {
-        const value = line.split("#")[0].trim();
-        if (!value) continue;
-        const { host } = normalizeSite(value);
-        const domain = getDomain(host, { allowPrivateDomains: true });
-        if (!domain || value !== domain)
-          throw new Error("invalid_site_deny_file: expected registrable domain");
-        this.shared.set(domain, { domain, source: "shared" });
+      const file = this.env.STEEL_SITE_DENY_FILE;
+      let shared = sharedLists.get(file);
+      if (!shared) {
+        shared = (async () => {
+          try {
+            const entries = new Map<string, Entry>();
+            const text = await readFile(file, "utf8");
+            for (const line of text.split(/\r?\n/)) {
+              const value = line.split("#")[0].trim();
+              if (!value) continue;
+              const { host } = normalizeSite(value);
+              const domain = getDomain(host, { allowPrivateDomains: true });
+              if (!domain || value !== domain) throw new Error("invalid_domain");
+              entries.set(domain, { domain, source: "shared" });
+            }
+            return entries;
+          } catch {
+            throw new Error(
+              "site_policy_invalid: deny list must be readable and contain only registrable domains.",
+            );
+          }
+        })();
+        sharedLists.set(file, shared);
       }
+      this.shared = await shared;
     })());
   }
 

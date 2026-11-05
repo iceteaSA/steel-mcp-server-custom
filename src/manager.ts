@@ -302,6 +302,7 @@ export class BrowserManager {
     allocateId: () => number,
     onTabCreated?: (tabId: number) => void,
   ): Promise<BrowserManager> {
+    await this.policy.enabled();
     await this.initialize();
     const browser = this.browser;
     if (!browser?.isConnected()) throw new Error("lane_closed: shared browser session ended.");
@@ -949,6 +950,7 @@ export class BrowserManager {
   }
 
   private async initializeBrowser(): Promise<void> {
+    await this.policy.enabled();
     if (this.sessionEnded) {
       if (this.steelClient && this.sessionId) {
         await this.steelClient.sessions.release(this.sessionId).catch(() => {});
