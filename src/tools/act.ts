@@ -259,15 +259,21 @@ export async function runAct(
       const reasonPart = decision.reason ? ` — ${decision.reason}` : "";
       const stepLine = `step ${step}: ${decision.action} ${decision.ref ?? ""}${valuePart}${reasonPart}`;
       steps.push(stepLine);
+      let selectedPart = "";
       const actionStart = Date.now();
       switch (decision.action) {
         case "click":
           await execClick(page, env, { ref: decision.ref });
           break;
-        case "fill":
+        case "fill": {
           if (decision.value === undefined) throw new Error("fill action requires a value");
-          await execFillField(page, env, { ref: decision.ref, value: decision.value });
+          const selected = await execFillField(page, env, {
+            ref: decision.ref,
+            value: decision.value,
+          });
+          if (selected) selectedPart = ` selected: ${JSON.stringify(selected)}`;
           break;
+        }
         case "press_key":
           if (decision.value === undefined)
             throw new Error("press_key action requires a value (key)");
@@ -282,7 +288,7 @@ export async function runAct(
           throw new Error(`Unknown action: ${decision.action}`);
       }
       const actionElapsed = Date.now() - actionStart;
-      steps[steps.length - 1] = `${stepLine} (${actionElapsed}ms)`;
+      steps[steps.length - 1] = `${stepLine}${selectedPart} (${actionElapsed}ms)`;
       await waitForCaptcha();
 
       if (step === maxSteps) {

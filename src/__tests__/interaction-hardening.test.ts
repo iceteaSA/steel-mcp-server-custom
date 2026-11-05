@@ -96,22 +96,34 @@ test("fill selects a visible label whose value differs", async () => {
 });
 
 test("fill select accepts a label-only string like the engine", async () => {
-  await page.setContent('<select id="country"><option value="ca">Canada</option><option value="us">United States</option></select>');
+  await page.setContent(
+    '<select id="country"><option value="ca">Canada</option><option value="us">United States</option></select>',
+  );
   await page.locator("#country").selectOption("United States");
   expect(await page.locator("#country").inputValue()).toBe("us");
   await page.locator("#country").selectOption("ca");
-  const result = await tools()("fill").handler({ timeout: 300, fields: [{ selector: "#country", kind: "select", value: "United States" }] });
+  const result = await tools()("fill").handler({
+    timeout: 300,
+    fields: [{ selector: "#country", kind: "select", value: "United States" }],
+  });
   expect(result.isError).not.toBe(true);
   expect(await page.locator("#country").inputValue()).toBe("us");
 });
 
 for (const kind of ["select", "selectLabel"]) {
   test(`fill ${kind} uses the engine's label whitespace normalization`, async () => {
-    await page.setContent('<select id="country"><option value="ca">Canada</option><option value="us" label="  United\u200b States\u00ad ">US</option></select>');
-    await page.locator("#country").selectOption(kind === "select" ? " United   States " : { label: " United   States " });
+    await page.setContent(
+      '<select id="country"><option value="ca">Canada</option><option value="us" label="  United\u200b States\u00ad ">US</option></select>',
+    );
+    await page
+      .locator("#country")
+      .selectOption(kind === "select" ? " United   States " : { label: " United   States " });
     expect(await page.locator("#country").inputValue()).toBe("us");
     await page.locator("#country").selectOption("ca");
-    const result = await tools()("fill").handler({ timeout: 300, fields: [{ selector: "#country", kind, value: " United   States " }] });
+    const result = await tools()("fill").handler({
+      timeout: 300,
+      fields: [{ selector: "#country", kind, value: " United   States " }],
+    });
     expect(result.isError).not.toBe(true);
     expect(await page.locator("#country").inputValue()).toBe("us");
   });
@@ -168,8 +180,12 @@ for (const kind of ["select", "selectLabel", "selectIndex"]) {
 }
 
 test("fill reports the actual option when an earlier label collides with a requested value", async () => {
-  await page.setContent('<select id="country"><option value="zzz">ca</option><option value="ca">Canada</option></select>');
-  const result = await tools()("fill").handler({ fields: [{ selector: "#country", kind: "select", value: "ca" }] });
+  await page.setContent(
+    '<select id="country"><option value="zzz">ca</option><option value="ca">Canada</option></select>',
+  );
+  const result = await tools()("fill").handler({
+    fields: [{ selector: "#country", kind: "select", value: "ca" }],
+  });
   expect(result.isError).not.toBe(true);
   expect(await page.locator("#country").inputValue()).toBe("zzz");
   expect(result.content[0].text).toContain('"value":"zzz"');
@@ -177,18 +193,38 @@ test("fill reports the actual option when an earlier label collides with a reque
 });
 
 test("fill reports every actual selection in a multiple select", async () => {
-  await page.setContent('<select id="country" multiple onchange="this.options[0].selected=true;this.options[1].selected=true"><option value="zzz">ca</option><option value="ca">Canada</option><option value="us">United States</option></select>');
-  const result = await tools()("fill").handler({ fields: [{ selector: "#country", kind: "select", value: "ca" }] });
+  await page.setContent(
+    '<select id="country" multiple onchange="this.options[0].selected=true;this.options[1].selected=true"><option value="zzz">ca</option><option value="ca">Canada</option><option value="us">United States</option></select>',
+  );
+  const result = await tools()("fill").handler({
+    fields: [{ selector: "#country", kind: "select", value: "ca" }],
+  });
   expect(result.isError).not.toBe(true);
-  expect(await page.locator("#country").evaluate((el) => Array.from((el as HTMLSelectElement).selectedOptions).map((option) => option.value))).toEqual(["zzz", "ca"]);
+  expect(
+    await page
+      .locator("#country")
+      .evaluate((el) =>
+        Array.from((el as HTMLSelectElement).selectedOptions).map((option) => option.value),
+      ),
+  ).toEqual(["zzz", "ca"]);
   expect(result.content[0].text).toContain('"value":"zzz","label":"ca"');
   expect(result.content[0].text).toContain('"value":"ca","label":"Canada"');
 });
 
 for (const kind of ["select", "selectLabel", "selectIndex"]) {
   test(`fill ${kind} refuses success when a change handler selects an unrelated option`, async () => {
-    await page.setContent('<select id="country" data-changes="0" onchange="this.dataset.changes=String(Number(this.dataset.changes)+1);this.value=\'zzz\'"><option value="zzz">Other</option><option value="ca">Canada</option></select>');
-    const result = await tools()("fill").handler({ fields: [{ selector: "#country", kind, value: kind === "selectLabel" ? "Canada" : kind === "selectIndex" ? "1" : "ca" }] });
+    await page.setContent(
+      '<select id="country" data-changes="0" onchange="this.dataset.changes=String(Number(this.dataset.changes)+1);this.value=\'zzz\'"><option value="zzz">Other</option><option value="ca">Canada</option></select>',
+    );
+    const result = await tools()("fill").handler({
+      fields: [
+        {
+          selector: "#country",
+          kind,
+          value: kind === "selectLabel" ? "Canada" : kind === "selectIndex" ? "1" : "ca",
+        },
+      ],
+    });
     expect(result.isError).toBe(true);
     expect(result.content[0].text).toContain("Selection mismatch");
     expect(result.content[0].text).toContain('"value":"zzz"');
@@ -201,17 +237,44 @@ for (const kind of ["select", "selectLabel", "selectIndex"]) {
 }
 
 test("act reports the actual option when a requested value matches an earlier label", async () => {
-  await page.setContent('<select id="country" aria-label="Country"><option value="zzz">ca</option><option value="ca">Canada</option></select>');
-  const llm = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: async (request) => {
-    const input = await request.json() as { messages: { content: string }[] };
-    const ref = input.messages.map((m) => m.content).join("\n").match(/@?(e\d+)/)?.[1];
-    return Response.json({ choices: [{ message: { content: JSON.stringify({ action: "fill", ref, value: "ca", reason: "Select country" }) } }] });
-  } });
+  await page.setContent(
+    '<select id="country" aria-label="Country"><option value="zzz">ca</option><option value="ca">Canada</option></select>',
+  );
+  const llm = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: async (request) => {
+      const input = (await request.json()) as { messages: { content: string }[] };
+      const ref = input.messages
+        .map((m) => m.content)
+        .join("\n")
+        .match(/@?(e\d+)/)?.[1];
+      return Response.json({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                action: "fill",
+                ref,
+                value: "ca",
+                reason: "Select country",
+              }),
+            },
+          },
+        ],
+      });
+    },
+  });
   try {
-    const result = await tools(`http://127.0.0.1:${llm.port}`)("act").handler({ instruction: "Select ca", maxSteps: 1 });
+    const result = await tools(`http://127.0.0.1:${llm.port}`)("act").handler({
+      instruction: "Select ca",
+      maxSteps: 1,
+    });
     expect(result.isError).not.toBe(true);
     expect(await page.locator("#country").inputValue()).toBe("zzz");
     expect(result.content[0].text).toContain('"value":"zzz"');
     expect(result.content[0].text).toContain('"label":"ca"');
-  } finally { await llm.stop(true); }
+  } finally {
+    await llm.stop(true);
+  }
 });

@@ -164,8 +164,12 @@ function makeFakeLocator() {
       }),
     ),
     waitFor: mock(() => Promise.resolve()),
-    evaluate: mock(() =>
-      Promise.resolve({ found: true, count: 3, labels: ["Canada", "United States", "Other"] }),
+    evaluate: mock((_fn: unknown, choice?: { value: string; index: number }) =>
+      Promise.resolve(
+        choice
+          ? { found: true, count: 3, labels: ["Canada", "United States", "Other"] }
+          : [{ value: "US", label: "United States", index: 2 }],
+      ),
     ),
   };
 }

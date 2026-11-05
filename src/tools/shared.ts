@@ -11,6 +11,7 @@ import { z } from "zod";
 import type { Env } from "../manager.js";
 import {
   buildRadioSelector,
+  collapseWhitespace,
   detectFieldKind,
   detectFieldsInPage,
   interpretCheckboxValue,
@@ -390,6 +391,12 @@ export async function execClick(
   await afterAction(page, env);
 }
 
+export interface SelectedOption {
+  value: string;
+  label: string;
+  index: number;
+}
+
 export async function execFillField(
   page: Page,
   env: Env,
@@ -402,7 +409,7 @@ export async function execFillField(
     kind?: "text" | "check" | "radio" | "select" | "selectLabel" | "selectIndex";
     settle?: boolean;
   },
-): Promise<void> {
+): Promise<SelectedOption[] | void> {
   const sel = toSelector({ selector: opts.selector, ref: opts.ref });
   const ctx = resolveFrame(page, opts.frame);
   const timeout = opts.timeout ?? 10000;
@@ -451,7 +458,10 @@ export async function execFillField(
             if (!(element instanceof HTMLSelectElement)) throw new Error("Element is not a select");
             const options = Array.from(element.options);
             const normalizeLabel = (label: string) =>
-              label.replace(/[\u200b\u00ad]/g, "").trim().replace(/\s+/g, " ");
+              label
+                .replace(/[\u200b\u00ad]/g, "")
+                .trim()
+                .replace(/\s+/g, " ");
             return {
               found: options.some((option, i) =>
                 choice.kind === "selectIndex"
@@ -520,6 +530,34 @@ export async function execFillField(
 
   if (opts.settle !== false) {
     await afterAction(page, env);
+  }
+  if (kind === "select" || kind === "selectLabel" || kind === "selectIndex") {
+    const selected = await locator.evaluate(
+      (element) => {
+        if (!(element instanceof HTMLSelectElement)) throw new Error("Element is not a select");
+        return Array.from(element.selectedOptions).map((option) => ({
+          value: option.value,
+          label: option.label,
+          index: option.index,
+        }));
+      },
+      undefined,
+      { timeout },
+    );
+    const normalizeLabel = (label: string) =>
+      collapseWhitespace(label.replace(/[\u200b\u00ad]/g, ""));
+    const matches = (option: SelectedOption) =>
+      kind === "selectIndex"
+        ? option.index === parseInt(opts.value, 10)
+        : kind === "selectLabel"
+          ? normalizeLabel(option.label) === normalizeLabel(opts.value)
+          : option.value === opts.value ||
+            normalizeLabel(option.label) === normalizeLabel(opts.value);
+    if (selected.length === 0 || !selected.every(matches))
+      throw new Error(
+        `Selection mismatch: requested "${opts.value}" in ${sel}; selected ${JSON.stringify(selected)}.`,
+      );
+    return selected;
   }
 }
 

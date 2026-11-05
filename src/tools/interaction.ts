@@ -26,6 +26,7 @@ import {
   tabTargetForce,
   toSelector,
   decorateRefError,
+  type SelectedOption,
 } from "./shared.js";
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
@@ -321,7 +322,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
           };
         }
 
-        const filled: Array<{ selector: string; kind: string }> = [];
+        const filled: Array<{ selector: string; kind: string; selected?: SelectedOption[] }> = [];
         const skipped: string[] = [];
 
         // Capture URL before any field mutation for navigation detection.
@@ -337,7 +338,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
               skipped.push(f.selector);
               continue;
             }
-            await execFillField(page, env, {
+            const selected = await execFillField(page, env, {
               selector: f.selector,
               value: f.value,
               kind,
@@ -347,6 +348,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
             });
             filled.push({
               selector: f.selector,
+              ...(selected ? { selected } : {}),
               kind:
                 kind === "check" && interpretCheckboxValue(f.value) === "selectByValue"
                   ? "check-by-value"
@@ -403,6 +405,10 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
         if (filled.length) {
           const byKind = filled.map((x) => `${x.selector} [${x.kind}]`).join(", ");
           lines.push(`  ok: ${byKind}`);
+          for (const field of filled) {
+            if (field.selected)
+              lines.push(`  selected ${field.selector}: ${JSON.stringify(field.selected)}`);
+          }
         }
         if (skipped.length) lines.push(`  skipped: ${skipped.join(", ")}`);
         if (submitSelector) {
