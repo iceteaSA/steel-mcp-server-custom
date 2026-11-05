@@ -356,3 +356,51 @@ describe("transfer boundaries", () => {
     expect(options.redirect).toBe("error");
   });
 });
+
+// Chrome accepts permissions.request and permissions.contains only when ONE declared pattern
+// contains each requested pattern (URLPatternSet::Contains). A "*://" request is not inside
+// "http://*/*" or "https://*/*" alone, so Chrome refuses it with
+// "Only permissions specified in the manifest may be requested."
+function chromeContains(declared, requested) {
+  const parse = (pattern) => {
+    const match = /^(\*|https?):\/\/([^/]+)(\/.*)$/.exec(pattern);
+    if (!match) throw new Error(`bad pattern ${pattern}`);
+    return { scheme: match[1], host: match[2], path: match[3] };
+  };
+  const one = (outer, inner) =>
+    (outer.scheme === "*" || outer.scheme === inner.scheme) &&
+    (outer.host === "*" || outer.host === inner.host) &&
+    outer.path === "/*";
+  const pool = declared.map(parse);
+  return requested.every((pattern) => pool.some((outer) => one(outer, parse(pattern))));
+}
+
+describe("requested host patterns fit the manifest one pattern at a time", () => {
+  it("covers site, parent and sign-in patterns with a declared optional pattern", async () => {
+    const manifest = JSON.parse(
+      await readFile(new URL("../manifest.json", import.meta.url), "utf8"),
+    );
+    const declared = manifest.optional_host_permissions;
+    expect(chromeContains(declared, ["*://example.com/*"])).toBe(false);
+    const requests = [
+      sitePatterns("https://login.example.com/path"),
+      sitePatterns("http://127.0.0.1:8080/"),
+      core.signinPatterns({ domains: ["login.example.com", "example.com"] }),
+    ];
+    for (const requested of requests) {
+      expect(requested.length).toBeGreaterThan(0);
+      expect({ requested, ok: chromeContains(declared, requested) }).toEqual({ requested, ok: true });
+    }
+    expect(core.domainPatterns("example.com")).toEqual([
+      "https://example.com/*",
+      "http://example.com/*",
+    ]);
+    expect(chromeContains(declared, core.domainPatterns("example.com"))).toBe(true);
+  });
+  it("leaves no wildcard-scheme pattern in the extension sources", async () => {
+    for (const file of ["core.js", "background.js", "popup.js", "approval.js", "options.js"]) {
+      const source = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
+      expect({ file, wildcard: source.includes("*://") }).toEqual({ file, wildcard: false });
+    }
+  });
+});
