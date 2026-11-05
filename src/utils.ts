@@ -4,7 +4,6 @@
 // Extracted from manager.ts. Imported by tools/*.ts.
 // -----------------------------------------------------------------------------
 
-import fs from "fs/promises";
 import path from "path";
 import type { Page } from "patchright";
 import type { BrowserManager, Env } from "./manager.js";
@@ -17,7 +16,7 @@ import {
   truncateAtLine,
 } from "./snapshot.js";
 import { assertInsideRoot } from "./helpers.js";
-import { assertNotReservedStore, type ReservedStoreEnv } from "./reserved-stores.js";
+import { assertNotReservedStore, writeReservedSafeOutput, type ReservedStoreEnv } from "./reserved-stores.js";
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -74,8 +73,7 @@ export async function writeToFile(
   const candidate = outputPath ?? path.join(env.OUTPUT_DIR, defaultName);
   await assertNotReservedStore(candidate, env);
   const filePath = await assertInsideRoot(candidate, env.OUTPUT_ROOT, "outputPath");
-  await fs.mkdir(path.dirname(filePath), { recursive: true });
-  await fs.writeFile(filePath, data);
+  await writeReservedSafeOutput(filePath, data, env);
   return filePath;
 }
 
