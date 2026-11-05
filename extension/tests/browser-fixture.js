@@ -1,6 +1,12 @@
 import { chromium } from "patchright";
 import { chromiumPath } from "../../src/__tests__/browser-processes.js";
 import { fileURLToPath } from "node:url";
+import { chromeContains } from "./permission-fixture.js";
+
+export async function installMockChrome(page, options) {
+  await page.addInitScript({ content: `globalThis.chromeContains = ${chromeContains.toString()}` });
+  await page.addInitScript(mockChrome, options);
+}
 
 export async function extensionBrowser() {
   const server = Bun.serve({
@@ -63,6 +69,7 @@ export function mockChrome({
   allow = true,
   relayState,
   signinAccess = false,
+  relayAccess = true,
 } = {}) {
   globalThis.calls = [];
   globalThis.chromeChanges = [];
@@ -88,6 +95,8 @@ export function mockChrome({
     cookieCount: 2,
     parents: [{ domain: "example.com", granted: false }],
   };
+  const relayOrigins = relayAccess ? ["http://localhost/*"] : [];
+  const permissionListeners = [];
   globalThis.chrome = {
     storage: {
       local: { get: async () => settings, set: async (value) => Object.assign(settings, value) },
@@ -96,11 +105,16 @@ export function mockChrome({
     },
     permissions: {
       contains: async ({ origins }) =>
-        signinAccess || origins.every((origin) => origin.includes("localhost")),
+        signinAccess || globalThis.chromeContains(relayOrigins, origins),
       request: async (permission) => {
         record(["grant", permission]);
+        if (allow) {
+          relayOrigins.push(...permission.origins);
+          for (const listener of permissionListeners) listener(permission);
+        }
         return allow;
       },
+      onAdded: { addListener: (listener) => permissionListeners.push(listener) },
     },
     runtime: {
       getURL: (path) => path,

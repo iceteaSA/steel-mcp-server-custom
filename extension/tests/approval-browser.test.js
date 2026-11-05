@@ -1,5 +1,5 @@
 import { expect, it } from "bun:test";
-import { unpackedExtensionBrowser, mockChrome } from "./browser-fixture.js";
+import { unpackedExtensionBrowser, installMockChrome } from "./browser-fixture.js";
 import { PNG } from "./png-fixture.js";
 
 for (const mode of ["light", "dark", "force-dark"]) {
@@ -22,7 +22,7 @@ for (const mode of ["light", "dark", "force-dark"]) {
               },
             ]
           : [];
-        await page.addInitScript(mockChrome, { requests, signinAccess: populated });
+        await installMockChrome(page, { requests, signinAccess: populated });
         await page.goto(`${origin}/approval.html?id=one`);
         await page.waitForFunction(
           () =>
@@ -67,7 +67,7 @@ it("keeps the approval label inside the first 900 pixels of a wide window", asyn
   const { context, origin } = await unpackedExtensionBrowser();
   try {
     const page = await context.newPage();
-    await page.addInitScript(mockChrome);
+    await installMockChrome(page);
     const labels = [];
     for (const width of [2560, 3200, 3440]) {
       await page.setViewportSize({ width, height: 1100 });

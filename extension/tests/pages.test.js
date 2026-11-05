@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, expect, it } from "bun:test";
 import { readdir, readFile } from "node:fs/promises";
-import { extensionBrowser, mockChrome } from "./browser-fixture.js";
+import { extensionBrowser, installMockChrome } from "./browser-fixture.js";
 import { isValidProfileName } from "../../src/helpers.js";
 
 let fixture;
@@ -32,7 +32,7 @@ it("compiles every HTML pattern with Chromium's v flag and preserves server prof
       );
       expect({ file, errors }).toEqual({ file, errors: [] });
     }
-    await page.addInitScript(mockChrome);
+    await installMockChrome(page);
     await page.goto(`${fixture.origin}/popup.html`);
     for (const [name, accepted] of [
       ["work", true],
@@ -74,7 +74,7 @@ for (const populated of [false, true]) {
             },
           ]
         : [];
-      await page.addInitScript(mockChrome, { requests });
+      await installMockChrome(page, { requests });
       await page.goto(`${fixture.origin}/approval.html?id=one`);
       await page.waitForFunction(
         () =>

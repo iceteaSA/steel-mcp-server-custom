@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it } from "bun:test";
 import { startSigninWorker } from "../signin-worker.js";
+import { chromeContains } from "./permission-fixture.js";
 
 const original = {
   chrome: globalThis.chrome,
@@ -21,6 +22,7 @@ let alarms;
 let timers;
 let settings;
 let localState;
+let origins;
 const request = {
   id: "one",
   caller: { agent: "agent", title: "Task" },
@@ -51,6 +53,7 @@ beforeEach(() => {
   requests = [{ ...request }];
   settings = { serverUrl: "http://localhost:3001", serverSecret: "fake-secret" };
   localState = {};
+  origins = ["http://localhost/*", "https://example.com/*", "http://example.com/*"];
   globalThis.setInterval = (callback, delay) => {
     const id = timers.size + 1;
     timers.set(id, { callback, delay });
@@ -91,7 +94,11 @@ beforeEach(() => {
       },
       onChanged: event("changed"),
     },
-    permissions: { contains: async () => true },
+    permissions: {
+      contains: async (input) => chromeContains(origins, input.origins),
+      onAdded: event("permissionAdded"),
+      onRemoved: event("permissionRemoved"),
+    },
     alarms: {
       create: async (name, options) => alarms.push({ name, options }),
       onAlarm: event("alarm"),
@@ -288,11 +295,11 @@ it("derives the result after a push lands during a queued reconnect", async () =
   expect(badges.at(-1)).toBe("ERR");
 });
 
-for (const missing of ["secret", "permission"]) {
+for (const missing of ["secret", "URL"]) {
   it(`marks a missing ${missing} as unconfigured without an outage badge`, async () => {
     requests = [];
     if (missing === "secret") settings.serverSecret = "";
-    else chrome.permissions.contains = async () => false;
+    else settings.serverUrl = "";
     client = startSigninWorker();
     await client.start();
     await client.update([]);
@@ -301,6 +308,71 @@ for (const missing of ["secret", "permission"]) {
     expect(sockets).toEqual([]);
   });
 }
+
+it("marks saved settings without relay access as needs_access ahead of pending and push badges", async () => {
+  origins = ["https://unrelated.example/*"];
+  localState.lastResults = [{ ok: false, domain: "example.com" }];
+  client = startSigninWorker();
+  await client.start();
+  await client.update(requests);
+  expect(session.signinRelay).toEqual({ status: "needs_access" });
+  expect(badges.at(-1)).toBe("!");
+  expect(sockets).toEqual([]);
+  expect(fetches).toEqual([]);
+});
+
+it("connects immediately on relay permission addition and drops the socket on removal", async () => {
+  origins = [];
+  requests = [];
+  client = startSigninWorker();
+  await client.start();
+  expect(sockets).toEqual([]);
+  expect(events.permissionAdded).toBeFunction();
+  expect(events.permissionRemoved).toBeFunction();
+  origins.push("http://localhost/*");
+  await events.permissionAdded({ origins: ["http://localhost/*"] });
+  expect(sockets).toHaveLength(1);
+  sockets[0].open();
+  await client.update([]);
+  expect(session.signinRelay).toEqual({ status: "connected" });
+  expect(badges.at(-1)).toBe("");
+  origins = [];
+  await events.permissionRemoved({ origins: ["http://localhost/*"] });
+  await client.update([]);
+  expect(sockets[0].readyState).toBe(3);
+  expect(session.signinRelay).toEqual({ status: "needs_access" });
+  expect(badges.at(-1)).toBe("!");
+  origins.push("http://*/*");
+  await events.permissionAdded({ origins: ["http://*/*"] });
+  expect(sockets).toHaveLength(2);
+});
+
+it("rechecks a permission change that arrives during an in-flight permission read", async () => {
+  requests = [];
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const contains = chrome.permissions.contains;
+  let held = false;
+  chrome.permissions.contains = async (input) => {
+    const allowed = await contains(input);
+    if (!held) {
+      held = true;
+      entered.resolve();
+      await release.promise;
+    }
+    return allowed;
+  };
+  client = startSigninWorker();
+  await entered.promise;
+  origins = [];
+  const changed = events.permissionRemoved?.({ origins: ["http://localhost/*"] });
+  release.resolve();
+  await changed;
+  await client.update([]);
+  expect(events.permissionRemoved).toBeFunction();
+  expect(session.signinRelay).toEqual({ status: "needs_access" });
+  expect(sockets.every((socket) => socket.readyState === 3)).toBe(true);
+});
 
 it("recomputes the badge on session relay and local result changes without changing the result time", async () => {
   requests = [];

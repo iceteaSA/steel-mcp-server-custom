@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, it } from "bun:test";
-import { extensionBrowser, mockChrome } from "./browser-fixture.js";
+import { extensionBrowser, installMockChrome } from "./browser-fixture.js";
 
 let fixture;
 beforeAll(async () => {
@@ -11,7 +11,7 @@ afterAll(async () => {
 
 async function popup(options) {
   const page = await fixture.browser.newPage({ timezoneId: "UTC" });
-  await page.addInitScript(mockChrome, options);
+  await installMockChrome(page, options);
   await page.goto(`${fixture.origin}/popup.html`);
   await page.waitForFunction(() =>
     document.getElementById("connection").textContent.includes("secret accepted"),
@@ -123,3 +123,37 @@ it("shows a setup hint rather than an outage for an unconfigured relay", async (
     await page.close();
   }
 });
+
+for (const allow of [true, false]) {
+  it(`requests exact relay access synchronously from the popup click when ${allow ? "accepted" : "denied"}`, async () => {
+    const page = await popup({ relayState: { status: "needs_access" }, relayAccess: false, allow });
+    try {
+      expect(await page.locator("#relayState").innerText()).toContain("Relay access is missing");
+      const button = page.getByRole("button", { name: "Grant relay access", exact: true });
+      expect(await button.count()).toBe(1);
+      expect(await button.isVisible()).toBe(true);
+      expect(await page.evaluate(() => calls.filter(([kind]) => kind === "grant"))).toEqual([]);
+      expect(
+        await button.evaluate((element) => {
+          element.click();
+          return calls.filter(([kind]) => kind === "grant");
+        }),
+      ).toEqual([["grant", { origins: ["http://localhost/*"] }]]);
+      await page.waitForFunction(() => !document.getElementById("grantRelay").disabled);
+      expect(
+        await page.evaluate(() => chrome.permissions.contains({ origins: ["http://localhost/*"] })),
+      ).toBe(allow);
+      if (!allow) {
+        expect(await button.isVisible()).toBe(true);
+        expect(await page.locator("#status").innerText()).toContain("not granted");
+      }
+      await page.evaluate(() => {
+        document.documentElement.dataset.relayState = JSON.stringify({ status: "connected" });
+        dispatchEvent(new Event("mockRelayState"));
+      });
+      expect(await button.isVisible()).toBe(false);
+    } finally {
+      await page.close();
+    }
+  });
+}
