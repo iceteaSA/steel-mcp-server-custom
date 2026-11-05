@@ -106,8 +106,7 @@ export class LaneRuntime {
       get: (_root, property) => {
         if (property === "listProfiles") return () => this.listProfiles();
         const scope = this.current.getStore();
-        if (!scope)
-          throw new NoCallerError();
+        if (!scope) throw new NoCallerError();
         const { lane, tabId } = scope;
         if (property === "closeTabsByOwner" && scope.closeTabIds) {
           return async (owner: string) => {

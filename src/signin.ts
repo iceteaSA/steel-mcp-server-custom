@@ -193,7 +193,8 @@ export class SigninStore extends EventEmitter {
   async create(caller: SigninCaller, input: SigninInput): Promise<SigninRequest> {
     return this.serial(async () => {
       if (this.stopping) throw new Error("signin_cancelled");
-      if (typeof caller?.sessionID !== "string" || !caller.sessionID.trim()) throw new NoCallerError();
+      if (typeof caller?.sessionID !== "string" || !caller.sessionID.trim())
+        throw new NoCallerError();
       if (
         caller.sessionID.length > 256 ||
         (caller.agent !== undefined &&

@@ -19,7 +19,7 @@ import { afterAction } from "../utils.js";
 import { fenceToolResult } from "../untrusted.js";
 import { LaneRuntime, type LaneOptions } from "../lanes.js";
 import type { BrowserManager } from "../manager.js";
-import { NoCallerError } from "../caller.js";
+import { NoCallerError, errorForTool } from "../caller.js";
 
 // Re-exported because @modelcontextprotocol/sdk 1.29 doesn't re-export
 // ToolAnnotations from the server/mcp module.
@@ -160,9 +160,12 @@ export function makeRegistrar(
       // per-tool generics that defeat the wrapper's purpose.
       (async (args: Record<string, unknown>, extra: { _meta?: Record<string, unknown> }) =>
         fenceToolResult(
-          runtime
-            ? await runtime.run(spec.name, args, extra?._meta, () => spec.handler(args))
-            : await spec.handler(args),
+          errorForTool(
+            runtime
+              ? await runtime.run(spec.name, args, extra?._meta, () => spec.handler(args))
+              : await spec.handler(args),
+            spec.outputSchema,
+          ),
           spec.name,
         )) as Parameters<McpServer["registerTool"]>[2],
     );
@@ -443,8 +446,11 @@ export async function execFillField(
       (element, choice) => {
         if (!(element instanceof HTMLSelectElement)) throw new Error("Element is not a select");
         return Array.from(element.options).some((option, i) =>
-          choice.kind === "selectIndex" ? i === choice.index :
-          choice.kind === "selectLabel" ? option.label === choice.value : option.value === choice.value,
+          choice.kind === "selectIndex"
+            ? i === choice.index
+            : choice.kind === "selectLabel"
+              ? option.label === choice.value
+              : option.value === choice.value,
         );
       },
       { kind, value: opts.value, index },
