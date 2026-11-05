@@ -543,11 +543,14 @@ export class LaneRuntime {
     if (name === "request_human" && typeof args.tabId === "number") {
       try {
         this.checkTab(caller, args.tabId);
-      } catch {
+      } catch (error) {
+        if (!(error instanceof Error)) throw error;
+        const code = error.message.match(/^(not_in_lane|lane_closed):/)?.[1];
+        if (!code) throw error;
         return {
           isError: true,
-          structuredContent: { error: "not_in_lane" },
-          content: [{ type: "text", text: "not_in_lane: handoff tab is not in your lane." }],
+          structuredContent: { error: code },
+          content: [{ type: "text", text: error.message }],
         };
       }
     }
