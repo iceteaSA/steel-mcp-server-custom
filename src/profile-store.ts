@@ -10,7 +10,7 @@ import { z } from "zod";
 export const domainSchema = z
   .string()
   .max(253)
-  .regex(/^\.?[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$/);
+  .regex(/^\.?[a-zA-Z0-9_](?:[a-zA-Z0-9_.-]*[a-zA-Z0-9_])?$/);
 export function httpOrigin(value: string): string | undefined {
   try {
     const url = new URL(value);
