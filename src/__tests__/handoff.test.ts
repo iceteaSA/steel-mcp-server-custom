@@ -562,7 +562,7 @@ for (const mode of ["off", "on"] as const) {
       for (let i = 0; i < 8; i++) {
         const after = f.events.length;
         const result = await f.call("request_human", { reason: `reason-${i}` }, `rotated-${i}`);
-        ids.push(result.structuredContent?.id);
+        ids.push((result.structuredContent as Record<string, unknown>)?.id);
         const event = await f.state("HUMAN_REQUESTED", after);
         expect(event.requests).toHaveLength(i + 1);
       }
@@ -573,11 +573,19 @@ for (const mode of ["off", "on"] as const) {
       });
       const status = (await f.endpoint("")).body;
       expect((status.requests as Array<{ id: unknown }>).map((request) => request.id)).toEqual(ids);
+      expect((await f.call("probe")).isError).not.toBe(true);
       expect(
-        (await f.call("wait_for_human", { timeout: 0 })).structuredContent?.requests,
+        (
+          (await f.call("wait_for_human", { timeout: 0 })).structuredContent as Record<
+            string,
+            unknown
+          >
+        )?.requests,
       ).toHaveLength(8);
       const token = await f.take();
-      expect((await f.call("probe")).structuredContent?.requests).toHaveLength(8);
+      expect(
+        ((await f.call("probe")).structuredContent as Record<string, unknown>)?.requests,
+      ).toHaveLength(8);
       for (const event of f.events)
         if (Array.isArray(event.requests)) expect(event.requests.length).toBeLessThanOrEqual(8);
       await f.endpoint("back", { token });
@@ -618,10 +626,11 @@ for (const mode of ["off", "on"] as const) {
       const oldToken = await f.take();
       await f.advance(1001);
       const token = await f.take();
-      for (const action of ["heartbeat", "back"])
-        expect((await f.endpoint(action, { token: oldToken })).body.error).toBe(
-          "handoff_displaced",
-        );
+      for (const action of ["heartbeat", "back"]) {
+        const displaced = await f.endpoint(action, { token: oldToken });
+        expect(displaced.status).toBe(409);
+        expect(displaced.body.error).toBe("handoff_displaced");
+      }
       expect((await f.endpoint("back", { token }, extension)).body.state).toBe("AGENT");
     } finally {
       await f.close();
@@ -630,11 +639,15 @@ for (const mode of ["off", "on"] as const) {
 
   test(`handoff ${mode}: security aggregates eight due notifications into one push per tick`, async () => {
     const received: Array<{ body: string; title: string | null }> = [];
+    const entered = barrier();
+    const release = barrier();
     const ntfy = Bun.serve({
       hostname: "127.0.0.1",
       port: 0,
       fetch: async (request) => {
         received.push({ body: await request.text(), title: request.headers.get("title") });
+        entered.release();
+        await release.promise;
         return new Response("ok");
       },
     });
@@ -642,13 +655,19 @@ for (const mode of ["off", "on"] as const) {
     try {
       for (let i = 0; i < 8; i++)
         await f.call("request_human", { reason: `reason-${i}` }, `rotated-${i}`);
-      await f.advance(60000);
+      const sending = f.advance(60000);
+      await entered.promise;
+      await f.handle.handoff?.tick();
+      expect(received).toHaveLength(1);
+      release.release();
+      await sending;
       expect(received).toHaveLength(1);
       expect(received[0].title).toBe("8 pending human requests");
       expect(received[0].body).toContain("8 pending requests");
       await f.advance(60000);
       expect(received).toHaveLength(1);
     } finally {
+      release.release();
       await f.close();
       await ntfy.stop(true);
     }

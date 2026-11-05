@@ -31,7 +31,7 @@ export function register(register: ToolRegistrar, _manager: BrowserManager, _env
       title: name === "request_human" ? "Request Human" : "Wait for Human",
       description:
         name === "request_human"
-          ? "Ask the operator to take browser-wide control. Return a request ID at once. The operator must take control explicitly."
+          ? "Ask the operator to take browser-wide control. Return a request ID at once. HUMAN_REQUESTED keeps agent tools available until the operator takes control explicitly."
           : "Wait at most 120 seconds for human_done, human_declined, paused, or timeout. After human_done, read the page again; old refs are invalid.",
       toolset: "core",
       outputSchema,

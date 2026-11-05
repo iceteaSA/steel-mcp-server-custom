@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Limit pending human requests to eight across all callers. Refuse a ninth request with `handoff_busy`. Send at most one count-summary notification for each tick.
+- Refuse HTTP `Origin` headers that are not from a Chrome extension on handoff routes. Use `handoff_displaced` for the eight most recent replaced operator claims.
+
 - Add `request_human` and `wait_for_human` for browser-wide operator handoff in the two lane modes.
 - Add authenticated HTTP control, heartbeat, handback, and decline endpoints, plus WebSocket state snapshots.
 - Stop agent tools during operator control. Drain for at most 130 seconds, then close only pages with unfinished operations.

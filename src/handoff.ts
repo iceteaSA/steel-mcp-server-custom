@@ -9,6 +9,7 @@ import { stripUnsafeControls } from "./untrusted.js";
 import { clearAllSnapshots } from "./snapshot.js";
 
 export type HandoffState = "AGENT" | "HUMAN_REQUESTED" | "DRAINING" | "HUMAN" | "RESYNC" | "PAUSED";
+const MAX_PENDING_REQUESTS = 8;
 type Outcome = "human_done" | "human_declined" | "paused" | "timeout";
 type Request = {
   id: string;
@@ -73,6 +74,7 @@ export class HandoffController extends EventEmitter {
   private reason = "";
   private tabId?: number;
   private token?: string;
+  private readonly displacedTokens: string[] = [];
   private heartbeat = 0;
   private readonly requests: Request[] = [];
   private readonly charges = new Map<string, number[]>();
@@ -107,6 +109,7 @@ export class HandoffController extends EventEmitter {
       ...(this.tabId !== undefined ? { tabId: this.tabId } : {}),
       requests: this.requests
         .filter((r) => !r.status)
+        .slice(0, MAX_PENDING_REQUESTS)
         .map(({ id, agent, reason, tabId, created }) => ({ id, agent, reason, tabId, created })),
       closedTabIds: [...this.closedTabIds],
       fenced_not_closed: [...this.fencedNotClosed],
@@ -129,6 +132,9 @@ export class HandoffController extends EventEmitter {
       (r) => !r.status && r.caller === caller && r.reason === reason && r.tabId === input.tabId,
     );
     if (duplicate) return { id: duplicate.id, state: this.state };
+    const pending = this.requests.filter((r) => !r.status).length;
+    if (pending >= MAX_PENDING_REQUESTS)
+      throw new Error(`handoff_busy: ${pending} pending requests (limit ${MAX_PENDING_REQUESTS})`);
     const times = (this.charges.get(caller) ?? []).filter((t) => t > this.now() - 3600000);
     if (
       times.length >= 10 ||
@@ -239,6 +245,10 @@ export class HandoffController extends EventEmitter {
     this.closedTabIds = [];
     this.fencedNotClosed = [];
     const token = randomUUID();
+    if (this.token) {
+      this.displacedTokens.push(this.token);
+      if (this.displacedTokens.length > 8) this.displacedTokens.shift();
+    }
     this.token = token;
     this.heartbeat = this.now();
     this.change("DRAINING");
@@ -308,7 +318,7 @@ export class HandoffController extends EventEmitter {
     const actual = Buffer.from(token);
     const expected = Buffer.from(this.token ?? "");
     if (!this.token || actual.length !== expected.length || !timingSafeEqual(actual, expected))
-      throw new Error("handoff_owner");
+      throw new Error(this.displacedTokens.includes(token) ? "handoff_displaced" : "handoff_owner");
   }
 
   beat(token: string) {
@@ -428,42 +438,49 @@ export class HandoffController extends EventEmitter {
       if (!times.some((t) => t > this.now() - 3600000)) this.charges.delete(caller);
     const file = this.options.ntfyTopicFile;
     if (!file || this.stopping) return;
-    for (const request of this.requests) {
-      if (request.status || request.notified || this.now() - request.created < 60000) continue;
-      request.notified = true;
+    const due = this.requests.filter(
+      (request) => !request.status && !request.notified && this.now() - request.created >= 60000,
+    );
+    if (!due.length) return;
+    for (const request of due) request.notified = true;
+    const request = due[0];
+    const pending = this.requests.filter((request) => !request.status).length;
+    try {
+      const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+      let topic: string;
       try {
-        const handle = await fs.open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
-        let topic: string;
-        try {
-          const stat = await handle.stat();
-          if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) throw new Error("unsafe_ntfy_file");
-          topic = (await handle.readFile("utf8")).trim();
-        } finally {
-          await handle.close();
-        }
-        const url = new URL(topic.includes("://") ? topic : `https://ntfy.sh/${topic}`);
-        if (
-          !["https:", "http:"].includes(url.protocol) ||
-          url.username ||
-          url.password ||
-          url.search ||
-          url.hash
-        )
-          throw new Error("invalid_ntfy_topic");
-        const clean = (value: string) =>
-          stripUnsafeControls(value)
-            .replace(/https?:\/\/[^\s]+/g, "[URL]")
-            .replace(/\p{Cc}/gu, " ");
-        await fetch(url, {
-          method: "POST",
-          headers: { Priority: "high", "Content-Type": "text/plain; charset=utf-8" },
-          body: `${clean(request.agent)} asks for browser control: ${clean(request.reason)}; tab ${request.tabId ?? "current"}`,
-          signal: AbortSignal.timeout(5000),
-          redirect: "error",
-        });
-      } catch {
-        console.error("[steel-mcp] Handoff notification failed.");
+        const stat = await handle.stat();
+        if (!stat.isFile() || (stat.mode & 0o777) !== 0o600) throw new Error("unsafe_ntfy_file");
+        topic = (await handle.readFile("utf8")).trim();
+      } finally {
+        await handle.close();
       }
+      const url = new URL(topic.includes("://") ? topic : `https://ntfy.sh/${topic}`);
+      if (
+        !["https:", "http:"].includes(url.protocol) ||
+        url.username ||
+        url.password ||
+        url.search ||
+        url.hash
+      )
+        throw new Error("invalid_ntfy_topic");
+      const clean = (value: string) =>
+        stripUnsafeControls(value)
+          .replace(/https?:\/\/[^\s]+/g, "[URL]")
+          .replace(/\p{Cc}/gu, " ");
+      await fetch(url, {
+        method: "POST",
+        headers: {
+          Priority: "high",
+          "Content-Type": "text/plain; charset=utf-8",
+          Title: `${pending} pending human request${pending === 1 ? "" : "s"}`,
+        },
+        body: `${pending > 1 ? `${pending} pending requests; ` : ""}${clean(request.agent)} asks for browser control: ${clean(request.reason)}; tab ${request.tabId ?? "current"}`,
+        signal: AbortSignal.timeout(5000),
+        redirect: "error",
+      });
+    } catch {
+      console.error("[steel-mcp] Handoff notification failed.");
     }
   }
 

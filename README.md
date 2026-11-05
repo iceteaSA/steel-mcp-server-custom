@@ -239,14 +239,20 @@ Restart the MCP process to change this switch. The restart does not keep lanes f
 `wait_for_human({timeout})` waits at most 120 seconds and supplies `human_done`, `human_declined`, `paused`, or `timeout`.
 Requests with the same caller, `reason`, and tab merge. Each caller can have three pending requests and ten requests for each hour.
 
+The server can have at most eight pending requests in total. When eight requests are pending, a new request gets `handoff_busy` with the pending count.
+It does not remove a different caller's request.
+
 The handoff applies to all browser contexts in the two lane modes.
 The states are `AGENT`, `HUMAN_REQUESTED`, `DRAINING`, `HUMAN`, `RESYNC`, and `PAUSED`.
+`HUMAN_REQUESTED` keeps agent tools available: the operator has not accepted control, and `wait_for_human` has a time limit.
 During `DRAINING`, `HUMAN`, `RESYNC`, or `PAUSED`, agent tools supply `human_control:` with the `reason`.
 Only `wait_for_human`, `signin_status`, and `list_lanes` stay available. No page data is available through these reads.
 
 The previous output schemas stay unchanged. Errors use text when the tool's schema does not accept the error object.
 
-All `/handoff` endpoints use the HTTP server's Bearer secret and the same localhost Host guard as `/push`:
+All `/handoff` endpoints use the HTTP server's Bearer secret and the same localhost Host guard as `/push`.
+Accept only a Chrome extension `Origin` header, as on the WebSocket.
+The `Origin` header is optional for CLI and server clients.
 
 | Endpoint | Body and result |
 |---|---|
@@ -261,7 +267,11 @@ The status and wait results list `closedTabIds` and `requestedTabClosed`.
 
 In compatibility mode, Steel's primary tab stays open. CDP stops its active JavaScript execution, and `fenced_not_closed` lists that tab.
 The authenticated `/signin/events` WebSocket sends `type: "handoff"` snapshots, without authentication secrets or ownership tokens.
-With `STEEL_NTFY_TOPIC_FILE`, one push follows after 60 seconds without a decision. It contains only agent, `reason`, and tab.
+With `STEEL_NTFY_TOPIC_FILE`, a push follows after 60 seconds without a decision.
+Each timer tick sends at most one push with the pending count and one request's agent, `reason`, and tab.
+
+The eight most recent claims replaced by a new holder get `handoff_displaced`.
+Other incorrect tokens get `handoff_owner`.
 
 Send a heartbeat less than 15 seconds apart. A missed heartbeat gives `PAUSED`. Agents stay stopped.
 The operator must start a new claim or hand back explicitly.

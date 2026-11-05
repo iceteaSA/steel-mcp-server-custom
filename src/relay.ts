@@ -304,14 +304,23 @@ export function startRelayServer(config: RelayConfig): http.Server {
       jsonResponse(res, 403, { error: "Forbidden host." });
       return;
     }
+    const url = new URL(req.url ?? "/", `http://localhost:${config.port}`);
+    const handoffRoute = url.pathname === "/handoff" || url.pathname.startsWith("/handoff/");
+    if (
+      handoffRoute &&
+      req.headers.origin !== undefined &&
+      !/^chrome-extension:\/\/[a-p]{32}$/.test(req.headers.origin)
+    ) {
+      req.resume();
+      jsonResponse(res, 403, { error: "forbidden_origin" });
+      return;
+    }
     // Extension host permissions give access without CORS.
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
       return;
     }
-
-    const url = new URL(req.url ?? "/", `http://localhost:${config.port}`);
 
     // GET /status — no auth required
     if (req.method === "GET" && url.pathname === "/status") {
@@ -321,7 +330,6 @@ export function startRelayServer(config: RelayConfig): http.Server {
 
     const profilesRoute = url.pathname === "/profiles" || url.pathname.startsWith("/profiles/");
     const signinRoute = url.pathname === "/signin" || url.pathname.startsWith("/signin/");
-    const handoffRoute = url.pathname === "/handoff" || url.pathname.startsWith("/handoff/");
     if (
       (req.method === "POST" && url.pathname === "/push") ||
       profilesRoute ||
