@@ -10,8 +10,8 @@ import path from "path";
 import type { Env } from "./manager.js";
 
 // Import + re-export from shared crypto module (also used by relay.ts).
-import { encryptJSON, decryptJSON } from "./crypto.js";
-export { encryptJSON, decryptJSON };
+import { encryptJSONAsync, decryptJSONAsync } from "./crypto.js";
+export { encryptJSON, decryptJSON } from "./crypto.js";
 
 export type Credential = {
   name: string;
@@ -29,7 +29,7 @@ export async function loadCredentials(
   try {
     const raw = await fs.readFile(env.CREDENTIALS_FILE, "utf8");
     if (env.CREDENTIALS_PASSPHRASE) {
-      return decryptJSON(raw.trim(), env.CREDENTIALS_PASSPHRASE) as Credential[];
+      return (await decryptJSONAsync(raw.trim(), env.CREDENTIALS_PASSPHRASE)) as Credential[];
     }
     return JSON.parse(raw) as Credential[];
   } catch {
@@ -43,7 +43,10 @@ export async function saveCredentials(
 ): Promise<void> {
   await fs.mkdir(path.dirname(env.CREDENTIALS_FILE), { recursive: true });
   if (env.CREDENTIALS_PASSPHRASE) {
-    await fs.writeFile(env.CREDENTIALS_FILE, encryptJSON(creds, env.CREDENTIALS_PASSPHRASE));
+    await fs.writeFile(
+      env.CREDENTIALS_FILE,
+      await encryptJSONAsync(creds, env.CREDENTIALS_PASSPHRASE),
+    );
   } else {
     await fs.writeFile(env.CREDENTIALS_FILE, JSON.stringify(creds, null, 2));
   }

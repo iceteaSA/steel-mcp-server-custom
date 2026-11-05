@@ -1794,7 +1794,7 @@ export class BrowserManager {
   /**
    * List all active profiles + any saved profiles on disk.
    */
-  async listProfiles(): Promise<
+  async listProfiles(includeSaved = true): Promise<
     Array<{
       name: string;
       active: boolean;
@@ -1814,6 +1814,8 @@ export class BrowserManager {
       });
       result.push({ name, active: true, tabCount: liveTabs.length });
     }
+
+    if (!includeSaved) return result;
 
     // Saved profiles on disk (that aren't currently active)
     try {

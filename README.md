@@ -164,6 +164,11 @@ When `delete_profile` gives no error, autosave is off for that lease. Closure do
 Encryption is off unless the operator sets `CREDENTIALS_PASSPHRASE`.
 With a passphrase, all profile writes use AES-256-GCM and scrypt through `src/crypto.ts`.
 
+Profile and credential I/O uses `encryptJSONAsync` and `decryptJSONAsync`.
+The process keeps at most 256 derived keys and removes the oldest entry first.
+Calls with the same passphrase and salt share one in-flight derivation.
+The synchronous `encryptJSON` and `decryptJSON` APIs stay for compatibility, not production requests.
+
 The first read of a plaintext file writes an encrypted temporary file with mode `0600`.
 The server decrypts that file and compares its contents before the atomic replacement.
 If the decrypted contents do not agree, the server keeps the plaintext and logs only the profile name.
@@ -183,7 +188,7 @@ node dist/decrypt-profiles.mjs
 
 The command checks each profile before the first write. It refuses symlinks and invalid names.
 
-Rollback requires Linux with accessible procfs at `/proc/self/fd`.
+Use Linux with procfs at `/proc/self/fd` for rollback.
 The command holds the directory descriptor and opens files with `O_NOFOLLOW`, so pathname changes cannot redirect file access.
 
 The dry run does not change files. Without `--dry-run`, the command writes plaintext with mode `0600`.

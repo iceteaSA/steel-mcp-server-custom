@@ -13,6 +13,7 @@ import { EnvSchema } from "../env.js";
 import { BrowserManager } from "../manager.js";
 import { makeRegistrar, ALL_TOOLSETS } from "../tools/shared.js";
 import * as groups from "../tools/index.js";
+import * as profileCrypto from "../crypto.js";
 
 async function fixture(mode = "on", overrides: Record<string, string> = {}) {
   const launchOptions = {
@@ -238,6 +239,75 @@ for (const mode of ["on", "off"] as const) {
     });
   }
 }
+
+test("list_profiles decrypts each saved profile only once for a caller with an active profile", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "profile-list-once-"));
+  const f = await fixture("on", {
+    PROFILES_DIR: directory,
+    CREDENTIALS_PASSPHRASE: "test-passphrase",
+  });
+  try {
+    expect((await f.call("a", "use_profile", { name: "saved" })).isError).not.toBe(true);
+    expect((await f.call("a", "save_profile", { name: "saved" })).isError).not.toBe(true);
+    const decrypt = spyOn(profileCrypto, "decryptJSONAsync");
+    try {
+      const result = await f.call("a", "list_profiles");
+      expect(result.isError).not.toBe(true);
+      expect(decrypt).toHaveBeenCalledTimes(1);
+      expect(structured(result)?.profiles).toMatchObject([{ name: "saved", active: true }]);
+    } finally {
+      decrypt.mockRestore();
+    }
+  } finally {
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("use_profile autosave and live apply keep alpha and beta file and context state separate", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "profile-bound-writers-"));
+  const f = await fixture("on", { PROFILES_DIR: directory });
+  const beta = JSON.stringify({
+    cookies: [{ name: "beta_token", value: "BETA_SECRET", domain: "example.test", path: "/" }],
+  });
+  try {
+    await writeFile(join(directory, "beta.json"), beta);
+    expect((await f.call("a", "use_profile", { name: "alpha", autosave: true })).isError).not.toBe(
+      true,
+    );
+    await f.call("a", "cookies", {
+      setCookies: [
+        { name: "alpha_token", value: "ALPHA_SECRET", domain: "example.test", path: "/" },
+      ],
+    });
+    expect(text(await f.call("a", "use_profile", { name: "beta" }))).toContain(
+      "lane_profile_conflict",
+    );
+    expect(await f.handle.applyProfileUpdated("beta")).toBe(false);
+    expect((await f.call("a", "close_lane")).isError).not.toBe(true);
+    const alpha = await readFile(join(directory, "alpha.json"), "utf8");
+    expect(alpha).toContain("ALPHA_SECRET");
+    expect(alpha).not.toContain("BETA_SECRET");
+    expect(await readFile(join(directory, "beta.json"), "utf8")).toBe(beta);
+    expect((await f.call("b", "use_profile", { name: "beta" })).isError).not.toBe(true);
+    expect(text(await f.call("b", "cookies"))).not.toContain("ALPHA_SECRET");
+    expect((await f.call("a", "use_profile", { name: "alpha" })).isError).not.toBe(true);
+    await writeFile(
+      join(directory, "beta.json"),
+      JSON.stringify({
+        cookies: [{ name: "new_beta", value: "PUSHED_BETA", domain: "example.test", path: "/" }],
+      }),
+    );
+    expect(await f.handle.applyProfileUpdated("beta")).toBe(true);
+    expect(text(await f.call("a", "cookies"))).not.toContain("PUSHED_BETA");
+    expect(text(await f.call("b", "cookies"))).toContain("PUSHED_BETA");
+    expect((await f.call("a", "save_profile", { name: "alpha" })).isError).not.toBe(true);
+    expect(await readFile(join(directory, "alpha.json"), "utf8")).not.toContain("PUSHED_BETA");
+  } finally {
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test("one bound profile per lane refuses X1 alias mixing and never passes alpha state to beta", async () => {
   const directory = await mkdtemp(join(tmpdir(), "lane-profile-bound-"));

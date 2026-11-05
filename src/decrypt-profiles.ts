@@ -3,7 +3,7 @@ import fs from "node:fs/promises";
 import { constants } from "node:fs";
 import path from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { decryptJSON } from "./crypto.js";
+import { decryptJSONAsync } from "./crypto.js";
 import { atomicWriteJson, withProfileWrite } from "./profile-store.js";
 import { isValidProfileName } from "./helpers.js";
 
@@ -68,7 +68,7 @@ export async function decryptProfiles(
       }
       let state: unknown;
       try {
-        state = decryptJSON(raw.trim(), passphrase);
+        state = await decryptJSONAsync(raw.trim(), passphrase);
       } catch {
         throw new Error("Cannot decrypt profile: check CREDENTIALS_PASSPHRASE.");
       }

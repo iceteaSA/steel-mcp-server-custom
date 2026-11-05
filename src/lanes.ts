@@ -154,8 +154,9 @@ export class LaneRuntime {
     }
     const lane = caller ? this.lanes.get(caller) : undefined;
     if (lane && !lane.closing) {
-      for (const profile of await lane.manager.listProfiles()) {
-        if (profile.active) profiles.set(profile.name, profile);
+      for (const profile of await lane.manager.listProfiles(false)) {
+        if (profile.active)
+          profiles.set(profile.name, { ...profiles.get(profile.name), ...profile });
       }
     }
     return [...profiles.values()].map((profile) => {

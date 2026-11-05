@@ -12,8 +12,44 @@ import crypto from "crypto";
 // Key derivation
 // ---------------------------------------------------------------------------
 
+const keys = new Map<string, Buffer>();
+const pendingKeys = new Map<string, Promise<Buffer>>();
+const KEY_CACHE_LIMIT = 256;
+
+function keyId(passphrase: string, salt: string): string {
+  return crypto
+    .createHash("sha256")
+    .update(JSON.stringify([passphrase, salt]))
+    .digest("hex");
+}
+
+function rememberKey(id: string, key: Buffer): Buffer {
+  if (!keys.has(id) && keys.size >= KEY_CACHE_LIMIT) {
+    const oldest = keys.keys().next().value;
+    if (oldest !== undefined) keys.delete(oldest);
+  }
+  keys.set(id, key);
+  return key;
+}
+
 function deriveKey(passphrase: string, salt: string): Buffer {
-  return crypto.scryptSync(passphrase, salt, 32);
+  const id = keyId(passphrase, salt);
+  return keys.get(id) ?? rememberKey(id, crypto.scryptSync(passphrase, salt, 32));
+}
+
+function deriveKeyAsync(passphrase: string, salt: string): Promise<Buffer> {
+  const id = keyId(passphrase, salt);
+  const cached = keys.get(id);
+  if (cached) return Promise.resolve(cached);
+  const pending = pendingKeys.get(id);
+  if (pending) return pending;
+  const operation = new Promise<Buffer>((resolve, reject) => {
+    crypto.scrypt(passphrase, salt, 32, (error, key) => (error ? reject(error) : resolve(key)));
+  })
+    .then((key) => rememberKey(id, key))
+    .finally(() => pendingKeys.delete(id));
+  pendingKeys.set(id, operation);
+  return operation;
 }
 
 // ---------------------------------------------------------------------------
@@ -26,6 +62,15 @@ export function encryptJSON(data: unknown, passphrase: string): string {
   const salt = crypto.randomBytes(16);
   const saltB64 = salt.toString("base64");
   const key = deriveKey(passphrase, saltB64);
+  return encryptWithKey(data, saltB64, key);
+}
+
+export async function encryptJSONAsync(data: unknown, passphrase: string): Promise<string> {
+  const saltB64 = crypto.randomBytes(16).toString("base64");
+  return encryptWithKey(data, saltB64, await deriveKeyAsync(passphrase, saltB64));
+}
+
+function encryptWithKey(data: unknown, saltB64: string, key: Buffer): string {
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
   const plain = JSON.stringify(data);
@@ -38,7 +83,7 @@ export function encryptJSON(data: unknown, passphrase: string): string {
 // Decrypt — auto-detect v2 vs legacy
 // ---------------------------------------------------------------------------
 
-export function decryptJSON(blob: string, passphrase: string): unknown {
+function encryptedParts(blob: string) {
   // v2 format: "v2:<salt b64>:<iv b64>:<tag b64>:<ct b64>"
   if (blob.startsWith("v2:")) {
     const rest = blob.slice(3);
@@ -48,25 +93,36 @@ export function decryptJSON(blob: string, passphrase: string): unknown {
       throw new Error("Malformed v2 encrypted payload: expected 4 colon-separated parts");
     }
     const [saltB64, ivB64, tagB64, ctB64] = parts as [string, string, string, string];
-    const key = deriveKey(passphrase, saltB64);
     const iv = Buffer.from(ivB64, "base64");
     const tag = Buffer.from(tagB64, "base64");
     const encrypted = Buffer.from(ctB64, "base64");
-    const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
-    decipher.setAuthTag(tag);
-    const plain = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
-    return JSON.parse(plain);
+    return { salt: saltB64, iv, tag, encrypted };
   }
 
   // Legacy format (pre-v2): fixed salt + base64(iv + tag + ciphertext)
   const LEGACY_SALT = "steel-mcp-creds";
-  const key = deriveKey(passphrase, LEGACY_SALT);
   const buf = Buffer.from(blob, "base64");
   const iv = buf.subarray(0, 12);
   const tag = buf.subarray(12, 28);
   const encrypted = buf.subarray(28);
-  const decipher = crypto.createDecipheriv("aes-256-gcm", key, iv);
-  decipher.setAuthTag(tag);
-  const plain = Buffer.concat([decipher.update(encrypted), decipher.final()]).toString("utf8");
+  return { salt: LEGACY_SALT, iv, tag, encrypted };
+}
+
+function decryptWithKey(parts: ReturnType<typeof encryptedParts>, key: Buffer): unknown {
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, parts.iv);
+  decipher.setAuthTag(parts.tag);
+  const plain = Buffer.concat([decipher.update(parts.encrypted), decipher.final()]).toString(
+    "utf8",
+  );
   return JSON.parse(plain);
+}
+
+export function decryptJSON(blob: string, passphrase: string): unknown {
+  const parts = encryptedParts(blob);
+  return decryptWithKey(parts, deriveKey(passphrase, parts.salt));
+}
+
+export async function decryptJSONAsync(blob: string, passphrase: string): Promise<unknown> {
+  const parts = encryptedParts(blob);
+  return decryptWithKey(parts, await deriveKeyAsync(passphrase, parts.salt));
 }

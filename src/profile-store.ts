@@ -3,7 +3,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { isDeepStrictEqual } from "node:util";
-import { encryptJSON, decryptJSON } from "./crypto.js";
+import { encryptJSONAsync, decryptJSONAsync } from "./crypto.js";
 import type { BrowserContext } from "patchright";
 import { z } from "zod";
 
@@ -88,7 +88,7 @@ export async function readProfileData(
             code: "profile_passphrase_required",
           });
         try {
-          return stateSchema.parse(decryptJSON(raw, passphrase));
+          return stateSchema.parse(await decryptJSONAsync(raw, passphrase));
         } catch {
           throw new Error("Cannot decrypt profile: check CREDENTIALS_PASSPHRASE.");
         }
@@ -137,13 +137,16 @@ export async function atomicWriteJson(
   try {
     await fs.writeFile(
       temporary,
-      passphrase ? encryptJSON(state, passphrase) : JSON.stringify(state, null, 2),
+      passphrase ? await encryptJSONAsync(state, passphrase) : JSON.stringify(state, null, 2),
       { mode: 0o600, flag: "wx" },
     );
     if (
       compare &&
       (!passphrase ||
-        !isDeepStrictEqual(state, decryptJSON(await fs.readFile(temporary, "utf8"), passphrase)))
+        !isDeepStrictEqual(
+          state,
+          await decryptJSONAsync(await fs.readFile(temporary, "utf8"), passphrase),
+        ))
     )
       throw new Error("Profile migration compare mismatch");
     await fs.rename(temporary, file);

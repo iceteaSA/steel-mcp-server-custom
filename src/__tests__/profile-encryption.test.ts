@@ -37,7 +37,7 @@ test("migration compare mismatch keeps original plaintext and logs no state", as
   const dir = await mkdtemp(join(tmpdir(), "migration-"));
   const file = join(dir, "saved.json");
   const original = JSON.stringify(state);
-  const decrypt = spyOn(crypto, "decryptJSON").mockReturnValue({ cookies: [] });
+  const decrypt = spyOn(crypto, "decryptJSONAsync").mockResolvedValue({ cookies: [] });
   const log = spyOn(console, "error").mockImplementation(() => {});
   try {
     await writeFile(file, original);

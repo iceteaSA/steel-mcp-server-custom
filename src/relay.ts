@@ -18,7 +18,7 @@ import fs from "fs/promises";
 import path from "path";
 import type { Duplex } from "node:stream";
 import { z } from "zod";
-import { encryptJSON, decryptJSON } from "./crypto.js";
+import { encryptJSONAsync, decryptJSONAsync } from "./crypto.js";
 import { assertSafeProfilePath, isValidProfileName } from "./helpers.js";
 import { WebSocket, WebSocketServer } from "ws";
 import { SigninStore, type SigninRequest } from "./signin.js";
@@ -137,7 +137,7 @@ type Credential = {
 async function loadCreds(file: string, passphrase?: string): Promise<Credential[]> {
   try {
     const raw = await fs.readFile(file, "utf8");
-    if (passphrase) return decryptJSON(raw.trim(), passphrase) as Credential[];
+    if (passphrase) return (await decryptJSONAsync(raw.trim(), passphrase)) as Credential[];
     return JSON.parse(raw) as Credential[];
   } catch {
     return [];
@@ -150,7 +150,7 @@ async function saveCreds(creds: Credential[], file: string, passphrase?: string)
     if (error.code !== "ENOENT") throw error;
   });
   if (passphrase) {
-    await fs.writeFile(file, encryptJSON(creds, passphrase), { mode: 0o600 });
+    await fs.writeFile(file, await encryptJSONAsync(creds, passphrase), { mode: 0o600 });
   } else {
     await fs.writeFile(file, JSON.stringify(creds, null, 2), { mode: 0o600 });
   }
