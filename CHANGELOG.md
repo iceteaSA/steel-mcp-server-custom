@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+- Wait for select options until the tool timeout. On failure, report the option count and first `option.label` values with `Option not found`.
+- Keep the selected value and change-event count unchanged on select failure.
+- Use checked directory descriptors for generic output and download writes. Refuse writes when Linux descriptor paths are unavailable.
+- Refuse generic writes to all descendants when `PROFILES_DIR=/`. Keep default outputs in a different `OUTPUT_ROOT` permitted.
+- Use one `no_caller` text and error code. Keep structured errors compatible with each tool's output schema.
+- Give sign-in dependencies through an explicit argument.
+- Accept underscore cookie domains in saved state and cookie pushes. Keep sign-in requests in their approved domain scope.
+
 - Refuse a first profile binding after stateful lane use with `lane_not_fresh`. Keep empty `about:blank` tabs permitted.
 - Check cookies and origin entries before binding. Keep the used mark after pages close or cookies clear. Do not clear state on refusal.
 - Use the caller's held lease for saved-file deletion. Give `profile_busy` for a different holder and `profile_lease_required` without a holder.

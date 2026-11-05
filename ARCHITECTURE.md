@@ -15,9 +15,14 @@ Compatibility mode (`STEEL_LANES=off`) keeps owner-tagged tabs and isolated cont
 Automatic and explicit closure use a bounded drain. Lane closure does not stop the shared browser or operator context.
 Caller identity is necessary for credential mutations. `list_profiles` reports active use only for the caller.
 
+Missing callers use one `no_caller` code and text. The registrar includes a structured error only when the tool's output schema accepts it.
+With no output schema, the registrar also includes the structured error.
+
 ## Sign-in state
 
 `src/index.ts` makes one `SigninStore` for the MCP tools and HTTP server.
+Sign-in registration receives the store and caller resolver through the explicit `ToolDependencies` argument. The registrar function has no store property.
+
 The caller uses `request_signin` when site sign-in state is necessary for a permitted task. The operator gives approval through Cookie Push.
 The extension pushes only the approved request's site scope into its target `profile`. Results contain status and counts, not state values.
 
@@ -45,6 +50,9 @@ The settle check is best-effort. It does not guarantee application readiness or 
 `src/snapshot.ts` captures accessibility trees and changes refs to `@eN`. It stores per-tab baselines for ref-insensitive interaction diffs. Extraction tools can target a frame through `resolveFrame`.
 
 `writeToFile` applies the configured output-root check. Large outputs can use file mode. JSON tools supply output schemas and structured results where available.
+
+`src/reserved-stores.ts` uses an open directory descriptor for generic writes. It checks directory identity and the opened file before truncation.
+Linux descriptor paths are necessary for the writer. Download streams use the same checks. Saved-state writes keep their atomic replacement and file modes.
 
 `PageTextStore` supplies opt-in literal search and cursor continuation for snapshots and text. Each token has a tool, tab, owner, URL, frame, selector, and query scope. Continuation uses a stored capture, so page changes do not move the text between chunks. The cache has a five-minute lifetime, a 32-token limit, and a 1,000,000-character limit for each capture.
 
