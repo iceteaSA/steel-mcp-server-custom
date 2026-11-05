@@ -182,6 +182,10 @@ node dist/decrypt-profiles.mjs
 ```
 
 The command checks each profile before the first write. It refuses symlinks and invalid names.
+
+Rollback requires Linux with accessible procfs at `/proc/self/fd`.
+The command holds the directory descriptor and opens files with `O_NOFOLLOW`, so pathname changes cannot redirect file access.
+
 The dry run does not change files. Without `--dry-run`, the command writes plaintext with mode `0600`.
 After rollback, remove `CREDENTIALS_PASSPHRASE` before the server starts, or the next read encrypts the files again.
 
