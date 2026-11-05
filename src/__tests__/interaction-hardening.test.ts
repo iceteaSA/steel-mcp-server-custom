@@ -95,6 +95,28 @@ test("fill selects a visible label whose value differs", async () => {
   expect(await page.locator("#country").inputValue()).toBe("us");
 });
 
+test("fill select accepts a label-only string like the engine", async () => {
+  await page.setContent('<select id="country"><option value="ca">Canada</option><option value="us">United States</option></select>');
+  await page.locator("#country").selectOption("United States");
+  expect(await page.locator("#country").inputValue()).toBe("us");
+  await page.locator("#country").selectOption("ca");
+  const result = await tools()("fill").handler({ timeout: 300, fields: [{ selector: "#country", kind: "select", value: "United States" }] });
+  expect(result.isError).not.toBe(true);
+  expect(await page.locator("#country").inputValue()).toBe("us");
+});
+
+for (const kind of ["select", "selectLabel"]) {
+  test(`fill ${kind} uses the engine's label whitespace normalization`, async () => {
+    await page.setContent('<select id="country"><option value="ca">Canada</option><option value="us" label="  United\u200b States\u00ad ">US</option></select>');
+    await page.locator("#country").selectOption(kind === "select" ? " United   States " : { label: " United   States " });
+    expect(await page.locator("#country").inputValue()).toBe("us");
+    await page.locator("#country").selectOption("ca");
+    const result = await tools()("fill").handler({ timeout: 300, fields: [{ selector: "#country", kind, value: " United   States " }] });
+    expect(result.isError).not.toBe(true);
+    expect(await page.locator("#country").inputValue()).toBe("us");
+  });
+}
+
 for (const kind of ["select", "selectLabel", "selectIndex"]) {
   test(`fill ${kind} rejects a missing option without clearing state or change events`, async () => {
     await page.setContent(
