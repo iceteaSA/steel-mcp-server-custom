@@ -1,2 +1,2 @@
-# Reviewed shared deny list. One registrable domain per line.
+# Reviewed shared deny list. One registrable domain or IP literal on each line.
 # No domains are blocked by this file.

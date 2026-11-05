@@ -21,6 +21,9 @@ Each lane manager owns one `SitePolicy`. Compatibility contexts share the proces
 The policy reads `config/site-deny.txt` or `STEEL_SITE_DENY_FILE` and adds the lane's `block_site` entries.
 Domain checks use the public suffix list through `tldts`, with private domains enabled.
 
+The shared file uses `O_NOFOLLOW` and `O_NONBLOCK`. `fstat` must identify a regular file. The cached snapshot accepts IP literals and IDNs.
+Request hosts use WHATWG URL normalization. An IP entry has no subdomain rule or DNS expansion.
+
 Context routes and guarded page routes check requests before the first hop. CDP `Fetch` pauses only denied document hosts to stop redirects.
 CDP `Network` denies subresources. Permitted requests stay in the browser network stack.
 Navigation wrappers give structured policy errors and stop pages above resource limits.

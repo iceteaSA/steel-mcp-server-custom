@@ -1,4 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
+import { constants } from "node:fs";
+import { isIP } from "node:net";
+import { domainToASCII } from "node:url";
 import { getDomain } from "tldts";
 import type { BrowserContext, CDPSession, Page, Request, Response, Route } from "patchright";
 import type { Env } from "./manager.js";
@@ -48,6 +51,7 @@ export class SitePolicy {
   private activeNavigations = new WeakSet<Page>();
   private navigationRequests = new WeakMap<Page, Request>();
   private earlyNavigations = new Map<string, Request>();
+  private observedRedirects = new WeakMap<Page, number>();
   constructor(
     private readonly env: Env,
     private readonly now = Date.now,
@@ -75,6 +79,11 @@ export class SitePolicy {
     });
   }
 
+  async restorePageRoute(page: Page) {
+    this.routedPages.delete(page);
+    await this.routePage(page);
+  }
+
   private load() {
     return (this.loaded ??= (async () => {
       const file = this.env.STEEL_SITE_DENY_FILE;
@@ -83,19 +92,42 @@ export class SitePolicy {
         shared = (async () => {
           try {
             const entries = new Map<string, Entry>();
-            const text = await readFile(file, "utf8");
+            const handle = await open(
+              file,
+              constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+            );
+            let text: string;
+            try {
+              if (!(await handle.stat()).isFile()) throw new Error("not_regular");
+              text = await handle.readFile("utf8");
+            } finally {
+              await handle.close();
+            }
             for (const line of text.split(/\r?\n/)) {
               const value = line.split("#")[0].trim();
               if (!value) continue;
-              const { host } = normalizeSite(value);
+              const parsed = new URL(`http://${value}`);
+              const host = parsed.hostname;
+              const ip = isIP(host.replace(/^\[|\]$/g, ""));
               const domain = getDomain(host, { allowPrivateDomains: true });
-              if (!domain || value !== domain) throw new Error("invalid_domain");
-              entries.set(domain, { domain, source: "shared" });
+              if (
+                parsed.username ||
+                parsed.password ||
+                parsed.port ||
+                parsed.pathname !== "/" ||
+                parsed.search ||
+                parsed.hash ||
+                (ip
+                  ? !isIP(value.replace(/^\[|\]$/g, ""))
+                  : !domain || host !== domain || domainToASCII(value.toLowerCase()) !== host)
+              )
+                throw new Error("invalid_domain");
+              entries.set(host, { domain: host, source: "shared" });
             }
             return entries;
           } catch {
             throw new Error(
-              "site_policy_invalid: deny list must be readable and contain only registrable domains.",
+              "site_policy_invalid: deny list must be a readable regular file containing registrable domains or IP literals.",
             );
           }
         })();
@@ -133,7 +165,10 @@ export class SitePolicy {
     try {
       const parsed = new URL(url);
       if (!["http:", "https:"].includes(parsed.protocol)) return;
-      const domain = getDomain(parsed.hostname.replace(/\.$/, ""), { allowPrivateDomains: true });
+      const host = parsed.hostname.replace(/\.$/, "");
+      const domain = isIP(host.replace(/^\[|\]$/g, ""))
+        ? host
+        : getDomain(host, { allowPrivateDomains: true });
       return domain ? (this.shared.get(domain) ?? this.lane.get(domain)) : undefined;
     } catch {
       return;
@@ -194,7 +229,7 @@ export class SitePolicy {
         throw new Error("invalid_site: HTTP URL required");
       const error =
         this.blocked(current) ??
-        this.budget("redirects", this.env.STEEL_MAX_REDIRECTS ?? 20, depth) ??
+        this.budget("redirects", this.env.STEEL_MAX_REDIRECTS, depth) ??
         this.count();
       if (error) throw error;
       const remaining = limit === undefined ? undefined : limit - (this.now() - started);
@@ -252,28 +287,23 @@ export class SitePolicy {
   }
 
   private patterns() {
-    return [...new Set([...this.shared.keys(), ...this.lane.keys()])].flatMap((domain) => [
-      `*://${domain}/*`,
-      `*://${domain}:*/*`,
-      `*://*.${domain}/*`,
-      `*://*.${domain}:*/*`,
-      `*://${domain}./*`,
-      `*://${domain}.:*/*`,
-      `*://*.${domain}./*`,
-      `*://*.${domain}.:*/*`,
-    ]);
+    return [...new Set([...this.shared.keys(), ...this.lane.keys()])].flatMap((domain) =>
+      (isIP(domain.replace(/^\[|\]$/g, ""))
+        ? [domain]
+        : [domain, `${domain}.`, `*.${domain}`, `*.${domain}.`]
+      ).flatMap((host) => [`*://${host}/*`, `*://${host}:*/*`]),
+    );
   }
 
   private async update(session: CDPSession) {
     const urls = this.patterns();
-    const urlPatterns = [...new Set([...this.shared.keys(), ...this.lane.keys()])].flatMap(
-      (domain) =>
-        ["http", "https"].flatMap((scheme) =>
-          [domain, `${domain}.`, `*.${domain}`, `*.${domain}.`].map((host) => ({
-            urlPattern: `${scheme}://${host}:*/*`,
-            block: true,
-          })),
-        ),
+    const urlPatterns = urls.flatMap((pattern) =>
+      ["http", "https"].map((scheme) => ({
+        urlPattern: pattern
+          .replace(/^\*/, scheme)
+          .replace(/\[[^\]]+\]/g, (host) => host.replace(/:/g, "\\:")),
+        block: true,
+      })),
     );
     await session.send("Network.setBlockedURLs", { urlPatterns });
     if (urls.length)
@@ -331,6 +361,18 @@ export class SitePolicy {
       if (this.earlyNavigations.get(request.url()) === request)
         this.earlyNavigations.delete(request.url());
     });
+    context.on("response", (response) => {
+      const request = response.request();
+      if (!request.isNavigationRequest()) return;
+      try {
+        let depth = 0;
+        for (let hop = request.redirectedFrom(); hop; hop = hop.redirectedFrom()) depth++;
+        if ([301, 302, 303, 307, 308].includes(response.status()) && response.headers()["location"])
+          depth++;
+        const page = request.frame().page();
+        this.observedRedirects.set(page, Math.max(depth, this.observedRedirects.get(page) ?? 0));
+      } catch {}
+    });
     await Promise.all(context.pages().map((page) => this.prepare(page)));
   }
 
@@ -387,6 +429,7 @@ export class SitePolicy {
         }
         const depth = event.redirectResponse ? (depths.get(event.requestId) ?? 0) + 1 : 0;
         depths.set(event.requestId, depth);
+        this.observedRedirects.set(page, Math.max(depth, this.observedRedirects.get(page) ?? 0));
         const error = this.budget("redirects", this.env.STEEL_MAX_REDIRECTS, depth);
         if (error) {
           this.remember(page, error);
@@ -464,6 +507,7 @@ export class SitePolicy {
     await this.prepare(page);
     this.failures.delete(page);
     this.activeNavigations.add(page);
+    this.observedRedirects.set(page, 0);
     const start = this.now();
     const limit = this.env.STEEL_NAVIGATION_TIMEOUT_MS;
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -506,7 +550,7 @@ export class SitePolicy {
           error: "budget_exceeded",
           budget: "redirects",
           limit: this.env.STEEL_MAX_REDIRECTS,
-          observed: 21,
+          observed: this.observedRedirects.get(page) ?? 0,
         });
       throw error;
     } finally {

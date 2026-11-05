@@ -13,33 +13,97 @@ import * as groups from "../tools/index.js";
 import { chromiumPath } from "./browser-processes.js";
 import { SitePolicy, PolicyError } from "../site-policy.js";
 
-for(const kind of ["symlink","fifo","directory"] as const)test(`shared policy refuses unsafe file quickly: ${kind}`,async()=>{
-  const dir=await mkdtemp(join(tmpdir(),"policy-unsafe-"));const file=join(dir,"deny");
-  try{
-    if(kind==="symlink"){await writeFile(join(dir,"empty"),"");await symlink(join(dir,"empty"),file);}
-    else if(kind==="directory")await mkdir(file);
-    else {const child=Bun.spawn(["mkfifo",file]);expect(await child.exited).toBe(0);}
-    const script=`import {SitePolicy} from ${JSON.stringify(new URL("../site-policy.ts",import.meta.url).pathname)};import {EnvSchema} from ${JSON.stringify(new URL("../env.ts",import.meta.url).pathname)};try{await new SitePolicy(EnvSchema.parse({BROWSER_MODE:'local',STEEL_SITE_DENY_FILE:${JSON.stringify(file)},STEEL_LANES:'off'})).enabled();console.log('ACCEPTED');}catch(e){console.log(String(e));}`;
-    const child=Bun.spawn(["bun","--eval",script],{env:process.env,stdout:"pipe",stderr:"pipe"});
-    let timedOut=false;const timer=setTimeout(()=>{timedOut=true;child.kill("SIGKILL");},1500);
-    try{await child.exited;expect(timedOut).toBe(false);expect(await new Response(child.stdout).text()).toContain("site_policy_invalid");}finally{clearTimeout(timer);if(child.exitCode===null)child.kill("SIGKILL");await child.exited;}
-  }finally{await rm(dir,{recursive:true,force:true});}
+for (const kind of ["symlink", "fifo", "directory"] as const)
+  test(`shared policy refuses unsafe file quickly: ${kind}`, async () => {
+    const dir = await mkdtemp(join(tmpdir(), "policy-unsafe-"));
+    const file = join(dir, "deny");
+    try {
+      if (kind === "symlink") {
+        await writeFile(join(dir, "empty"), "");
+        await symlink(join(dir, "empty"), file);
+      } else if (kind === "directory") await mkdir(file);
+      else {
+        const child = Bun.spawn(["mkfifo", file]);
+        expect(await child.exited).toBe(0);
+      }
+      const script = `import {SitePolicy} from ${JSON.stringify(new URL("../site-policy.ts", import.meta.url).pathname)};import {EnvSchema} from ${JSON.stringify(new URL("../env.ts", import.meta.url).pathname)};try{await new SitePolicy(EnvSchema.parse({BROWSER_MODE:'local',STEEL_SITE_DENY_FILE:${JSON.stringify(file)},STEEL_LANES:'off'})).enabled();console.log('ACCEPTED');}catch(e){console.log(String(e));}`;
+      const child = Bun.spawn(["bun", "--eval", script], {
+        env: process.env,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGKILL");
+      }, 1500);
+      try {
+        await child.exited;
+        expect(timedOut).toBe(false);
+        expect(await new Response(child.stdout).text()).toContain("site_policy_invalid");
+      } finally {
+        clearTimeout(timer);
+        if (child.exitCode === null) child.kill("SIGKILL");
+        await child.exited;
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+test("shared policy canonicalizes exact IP literals and Unicode domains", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "policy-addresses-"));
+  const file = join(dir, "deny");
+  try {
+    await writeFile(file, "127.0.0.1\n[::1]\n例え.テスト\n");
+    const policy = new SitePolicy(
+      EnvSchema.parse({ BROWSER_MODE: "local", STEEL_SITE_DENY_FILE: file, STEEL_LANES: "off" }),
+    );
+    for (const host of [
+      "127.0.0.1",
+      "2130706433",
+      "0x7f000001",
+      "0177.0.0.1",
+      "[0:0:0:0:0:0:0:1]",
+      "xn--r8jz45g.xn--zckzah",
+    ]) {
+      let sent = false;
+      await expect(
+        policy.http(`http://${host}/`, async () => {
+          sent = true;
+          return { value: "leak", status: 200 };
+        }),
+      ).rejects.toBeInstanceOf(PolicyError);
+      expect(sent).toBe(false);
+    }
+    expect(
+      await policy.http("http://127.0.0.2/", async () => ({ value: "allowed", status: 200 })),
+    ).toBe("allowed");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
-test("shared policy canonicalizes exact IP literals and Unicode domains",async()=>{
-  const dir=await mkdtemp(join(tmpdir(),"policy-addresses-"));const file=join(dir,"deny");
-  try{
-    await writeFile(file,"127.0.0.1\n[::1]\n例え.テスト\n");const policy=new SitePolicy(EnvSchema.parse({BROWSER_MODE:"local",STEEL_SITE_DENY_FILE:file,STEEL_LANES:"off"}));
-    for(const host of ["127.0.0.1","2130706433","0x7f000001","0177.0.0.1","[0:0:0:0:0:0:0:1]","xn--r8jz45g.xn--zckzah"]){let sent=false;await expect(policy.http(`http://${host}/`,async()=>{sent=true;return{value:"leak",status:200};})).rejects.toBeInstanceOf(PolicyError);expect(sent).toBe(false);}
-    expect(await policy.http("http://127.0.0.2/",async()=>({value:"allowed",status:200}))).toBe("allowed");
-  }finally{await rm(dir,{recursive:true,force:true});}
-});
-
-test("off-mode HTTP redirect budget is disabled unless configured",async()=>{
-  const dir=await mkdtemp(join(tmpdir(),"policy-http-cap-"));const file=join(dir,"deny");try{
-    await writeFile(file,"example.com\n");const policy=new SitePolicy(EnvSchema.parse({BROWSER_MODE:"local",STEEL_SITE_DENY_FILE:file,STEEL_LANES:"off"}));let calls=0;
-    expect(await policy.http("http://allowed.test/",async()=>({value:"done",status:++calls<=25?302:200,location:"/next"}))).toBe("done");expect(calls).toBe(26);
-  }finally{await rm(dir,{recursive:true,force:true});}
+test("off-mode HTTP redirect budget is disabled unless configured", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "policy-http-cap-"));
+  const file = join(dir, "deny");
+  try {
+    await writeFile(file, "example.com\n");
+    const policy = new SitePolicy(
+      EnvSchema.parse({ BROWSER_MODE: "local", STEEL_SITE_DENY_FILE: file, STEEL_LANES: "off" }),
+    );
+    let calls = 0;
+    expect(
+      await policy.http("http://allowed.test/", async () => ({
+        value: "done",
+        status: ++calls <= 25 ? 302 : 200,
+        location: "/next",
+      })),
+    ).toBe("done");
+    expect(calls).toBe(26);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 async function fixture(mode = "on", shared = "", limits: Record<string, string> = {}) {
@@ -55,6 +119,13 @@ async function fixture(mode = "on", shared = "", limits: Record<string, string> 
       hits.push(u.hostname + u.pathname);
       if (u.pathname === "/redirect")
         return Response.redirect(`http://sub.example.com:${site.port}/blocked`, 302);
+      if (u.pathname === "/redirect-ip")
+        return Response.redirect(`http://127.0.0.1:${site.port}/blocked-ip`, 302);
+      if (u.pathname === "/ip-resources")
+        return new Response(
+          `<img src="http://127.0.0.1:${site.port}/image"><script>fetch('http://127.0.0.1:${site.port}/fetch').then(()=>document.body.dataset.fetch='allowed',()=>document.body.dataset.fetch='blocked')</script>`,
+          { headers: { "content-type": "text/html" } },
+        );
       if (u.pathname === "/redirect-dot")
         return Response.redirect(`http://sub.example.com.:${site.port}/blocked`, 302);
       if (u.pathname === "/frame-resources")
@@ -170,23 +241,117 @@ test("block_site has exact schema and annotations in both modes", async () => {
   }
 });
 
-test("disabling media restores the policy page route",async()=>{
-  const f=await fixture("off","example.com\n");try{
-    await f.call("a","new_tab",{url:f.url()});await f.call("a","go_to_url",{url:f.url(),disableMedia:true});
-    const page=f.browser.contexts().flatMap(c=>c.pages()).find(p=>p.url()===f.url())!;const routes=spyOn(page,"route");
-    try{await f.call("a","go_to_url",{url:f.url(),disableMedia:false});expect(routes).toHaveBeenCalled();}finally{routes.mockRestore();}
-    await f.call("a","go_to_url",{url:f.url("allowed.test","/resources")});await page.waitForFunction(()=>document.body.dataset.fetch!==undefined);
-    expect(f.hits.filter(h=>h.startsWith("sub.example.com/"))).toEqual([]);
-  }finally{await f.close();}
+for (const mode of ["off", "on"])
+  test(`disabling media restores the policy page route: ${mode}`, async () => {
+    const f = await fixture(mode, "example.com\n");
+    try {
+      await f.call("a", "new_tab", { url: f.url() });
+      await f.call("a", "go_to_url", { url: f.url(), disableMedia: true });
+      const page = f.browser
+        .contexts()
+        .flatMap((c) => c.pages())
+        .find((p) => p.url() === f.url())!;
+      const routes = spyOn(page, "route");
+      try {
+        await f.call("a", "go_to_url", { url: f.url(), disableMedia: false });
+        expect(routes).toHaveBeenCalled();
+      } finally {
+        routes.mockRestore();
+      }
+      await f.call("a", "go_to_url", { url: f.url("allowed.test", "/resources") });
+      await page.waitForFunction(() => document.body.dataset.fetch !== undefined);
+      expect(f.hits.filter((h) => h.startsWith("sub.example.com/"))).toEqual([]);
+    } finally {
+      await f.close();
+    }
+  });
+
+test("browser routes block canonical address aliases and IDNs without denying their DNS neighbors", async () => {
+  const f = await fixture("on", "127.0.0.1\n[::1]\n例え.テスト\n");
+  try {
+    const allowed = await f.call("a", "new_tab", { url: f.url() });
+    expect(allowed.isError, JSON.stringify(allowed)).not.toBe(true);
+    for (const host of [
+      "127.0.0.1",
+      "2130706433",
+      "0x7f000001",
+      "0177.0.0.1",
+      "[::1]",
+      "例え.テスト",
+    ]) {
+      const result = await f.call("a", "new_tab", { url: f.url(host) });
+      expect(result.structuredContent).toMatchObject({ error: "site_blocked", source: "shared" });
+    }
+    expect(f.hits.some((h) => h.startsWith("127.0.0.1/") || h.startsWith("xn--"))).toBe(false);
+    expect(
+      (await f.call("b", "new_tab", { url: f.url("allowed.test", "/redirect-ip") }))
+        .structuredContent,
+    ).toMatchObject({ error: "site_blocked", domain: "127.0.0.1" });
+    await f.call("c", "new_tab", { url: f.url("allowed.test", "/ip-resources") });
+    const page = f.browser
+      .contexts()
+      .flatMap((c) => c.pages())
+      .find((p) => p.url().includes("ip-resources"))!;
+    await page.waitForFunction(() => document.body.dataset.fetch !== undefined);
+    expect(await page.getAttribute("body", "data-fetch")).toBe("blocked");
+    expect(f.hits.some((h) => h.startsWith("127.0.0.1/"))).toBe(false);
+  } finally {
+    await f.close();
+  }
 });
 
-test("native redirect error reports observed hops rather than a fixed count",async()=>{
-  const f=await fixture("on","",{STEEL_MAX_REDIRECTS:"100"});try{
-    await f.call("a","new_tab");const page=f.browser.contexts().flatMap(c=>c.pages()).at(-1)!;
-    const policy=new SitePolicy(f.env);await policy.attach(page.context());
-    let caught:unknown;try{await policy.navigate(page,async()=>{await page.goto(f.url("allowed.test","/chain/2"));throw new Error("ERR_TOO_MANY_REDIRECTS");});}catch(error){caught=error;}
-    expect(caught).toBeInstanceOf(PolicyError);expect((caught as PolicyError).detail).toMatchObject({budget:"redirects",limit:100,observed:2});
-  }finally{await f.close();}
+test("native redirect error reports observed hops rather than a fixed count", async () => {
+  const f = await fixture("on", "", { STEEL_MAX_REDIRECTS: "100" });
+  try {
+    await f.call("a", "new_tab");
+    const page = f.browser
+      .contexts()
+      .flatMap((c) => c.pages())
+      .at(-1)!;
+    const policy = new SitePolicy(f.env);
+    await policy.attach(page.context());
+    let caught: unknown;
+    try {
+      await policy.navigate(page, async () => {
+        await page.goto(f.url("allowed.test", "/chain/2"));
+        throw new Error("ERR_TOO_MANY_REDIRECTS");
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(PolicyError);
+    expect((caught as PolicyError).detail).toMatchObject({
+      budget: "redirects",
+      limit: 100,
+      observed: 2,
+    });
+  } finally {
+    await f.close();
+  }
+});
+
+test("Chromium native redirect count matches observed redirect responses", async () => {
+  const f = await fixture("on", "", { STEEL_MAX_REDIRECTS: "100" });
+  try {
+    await f.call("a", "new_tab");
+    const page = f.browser
+      .contexts()
+      .flatMap((c) => c.pages())
+      .at(-1)!;
+    let observed = 0;
+    page.on("response", (response) => {
+      if (response.status() === 302) observed++;
+    });
+    const result = await f.call("a", "go_to_url", { url: f.url("allowed.test", "/chain/30") });
+    expect(observed).toBeGreaterThan(0);
+    expect(result.structuredContent).toMatchObject({
+      error: "budget_exceeded",
+      budget: "redirects",
+      observed,
+    });
+  } finally {
+    await f.close();
+  }
 });
 
 for (const mode of ["on", "off"])

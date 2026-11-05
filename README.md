@@ -83,7 +83,7 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 | `STEEL_API_KEY` | — | Required for Steel Cloud (when `STEEL_BASE_URL` is not set) |
 | `STEEL_BASE_URL` | Steel Cloud | Self-hosted Steel URL (e.g. `http://your-steel-host:3000`) |
 | `STEEL_LANES` | `on` | Isolated caller lanes. Set `off` for the legacy shared context, owner guard, and `force` override. |
-| `STEEL_SITE_DENY_FILE` | `config/site-deny.txt` | Reviewed shared deny list. One registrable domain on each line. |
+| `STEEL_SITE_DENY_FILE` | `config/site-deny.txt` | Reviewed shared deny list. One registrable domain or IP literal on each line. |
 | `STEEL_MAX_REDIRECTS` | `20` in lanes | Maximum redirects for each navigation. Off-mode default: disabled. |
 | `STEEL_MAX_REQUESTS` | `2000` in lanes | Maximum requests for each rolling window in each lane. Off-mode default: disabled. |
 | `STEEL_REQUEST_WINDOW_MS` | `60000` | Request window in milliseconds. |
@@ -133,6 +133,10 @@ Ship `config/site-deny.txt` with the built package, or set `STEEL_SITE_DENY_FILE
 The process validates the file at startup, before browser allocation. Each lane uses that cached list.
 An unreadable or malformed file gives `site_policy_invalid`. Restart the process to apply shared-file changes.
 
+The file must be a regular file, not a `symlink`, FIFO, or directory.
+IPv4 and bracketed IPv6 entries deny only that address. Decimal, hexadecimal, and octal URLs use the same canonical address.
+The URL parser normalizes Unicode entries to ASCII. One bad entry invalidates the complete file.
+
 Context routes and page CDP guards deny HTTP requests without a proxy fetch or a change to the browser's TLS identity.
 Navigation errors contain `site_blocked`, `domain`, and `source` (`shared` or `lane`).
 Budget errors contain `budget_exceeded`, `budget`, `limit`, and `observed`.
@@ -145,6 +149,8 @@ A popup's first redirect can send one request to a denied host before its CDP gu
 The server closes that popup before tab registration and reports `site_blocked` with `popup: true` on the next lane call.
 Redirect budgets stop the page after observation, so one more hop can contact the server.
 The HTTP policy does not control WebSockets. Service-worker requests can follow redirects to denied hosts.
+
+A denied domain stays reachable at an IP address that the list does not name. There is no DNS-to-IP expansion.
 
 ### Caller lanes
 

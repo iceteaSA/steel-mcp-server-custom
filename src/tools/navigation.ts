@@ -135,8 +135,9 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         let mediaNote = "";
         const alreadyBlocked = mediaBlockedTabs.has(page);
         if (disableMedia && !alreadyBlocked) {
+          const guardPolicy = mgr.guardPolicy;
           await page.route("**/*", async (route) => {
-            if (await mgr.guardPolicy?.(route)) return;
+            if (await guardPolicy?.call(mgr, route)) return;
             const type = route.request().resourceType();
             if (["image", "font", "stylesheet", "media"].includes(type)) {
               return route.abort();
@@ -147,6 +148,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
           mediaNote = "\nMedia blocking enabled.";
         } else if (!disableMedia && alreadyBlocked) {
           await page.unrouteAll({ behavior: "ignoreErrors" });
+          await mgr.restorePolicyRoute?.(page);
           mediaBlockedTabs.delete(page);
           if (env.OPTIMIZE_BANDWIDTH) {
             mediaNote =

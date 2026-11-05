@@ -254,6 +254,10 @@ export class BrowserManager {
     return this.sitePolicy ? this.sitePolicy.guard(route) : false;
   }
 
+  async restorePolicyRoute(page: Page) {
+    await this.sitePolicy?.restorePageRoute(page);
+  }
+
   async navigate(page: Page, operation: () => Promise<Response | null>): Promise<Response | null> {
     return (await this.policy.enabled()) ? this.policy.navigate(page, operation) : operation();
   }
