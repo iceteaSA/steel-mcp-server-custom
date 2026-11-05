@@ -11,14 +11,16 @@ import { z } from "zod";
 import type { Env } from "../manager.js";
 import {
   buildRadioSelector,
+  collapseWhitespace,
   detectFieldKind,
   detectFieldsInPage,
   interpretCheckboxValue,
 } from "../helpers.js";
-import { afterAction } from "../utils.js";
+import { afterAction, sleep } from "../utils.js";
 import { fenceToolResult } from "../untrusted.js";
 import { LaneRuntime, type LaneOptions } from "../lanes.js";
 import type { BrowserManager } from "../manager.js";
+import { NoCallerError, errorForTool } from "../caller.js";
 
 // Re-exported because @modelcontextprotocol/sdk 1.29 doesn't re-export
 // ToolAnnotations from the server/mcp module.
@@ -84,9 +86,11 @@ export interface ToolSpec {
 // makeRegistrar — build a gated registration function from server + active set
 // -----------------------------------------------------------------------------
 
-export type ToolRegistrar = ((spec: ToolSpec) => void) & {
+export type ToolRegistrar = (spec: ToolSpec) => void;
+
+export interface ToolDependencies {
   signin?: { store: Promise<import("../signin.js").SigninStore>; getCaller: () => string };
-};
+}
 
 export interface RegistrarHandle {
   register: ToolRegistrar;
@@ -157,9 +161,12 @@ export function makeRegistrar(
       // per-tool generics that defeat the wrapper's purpose.
       (async (args: Record<string, unknown>, extra: { _meta?: Record<string, unknown> }) =>
         fenceToolResult(
-          runtime
-            ? await runtime.run(spec.name, args, extra?._meta, () => spec.handler(args))
-            : await spec.handler(args),
+          errorForTool(
+            runtime
+              ? await runtime.run(spec.name, args, extra?._meta, () => spec.handler(args))
+              : await spec.handler(args),
+            spec.outputSchema,
+          ),
           spec.name,
         )) as Parameters<McpServer["registerTool"]>[2],
     );
@@ -224,7 +231,8 @@ export function makeRegistrar(
     getCaller: () => {
       if (!runtime) return "single-process";
       const caller = runtime.getCaller();
-      return caller ?? "";
+      if (!caller) throw new NoCallerError();
+      return caller;
     },
     applyProfileUpdated: (profile) =>
       runtime
@@ -383,6 +391,12 @@ export async function execClick(
   await afterAction(page, env);
 }
 
+export interface SelectedOption {
+  value: string;
+  label: string;
+  index: number;
+}
+
 export async function execFillField(
   page: Page,
   env: Env,
@@ -395,7 +409,7 @@ export async function execFillField(
     kind?: "text" | "check" | "radio" | "select" | "selectLabel" | "selectIndex";
     settle?: boolean;
   },
-): Promise<void> {
+): Promise<SelectedOption[] | void> {
   const sel = toSelector({ selector: opts.selector, ref: opts.ref });
   const ctx = resolveFrame(page, opts.frame);
   const timeout = opts.timeout ?? 10000;
@@ -429,27 +443,76 @@ export async function execFillField(
     kind = detectFieldKind(info.tag, info.type);
   }
 
+  const locator = ctx.locator(sel);
+  if (kind === "select" || kind === "selectLabel" || kind === "selectIndex") {
+    const index = parseInt(opts.value, 10);
+    if (kind === "selectIndex" && Number.isNaN(index)) {
+      throw new Error(`selectIndex expects numeric value, got "${opts.value}"`);
+    }
+    const deadline = Date.now() + timeout;
+    let available = { found: false, count: 0, labels: [] as string[] };
+    for (;;) {
+      try {
+        available = await locator.evaluate(
+          (element, choice) => {
+            if (!(element instanceof HTMLSelectElement)) throw new Error("Element is not a select");
+            const options = Array.from(element.options);
+            const normalizeLabel = (label: string) =>
+              label
+                .replace(/[\u200b\u00ad]/g, "")
+                .trim()
+                .replace(/\s+/g, " ");
+            return {
+              found: options.some((option, i) =>
+                choice.kind === "selectIndex"
+                  ? i === choice.index
+                  : choice.kind === "selectLabel"
+                    ? normalizeLabel(option.label) === normalizeLabel(choice.value)
+                    : option.value === choice.value ||
+                      normalizeLabel(option.label) === normalizeLabel(choice.value),
+              ),
+              count: options.length,
+              labels: options.slice(0, 5).map((option) => option.label.slice(0, 120)),
+            };
+          },
+          { kind, value: opts.value, index },
+          { timeout: Math.max(1, deadline - Date.now()) },
+        );
+      } catch (error) {
+        if (Date.now() >= deadline && error instanceof Error && /timeout/i.test(error.message))
+          break;
+        throw error;
+      }
+      if (available.found || Date.now() >= deadline) break;
+      await sleep(Math.min(50, deadline - Date.now()));
+    }
+    if (!available.found)
+      throw new Error(
+        `Option not found: "${opts.value}" in ${sel}. ${available.count} options; first labels: ${JSON.stringify(available.labels)}`,
+      );
+  }
+
   switch (kind) {
     case "select":
-      await ctx.locator(sel).selectOption(opts.value, { timeout });
+      await locator.selectOption(opts.value, { timeout });
       break;
     case "selectLabel":
-      await ctx.locator(sel).selectOption({ label: opts.value }, { timeout });
+      await locator.selectOption({ label: opts.value }, { timeout });
       break;
     case "selectIndex": {
       const idx = parseInt(opts.value, 10);
       if (Number.isNaN(idx)) {
         throw new Error(`selectIndex expects numeric value, got "${opts.value}"`);
       }
-      await ctx.locator(sel).selectOption({ index: idx }, { timeout });
+      await locator.selectOption({ index: idx }, { timeout });
       break;
     }
     case "check": {
       const intent = interpretCheckboxValue(opts.value);
       if (intent === "check") {
-        await ctx.locator(sel).check({ timeout });
+        await locator.check({ timeout });
       } else if (intent === "uncheck") {
-        await ctx.locator(sel).uncheck({ timeout });
+        await locator.uncheck({ timeout });
       } else {
         const fullSel = buildRadioSelector(sel, opts.value);
         await ctx.locator(fullSel).check({ timeout });
@@ -462,11 +525,39 @@ export async function execFillField(
       break;
     }
     default:
-      await ctx.locator(sel).fill(opts.value, { timeout });
+      await locator.fill(opts.value, { timeout });
   }
 
   if (opts.settle !== false) {
     await afterAction(page, env);
+  }
+  if (kind === "select" || kind === "selectLabel" || kind === "selectIndex") {
+    const selected = await locator.evaluate(
+      (element) => {
+        if (!(element instanceof HTMLSelectElement)) throw new Error("Element is not a select");
+        return Array.from(element.selectedOptions).map((option) => ({
+          value: option.value,
+          label: option.label,
+          index: option.index,
+        }));
+      },
+      undefined,
+      { timeout },
+    );
+    const normalizeLabel = (label: string) =>
+      collapseWhitespace(label.replace(/[\u200b\u00ad]/g, ""));
+    const matches = (option: SelectedOption) =>
+      kind === "selectIndex"
+        ? option.index === parseInt(opts.value, 10)
+        : kind === "selectLabel"
+          ? normalizeLabel(option.label) === normalizeLabel(opts.value)
+          : option.value === opts.value ||
+            normalizeLabel(option.label) === normalizeLabel(opts.value);
+    if (selected.length === 0 || !selected.every(matches))
+      throw new Error(
+        `Selection mismatch: requested "${opts.value}" in ${sel}; selected ${JSON.stringify(selected)}.`,
+      );
+    return selected;
   }
 }
 

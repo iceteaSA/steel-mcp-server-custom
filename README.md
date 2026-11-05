@@ -115,6 +115,16 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 
 ---
 
+## Output paths
+
+Linux with `/proc/self/fd` access is necessary for file output. The server refuses writes if descriptor paths are unavailable.
+
+`OUTPUT_ROOT` defaults to `OUTPUT_DIR`. A different root can contain `OUTPUT_DIR`. Default filenames use the same containment check as explicit paths.
+
+Set `OUTPUT_ROOT=*` to disable root containment, not server-store protection. Generic output cannot replace `PROFILES_DIR`, `CREDENTIALS_FILE`, or `STEEL_NTFY_TOPIC_FILE` contents.
+
+The writer checks the opened directory and file before it changes file contents. Download output uses the same writer.
+
 ## Agent lanes
 
 `STEEL_LANES=on` is the default. The hub must send `params._meta["ai.opencode/sessionID"]` on each `tools/call`.

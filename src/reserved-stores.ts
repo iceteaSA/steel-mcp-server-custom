@@ -1,13 +1,66 @@
 import fs from "node:fs/promises";
+import { constants } from "node:fs";
 import path from "node:path";
 import type { Env } from "./manager.js";
-import { safeRealpath } from "./helpers.js";
+import { safeRealpath, assertInsideRoot } from "./helpers.js";
 
 export type ReservedStoreEnv = Pick<Env, "OUTPUT_DIR"> &
   Partial<Pick<Env, "PROFILES_DIR" | "CREDENTIALS_FILE" | "STEEL_NTFY_TOPIC_FILE">>;
 
 function inside(file: string, directory: string): boolean {
-  return file === directory || file.startsWith(directory + path.sep);
+  const prefix = directory.endsWith(path.sep) ? directory : directory + path.sep;
+  return file === directory || file.startsWith(prefix);
+}
+
+export async function writeReservedSafeOutput(
+  file: string,
+  data: Buffer | string | AsyncIterable<Uint8Array>,
+  env: ReservedStoreEnv & Pick<Env, "OUTPUT_ROOT">,
+): Promise<void> {
+  if (process.platform !== "linux")
+    throw new Error("reserved_store: output writes require Linux descriptor paths.");
+  try {
+    await fs.access("/proc/self/fd", constants.R_OK | constants.X_OK);
+  } catch {
+    throw new Error("reserved_store: output descriptor paths are unavailable.");
+  }
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  const resolved = await safeRealpath(path.resolve(file));
+  await assertNotReservedStore(resolved, env);
+  await assertInsideRoot(resolved, env.OUTPUT_ROOT, "outputPath");
+  const directory = path.dirname(resolved);
+  const checked = await fs.lstat(directory);
+  const parent = await fs.open(
+    directory,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  );
+  try {
+    const opened = await parent.stat();
+    if (!opened.isDirectory() || opened.dev !== checked.dev || opened.ino !== checked.ino)
+      throw new Error("reserved_store: output directory changed during access.");
+    const anchored = `/proc/self/fd/${parent.fd}/${path.basename(resolved)}`;
+    await assertNotReservedStore(anchored, env);
+    await assertInsideRoot(anchored, env.OUTPUT_ROOT, "outputPath");
+    const leaf = await fs.open(
+      anchored,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      0o600,
+    );
+    try {
+      if (!(await leaf.stat()).isFile())
+        throw new Error("reserved_store: output must be a regular file.");
+      // Check the opened inode before truncation. A leaf can change after its path check.
+      await assertNotReservedStore(`/proc/self/fd/${leaf.fd}`, env);
+      await assertInsideRoot(`/proc/self/fd/${leaf.fd}`, env.OUTPUT_ROOT, "outputPath");
+      await leaf.truncate(0);
+      if (typeof data === "string" || Buffer.isBuffer(data)) await leaf.writeFile(data);
+      else for await (const chunk of data) await leaf.writeFile(chunk);
+    } finally {
+      await leaf.close();
+    }
+  } finally {
+    await parent.close();
+  }
 }
 
 async function metadata(file: string) {

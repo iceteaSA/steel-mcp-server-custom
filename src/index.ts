@@ -88,8 +88,7 @@ registerCredentials(register, mgr, env);
 registerProfiles(register, mgr, env);
 registerIntercept(register, mgr, env);
 registerCaptcha(register, mgr);
-register.signin = { store: signinStore, getCaller };
-registerSignin(register, mgr, env);
+registerSignin(register, mgr, env, { signin: { store: signinStore, getCaller } });
 if (llmConfigured(env)) {
   registerAct(register, mgr, env);
 }

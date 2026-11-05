@@ -240,7 +240,7 @@ for (const mode of ["on", "off"] as const) {
   }
 }
 
-test("Part 3: each first-bind path refuses pre-profile cookies, browsing, and blank-page evaluate without clearing state", async () => {
+test("each first-bind path refuses pre-profile cookies, browsing, and blank-page evaluate without clearing state", async () => {
   const site = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -296,7 +296,7 @@ test("Part 3: each first-bind path refuses pre-profile cookies, browsing, and bl
   }
 });
 
-test("Part 3 S1+S2: anonymous lane state never enters a shared file or its next holder", async () => {
+test("anonymous lane state never enters a shared file or its next holder", async () => {
   const directory = await mkdtemp(join(tmpdir(), "profile-anonymous-handoff-"));
   const f = await fixture("on", { PROFILES_DIR: directory });
   const original = JSON.stringify({
@@ -339,7 +339,7 @@ test("Part 3 S1+S2: anonymous lane state never enters a shared file or its next 
   }
 });
 
-test("Part 3: sticky use survives browsing back to blank and clearing cookies and localStorage", async () => {
+test("sticky use survives browsing back to blank and clearing cookies and localStorage", async () => {
   const directory = await mkdtemp(join(tmpdir(), "profile-used-history-"));
   const f = await fixture("on", { PROFILES_DIR: directory });
   const site = Bun.serve({
@@ -370,7 +370,7 @@ test("Part 3: sticky use survives browsing back to blank and clearing cookies an
   }
 });
 
-test("Part 3: IndexedDB-only pre-profile use cannot bind after its page closes", async () => {
+test("IndexedDB-only pre-profile use cannot bind after its page closes", async () => {
   const directory = await mkdtemp(join(tmpdir(), "profile-used-idb-"));
   const f = await fixture("on", { PROFILES_DIR: directory });
   const site = Bun.serve({
@@ -400,7 +400,7 @@ test("Part 3: IndexedDB-only pre-profile use cannot bind after its page closes",
   }
 });
 
-test("Part 3: first bind waits for an in-flight real cookie write before checking freshness", async () => {
+test("first bind waits for an in-flight real cookie write before checking freshness", async () => {
   const directory = await mkdtemp(join(tmpdir(), "profile-freshness-race-"));
   const f = await fixture("on", { PROFILES_DIR: directory });
   const entered = barrier();
@@ -455,7 +455,7 @@ test("Part 3: first bind waits for an in-flight real cookie write before checkin
 });
 
 for (const tool of ["use_profile", "create_profile"] as const) {
-  test(`Part 3 lease generation: late ${tool} error cannot release a replacement holder`, async () => {
+  test(`lease generation: late ${tool} error cannot release a replacement holder`, async () => {
     const directory = await mkdtemp(join(tmpdir(), "profile-late-lease-"));
     const f = await fixture("on", { PROFILES_DIR: directory, LANE_DRAIN_MS: "20" });
     const entered = barrier();
@@ -510,7 +510,7 @@ for (const tool of ["use_profile", "create_profile"] as const) {
   });
 }
 
-test("Part 3 S3: saved deletion requires the caller's lease and refuses a busy holder", async () => {
+test("saved deletion requires the caller's lease and refuses a busy holder", async () => {
   const directory = await mkdtemp(join(tmpdir(), "profile-delete-lease-"));
   const f = await fixture("on", { PROFILES_DIR: directory });
   const file = join(directory, "victim.json");

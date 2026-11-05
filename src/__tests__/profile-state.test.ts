@@ -167,6 +167,25 @@ test("the strict profile reader preserves partitionKey returned by actual Chromi
   expect((await readProfileData(file)).cookies?.[0].partitionKey).toBe("https://top.example");
 });
 
+test("underscore cookie domains survive actual Chromium save and restore", async () => {
+  const domains = ["test_host.example.test", "_service.example.test", "service_.example.test"];
+  await context.addCookies(
+    domains.map((domain) => ({ name: "session", value: "COOKIE_CANARY", domain, path: "/" })),
+  );
+  expect((await context.cookies()).map((cookie) => cookie.domain).sort()).toEqual(
+    [...domains].sort(),
+  );
+  await manager.saveProfile("state");
+  const saved = await readProfileData(join(directory, "state.json"));
+  expect(saved.cookies?.map((cookie) => cookie.domain).sort()).toEqual([...domains].sort());
+  await manager.deleteProfile("state");
+  expect((await manager.createProfile("state")).restored).toBe(true);
+  const restored = (await manager.getPage()).context();
+  expect((await restored.cookies()).map((cookie) => cookie.domain).sort()).toEqual(
+    [...domains].sort(),
+  );
+});
+
 test("compatibility mode still ignores a malformed plaintext restore when encryption is off", async () => {
   await writeFile(join(directory, "broken.json"), '{"cookies": invalid}');
   const restored = await manager.createProfile("broken");

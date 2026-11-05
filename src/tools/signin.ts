@@ -1,8 +1,9 @@
 import type { SigninCaller, SigninInput, SigninRequest, SigninStore } from "../signin.js";
 import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { ToolRegistrar } from "./shared.js";
+import type { ToolRegistrar, ToolDependencies } from "./shared.js";
 import type { BrowserManager, Env } from "../manager.js";
+import { NoCallerError } from "../caller.js";
 
 function result(request: SigninRequest) {
   const { id, status, site, profile, created, expires, counts, note } = request;
@@ -51,9 +52,15 @@ export async function cancel_signin(
   return terminal;
 }
 
-export function register(register: ToolRegistrar, _manager: BrowserManager, _env: Env): void {
-  const getStore = () => register.signin?.store ?? Promise.reject(new Error("signin_unavailable"));
-  const getCaller = () => register.signin?.getCaller() ?? "single-process";
+export function register(
+  register: ToolRegistrar,
+  _manager: BrowserManager,
+  _env: Env,
+  dependencies: ToolDependencies = {},
+): void {
+  const getStore = () =>
+    dependencies.signin?.store ?? Promise.reject(new Error("signin_unavailable"));
+  const getCaller = () => dependencies.signin?.getCaller() ?? "single-process";
   // `signin_unknown` has only `error`, with no request metadata.
   const outputSchema = {
     id: z.string().optional(),
@@ -78,6 +85,7 @@ export function register(register: ToolRegistrar, _manager: BrowserManager, _env
         structuredContent: value,
       };
     } catch (error) {
+      if (error instanceof NoCallerError) return error.result;
       const code =
         error instanceof Error &&
         /^(?:signin_[a-z_]+|no_caller|rate_limited|invalid_wait|invalid_caller|invalid_request|invalid_site)$/.test(
