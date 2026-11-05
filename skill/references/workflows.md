@@ -24,6 +24,7 @@ return await tools["steel"].go_to_url({ url: "https://example.com", readPage: tr
 - Do not remove an entry. Entries expire with the lane, or with the process when lanes are off.
 - On `site_blocked`, use a different site or stop. Do not bypass the deny list.
 - On `budget_exceeded`, read `budget`, `limit`, and `observed` before a new task step.
+- On `redirect_loop`, stop or use a different URL.
 - Do not use this policy as a network firewall. WebSockets and service-worker redirects have no complete guard.
 
 ## Sign-in requests

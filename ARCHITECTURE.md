@@ -25,10 +25,13 @@ The shared file uses `O_NOFOLLOW` and `O_NONBLOCK`. `fstat` must identify a regu
 Request hosts use WHATWG URL normalization. An IP entry has no subdomain rule or DNS expansion.
 
 Context routes and guarded page routes check requests before the first hop. CDP `Fetch` pauses only denied document hosts to stop redirects.
-CDP `Network` denies subresources. Permitted requests stay in the browser network stack.
+CDP `Network` denies domain and IPv4 subresources. IPv6 subresources use route guards only.
+Permitted requests stay in the browser network stack.
 Navigation wrappers give structured policy errors and stop pages above resource limits.
 
 HTTP fetch and download paths check each redirect before the next request. Their requests consume the same lane budget.
+Manual HTTP chains stop after 20 redirects with `redirect_loop`, not `budget_exceeded`.
+The optional operator budget can stop the chain before that limit.
 No limit closes a different lane. Request counters use rolling windows and keep at most the configured request limit.
 
 Popup guards start after the context page event. A first redirect can contact a denied host before that event.

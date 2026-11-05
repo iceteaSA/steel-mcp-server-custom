@@ -145,10 +145,15 @@ The request window counts requests when they start, not when they finish. Long-p
 Navigation wall time includes document load, not the subsequent CAPTCHA wait or extraction.
 The HTTP fetch and download paths check each redirect before the next request.
 
+A manual HTTP chain with more than 20 redirects gives `redirect_loop: more than 20 redirects`.
+This internal limit is different from configured budgets. A lower configured redirect budget gives `budget_exceeded`.
+
 A popup's first redirect can send one request to a denied host before its CDP guard starts.
 The server closes that popup before tab registration and reports `site_blocked` with `popup: true` on the next lane call.
 Redirect budgets stop the page after observation, so one more hop can contact the server.
 The HTTP policy does not control WebSockets. Service-worker requests can follow redirects to denied hosts.
+
+IPv6 subresources use route guards only. The CDP `Network` layer has no IPv6 guard.
 
 A denied domain stays reachable at an IP address that the list does not name. There is no DNS-to-IP expansion.
 

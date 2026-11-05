@@ -106,34 +106,178 @@ test("off-mode HTTP redirect budget is disabled unless configured", async () => 
   }
 });
 
-test("manual HTTP self-redirect returns redirect_loop within two seconds and at most21 requests",async()=>{
-  const dir=await mkdtemp(join(tmpdir(),"policy-self-loop-"));const file=join(dir,"deny");let hits=0;
-  const site=Bun.serve({hostname:"127.0.0.1",port:0,fetch(){hits++;return new Response(null,{status:302,headers:{location:"/loop"}});}});
-  try{
-    await writeFile(file,"example.com\n");
-    const script=`import {SitePolicy} from ${JSON.stringify(new URL("../site-policy.ts",import.meta.url).pathname)};import {EnvSchema} from ${JSON.stringify(new URL("../env.ts",import.meta.url).pathname)};import {fetchHttp} from ${JSON.stringify(new URL("../tools/extraction.ts",import.meta.url).pathname)};const policy=new SitePolicy(EnvSchema.parse({BROWSER_MODE:'local',STEEL_LANES:'off',STEEL_SITE_DENY_FILE:${JSON.stringify(file)}}));try{await fetchHttp(${JSON.stringify(site.url.origin+"/loop")},{policy});console.log('UNEXPECTED_SUCCESS');}catch(e){console.log(String(e));}`;
-    const started=performance.now();const child=Bun.spawn(["bun","--eval",script],{env:process.env,stdout:"pipe",stderr:"pipe"});let timedOut=false;const timer=setTimeout(()=>{timedOut=true;child.kill("SIGKILL");},1800);
-    try{await child.exited;const elapsed=performance.now()-started;const output=await new Response(child.stdout).text();expect(hits).toBeLessThanOrEqual(21);expect(hits).toBe(21);expect(elapsed).toBeLessThan(2000);expect(timedOut).toBe(false);expect(output).toContain("redirect_loop: more than 20 redirects");expect(output).not.toContain("budget_exceeded");}
-    finally{clearTimeout(timer);if(child.exitCode===null)child.kill("SIGKILL");await child.exited;}
-  }finally{site.stop(true);await rm(dir,{recursive:true,force:true});}
-});
-
-test("manual HTTP ceiling is distinct and configured lower budgets still apply",async()=>{
-  const dir=await mkdtemp(join(tmpdir(),"policy-hard-cap-"));const file=join(dir,"deny");try{
-    await writeFile(file,"example.com\n");for(const limit of [undefined,"3","100"]){const policy=new SitePolicy(EnvSchema.parse({BROWSER_MODE:"local",STEEL_LANES:"off",STEEL_SITE_DENY_FILE:file,STEEL_MAX_REDIRECTS:limit}));let calls=0;let caught:unknown;
-      try{await policy.http("http://allowed.test/loop",async()=>({value:"no",status:++calls<=21?302:200,location:"/loop"}));}catch(error){caught=error;}
-      if(limit==="3"){expect(caught).toBeInstanceOf(PolicyError);expect((caught as PolicyError).detail).toMatchObject({error:"budget_exceeded",budget:"redirects",limit:3,observed:4});expect(calls).toBe(4);}
-      else{expect(String(caught)).toContain("redirect_loop: more than 20 redirects");expect(String(caught)).not.toContain("budget_exceeded");expect(calls).toBe(21);}
+test("manual HTTP self-redirect returns redirect_loop within two seconds and at most21 requests", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "policy-self-loop-"));
+  const file = join(dir, "deny");
+  let hits = 0;
+  const site = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch() {
+      hits++;
+      return new Response(null, { status: 302, headers: { location: "/loop" } });
+    },
+  });
+  try {
+    await writeFile(file, "example.com\n");
+    const script = `import {SitePolicy} from ${JSON.stringify(new URL("../site-policy.ts", import.meta.url).pathname)};import {EnvSchema} from ${JSON.stringify(new URL("../env.ts", import.meta.url).pathname)};import {fetchHttp} from ${JSON.stringify(new URL("../tools/extraction.ts", import.meta.url).pathname)};const policy=new SitePolicy(EnvSchema.parse({BROWSER_MODE:'local',STEEL_LANES:'off',STEEL_SITE_DENY_FILE:${JSON.stringify(file)}}));try{await fetchHttp(${JSON.stringify(site.url.origin + "/loop")},{policy});console.log('UNEXPECTED_SUCCESS');}catch(e){console.log(String(e));}`;
+    const started = performance.now();
+    const child = Bun.spawn(["bun", "--eval", script], {
+      env: process.env,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, 1800);
+    try {
+      await child.exited;
+      const elapsed = performance.now() - started;
+      const output = await new Response(child.stdout).text();
+      expect(hits).toBeLessThanOrEqual(21);
+      expect(hits).toBe(21);
+      expect(elapsed).toBeLessThan(2000);
+      expect(timedOut).toBe(false);
+      expect(output).toContain("redirect_loop: more than 20 redirects");
+      expect(output).not.toContain("budget_exceeded");
+    } finally {
+      clearTimeout(timer);
+      if (child.exitCode === null) child.kill("SIGKILL");
+      await child.exited;
     }
-  }finally{await rm(dir,{recursive:true,force:true});}
+  } finally {
+    site.stop(true);
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
-test("manual HTTP wall time bounds a stalled hop",async()=>{
-  const dir=await mkdtemp(join(tmpdir(),"policy-http-wall-"));const file=join(dir,"deny");try{
-    await writeFile(file,"example.com\n");const policy=new SitePolicy(EnvSchema.parse({BROWSER_MODE:"local",STEEL_LANES:"off",STEEL_SITE_DENY_FILE:file,STEEL_NAVIGATION_TIMEOUT_MS:"50"}));const started=performance.now();let caught:unknown;
-    try{await policy.http("http://allowed.test/",async()=>{await new Promise(resolve=>setTimeout(resolve,300));return{value:"late",status:200};});}catch(error){caught=error;}
-    expect(caught).toBeInstanceOf(PolicyError);expect((caught as PolicyError).detail).toMatchObject({error:"budget_exceeded",budget:"navigation_ms",limit:50});expect(performance.now()-started).toBeLessThan(200);
-  }finally{await rm(dir,{recursive:true,force:true});}
+test("manual HTTP ceiling is distinct and configured lower budgets still apply", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "policy-hard-cap-"));
+  const file = join(dir, "deny");
+  try {
+    await writeFile(file, "example.com\n");
+    for (const limit of [undefined, "3", "100"]) {
+      const policy = new SitePolicy(
+        EnvSchema.parse({
+          BROWSER_MODE: "local",
+          STEEL_LANES: "off",
+          STEEL_SITE_DENY_FILE: file,
+          STEEL_MAX_REDIRECTS: limit,
+        }),
+      );
+      let calls = 0;
+      let caught: unknown;
+      try {
+        await policy.http("http://allowed.test/loop", async () => ({
+          value: "no",
+          status: ++calls <= 21 ? 302 : 200,
+          location: "/loop",
+        }));
+      } catch (error) {
+        caught = error;
+      }
+      if (limit === "3") {
+        expect(caught).toBeInstanceOf(PolicyError);
+        expect((caught as PolicyError).detail).toMatchObject({
+          error: "budget_exceeded",
+          budget: "redirects",
+          limit: 3,
+          observed: 4,
+        });
+        expect(calls).toBe(4);
+      } else {
+        expect(String(caught)).toContain("redirect_loop: more than 20 redirects");
+        expect(String(caught)).not.toContain("budget_exceeded");
+        expect(calls).toBe(21);
+      }
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("manual HTTP wall time bounds a stalled hop", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "policy-http-wall-"));
+  const file = join(dir, "deny");
+  try {
+    await writeFile(file, "example.com\n");
+    const policy = new SitePolicy(
+      EnvSchema.parse({
+        BROWSER_MODE: "local",
+        STEEL_LANES: "off",
+        STEEL_SITE_DENY_FILE: file,
+        STEEL_NAVIGATION_TIMEOUT_MS: "50",
+      }),
+    );
+    const started = performance.now();
+    let caught: unknown;
+    try {
+      await policy.http("http://allowed.test/", async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return { value: "late", status: 200 };
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(PolicyError);
+    expect((caught as PolicyError).detail).toMatchObject({
+      error: "budget_exceeded",
+      budget: "navigation_ms",
+      limit: 50,
+    });
+    expect(performance.now() - started).toBeLessThan(200);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("manual HTTP wall time also bounds redirect-response disposal", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "policy-http-dispose-wall-"));
+  const file = join(dir, "deny");
+  try {
+    await writeFile(file, "example.com\n");
+    const policy = new SitePolicy(
+      EnvSchema.parse({
+        BROWSER_MODE: "local",
+        STEEL_LANES: "off",
+        STEEL_SITE_DENY_FILE: file,
+        STEEL_NAVIGATION_TIMEOUT_MS: "50",
+      }),
+    );
+    let calls = 0;
+    let disposed = 0;
+    let caught: unknown;
+    const started = performance.now();
+    try {
+      await policy.http("http://allowed.test/", async () => {
+        calls++;
+        return {
+          value: "redirect",
+          status: 302,
+          location: "/next",
+          dispose: async () => {
+            disposed++;
+            await new Promise((resolve) => setTimeout(resolve, 300));
+          },
+        };
+      });
+    } catch (error) {
+      caught = error;
+    }
+    expect(caught).toBeInstanceOf(PolicyError);
+    expect((caught as PolicyError).detail).toMatchObject({
+      error: "budget_exceeded",
+      budget: "navigation_ms",
+      limit: 50,
+    });
+    expect(calls).toBe(1);
+    expect(disposed).toBe(1);
+    expect(performance.now() - started).toBeLessThan(200);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 async function fixture(mode = "on", shared = "", limits: Record<string, string> = {}) {
@@ -147,6 +291,10 @@ async function fixture(mode = "on", shared = "", limits: Record<string, string> 
     fetch(request): Response | Promise<Response> {
       const u = new URL(request.url);
       hits.push(u.hostname + u.pathname);
+      if (u.pathname === "/self-loop")
+        return hits.filter((hit) => hit.endsWith("/self-loop")).length > 21
+          ? new Response("regression stop", { status: 500 })
+          : new Response(null, { status: 302, headers: { location: "/self-loop" } });
       if (u.pathname === "/redirect")
         return Response.redirect(`http://sub.example.com:${site.port}/blocked`, 302);
       if (u.pathname === "/redirect-ip")
@@ -249,15 +397,56 @@ async function fixture(mode = "on", shared = "", limits: Record<string, string> 
   };
 }
 
-test("IPv6 guards omit inert Network patterns but retain Fetch and route guards",async()=>{
-  const f=await fixture("off","[::1]\n127.0.0.1\n");const context=await f.browser.newContext();const page=await context.newPage();const session=await context.newCDPSession(page);const attach=spyOn(context,"newCDPSession").mockResolvedValue(session);const send=spyOn(session,"send");
-  try{
-    const policy=new SitePolicy(f.env);await policy.attach(context);
-    const network=send.mock.calls.find(([method])=>method==="Network.setBlockedURLs")?.[1] as {urlPatterns:{urlPattern:string}[]};
-    const fetch=send.mock.calls.find(([method])=>method==="Fetch.enable")?.[1] as {patterns:{urlPattern:string}[]};
-    expect(network.urlPatterns.length).toBeGreaterThan(0);for(const pattern of network.urlPatterns)expect(pattern.urlPattern).not.toContain("[");expect(fetch.patterns.some(pattern=>pattern.urlPattern.includes("[::1]"))).toBe(true);
-    await expect(page.goto("http://[::1]/")).rejects.toThrow();expect(policy.takePending()?.detail).toMatchObject({error:"site_blocked",domain:"[::1]"});
-  }finally{send.mockRestore();attach.mockRestore();await context.close();await f.close();}
+for (const mode of ["http", "auto", "download"] as const)
+  test(`redirect_loop returns without a browser retry: ${mode}`, async () => {
+    const f = await fixture("off", "example.com\n");
+    try {
+      if (mode === "download") expect((await f.call("a", "new_tab")).isError).not.toBe(true);
+      const started = performance.now();
+      const url = f.url("127.0.0.1", "/self-loop");
+      const result =
+        mode === "download"
+          ? await f.call("a", "download_file", { url, forceFetch: true })
+          : await f.call("a", "fetch_urls", { urls: [url], mode });
+      expect(performance.now() - started).toBeLessThan(2000);
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent, JSON.stringify(result)).toMatchObject({
+        error: "redirect_loop",
+      });
+      expect(JSON.stringify(result)).toContain("redirect_loop: more than 20 redirects");
+      expect(f.hits.filter((hit) => hit.endsWith("/self-loop"))).toHaveLength(21);
+    } finally {
+      await f.close();
+    }
+  });
+
+test("IPv6 guards omit inert Network patterns but retain Fetch and route guards", async () => {
+  const f = await fixture("off", "[::1]\n127.0.0.1\n");
+  const context = await f.browser.newContext();
+  const page = await context.newPage();
+  const session = await context.newCDPSession(page);
+  const attach = spyOn(context, "newCDPSession").mockResolvedValue(session);
+  const send = spyOn(session, "send");
+  try {
+    const policy = new SitePolicy(f.env);
+    await policy.attach(context);
+    const network = send.mock.calls.find(
+      ([method]) => method === "Network.setBlockedURLs",
+    )?.[1] as { urlPatterns: { urlPattern: string }[] };
+    const fetch = send.mock.calls.find(([method]) => method === "Fetch.enable")?.[1] as {
+      patterns: { urlPattern: string }[];
+    };
+    expect(network.urlPatterns.length).toBeGreaterThan(0);
+    for (const pattern of network.urlPatterns) expect(pattern.urlPattern).not.toContain("[");
+    expect(fetch.patterns.some((pattern) => pattern.urlPattern.includes("[::1]"))).toBe(true);
+    await expect(page.goto("http://[::1]/")).rejects.toThrow();
+    expect(policy.takePending()?.detail).toMatchObject({ error: "site_blocked", domain: "[::1]" });
+  } finally {
+    send.mockRestore();
+    attach.mockRestore();
+    await context.close();
+    await f.close();
+  }
 });
 
 test("block_site has exact schema and annotations in both modes", async () => {

@@ -9,7 +9,9 @@ import { normalizeSite } from "./signin.js";
 
 type Entry = { domain: string; source: "shared" | "lane"; reason?: string };
 const sharedLists = new Map<string, Promise<Map<string, Entry>>>();
+const HTTP_REDIRECT_LIMIT = 20;
 type Failure =
+  | { error: "redirect_loop" }
   | { error: "site_blocked"; domain: string; source: "shared" | "lane"; popup?: boolean }
   | {
       error: "budget_exceeded";
@@ -20,7 +22,11 @@ type Failure =
 
 export class PolicyError extends Error {
   constructor(readonly detail: Failure) {
-    super(JSON.stringify(detail));
+    super(
+      detail.error === "redirect_loop"
+        ? `redirect_loop: more than ${HTTP_REDIRECT_LIMIT} redirects`
+        : JSON.stringify(detail),
+    );
   }
 }
 
@@ -227,10 +233,10 @@ export class SitePolicy {
       const parsed = new URL(current);
       if (!["http:", "https:"].includes(parsed.protocol))
         throw new Error("invalid_site: HTTP URL required");
-      const error =
-        this.blocked(current) ??
-        this.budget("redirects", this.env.STEEL_MAX_REDIRECTS, depth) ??
-        this.count();
+      const denied = this.blocked(current);
+      if (denied) throw denied;
+      if (depth > HTTP_REDIRECT_LIMIT) throw new PolicyError({ error: "redirect_loop" });
+      const error = this.budget("redirects", this.env.STEEL_MAX_REDIRECTS, depth) ?? this.count();
       if (error) throw error;
       const remaining = limit === undefined ? undefined : limit - (this.now() - started);
       if (remaining !== undefined && remaining <= 0)
@@ -241,8 +247,43 @@ export class SitePolicy {
           observed: Math.max(limit! + 1, this.now() - started),
         });
       let reply;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let deadline: Promise<never> | undefined;
+      let expired = false;
       try {
-        reply = await send(current, remaining);
+        const pending = send(current, remaining);
+        if (remaining === undefined) reply = await pending;
+        else {
+          void pending
+            .then((value) => {
+              if (expired) return value.dispose?.();
+            })
+            .catch(() => {});
+          deadline = new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              expired = true;
+              reject(
+                new PolicyError({
+                  error: "budget_exceeded",
+                  budget: "navigation_ms",
+                  limit: limit!,
+                  observed: Math.max(limit! + 1, this.now() - started),
+                }),
+              );
+            }, remaining);
+          });
+          reply = await Promise.race([pending, deadline]);
+        }
+        const elapsedError = this.budget("navigation_ms", limit, this.now() - started);
+        if (elapsedError) {
+          void reply.dispose?.().catch(() => {});
+          throw elapsedError;
+        }
+        if ([301, 302, 303, 307, 308].includes(reply.status) && reply.location) {
+          current = new URL(reply.location, current).href;
+          const disposal = reply.dispose?.();
+          if (disposal) await (deadline ? Promise.race([disposal, deadline]) : disposal);
+        } else return reply.value;
       } catch (error) {
         if (limit !== undefined && this.now() - started >= limit)
           throw new PolicyError({
@@ -252,11 +293,9 @@ export class SitePolicy {
             observed: Math.max(limit + 1, this.now() - started),
           });
         throw error;
+      } finally {
+        clearTimeout(timer);
       }
-      if ([301, 302, 303, 307, 308].includes(reply.status) && reply.location) {
-        current = new URL(reply.location, current).href;
-        await reply.dispose?.();
-      } else return reply.value;
     }
   }
   takePending() {
@@ -297,14 +336,15 @@ export class SitePolicy {
 
   private async update(session: CDPSession) {
     const urls = this.patterns();
-    const urlPatterns = urls.flatMap((pattern) =>
-      ["http", "https"].map((scheme) => ({
-        urlPattern: pattern
-          .replace(/^\*/, scheme)
-          .replace(/\[[^\]]+\]/g, (host) => host.replace(/:/g, "\\:")),
-        block: true,
-      })),
-    );
+    // Network URLPattern cannot deny IPv6 hosts. Keep their route and Fetch guards.
+    const urlPatterns = urls
+      .filter((pattern) => !pattern.startsWith("*://["))
+      .flatMap((pattern) =>
+        ["http", "https"].map((scheme) => ({
+          urlPattern: pattern.replace(/^\*/, scheme),
+          block: true,
+        })),
+      );
     await session.send("Network.setBlockedURLs", { urlPatterns });
     if (urls.length)
       await session.send("Fetch.enable", {
