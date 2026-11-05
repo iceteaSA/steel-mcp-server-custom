@@ -4,7 +4,7 @@ import { createBadgeRenderer } from "./badge.js";
 export function startSigninWorker() {
   const alarmName = "steel-signin-poll";
   let socket;
-  let connecting = false;
+  let connections = Promise.resolve();
   let ping;
   let pending = [];
   let updates = Promise.resolve();
@@ -91,59 +91,67 @@ export function startSigninWorker() {
     if (!Array.isArray(requests)) throw new Error("Invalid pending request list.");
     await update(requests);
   }
-  async function connect() {
-    if (stopped || connecting || (socket && socket.readyState <= 1)) return;
-    connecting = true;
-    try {
-      const settings = await getSettings();
-      if (!settings.serverSecret) {
-        await relay("unconfigured");
-        return;
-      }
-      const origin = relayUrl(settings.serverUrl);
-      if (!(await chrome.permissions.contains({ origins: [hostPattern(origin)] }))) {
-        await relay("unconfigured");
-        return;
-      }
-      const current = new WebSocket(origin.replace(/^http/, "ws") + "/signin/events");
-      socket = current;
-      let currentPing;
-      current.onopen = () => {
-        if (socket !== current || stopped) return;
-        current.send(JSON.stringify({ secret: settings.serverSecret }));
-        void relay("connected").catch(() => {});
-        currentPing = setInterval(() => {
-          if (current.readyState === 1) current.send(JSON.stringify({ type: "keepalive" }));
-        }, 20_000);
-        ping = currentPing;
-      };
-      current.onmessage = (event) => {
+  function connect() {
+    connections = connections
+      .catch(() => {})
+      .then(async () => {
+        if (stopped) return;
         try {
-          const message = JSON.parse(event.data);
-          if (message.type === "pending" && Array.isArray(message.requests))
-            void update(message.requests).catch(() => {});
+          const settings = await getSettings();
+          if (!settings.serverUrl || !settings.serverSecret) {
+            await relay("unconfigured");
+            return;
+          }
+          const origin = relayUrl(settings.serverUrl);
+          if (!(await chrome.permissions.contains({ origins: [hostPattern(origin)] }))) {
+            clearInterval(ping);
+            socket?.close();
+            socket = undefined;
+            await relay("needs_access");
+            return;
+          }
+          if (socket && socket.readyState <= 1) return;
+          const current = new WebSocket(origin.replace(/^http/, "ws") + "/signin/events");
+          socket = current;
+          let currentPing;
+          current.onopen = () => {
+            if (socket !== current || stopped) return;
+            current.send(JSON.stringify({ secret: settings.serverSecret }));
+            void relay("connected").catch(() => {});
+            currentPing = setInterval(() => {
+              if (current.readyState === 1) current.send(JSON.stringify({ type: "keepalive" }));
+            }, 20_000);
+            ping = currentPing;
+          };
+          current.onmessage = (event) => {
+            try {
+              const message = JSON.parse(event.data);
+              if (message.type === "pending" && Array.isArray(message.requests))
+                void update(message.requests).catch(() => {});
+            } catch {
+              current.close();
+            }
+          };
+          current.onclose = () => {
+            clearInterval(currentPing);
+            if (socket !== current) return;
+            socket = undefined;
+            if (!stopped) void relay("disconnected").catch(() => {});
+          };
+          current.onerror = () => current.close();
         } catch {
-          current.close();
+          await relay("disconnected");
         }
-      };
-      current.onclose = () => {
-        clearInterval(currentPing);
-        if (socket !== current) return;
-        socket = undefined;
-        if (!stopped) void relay("disconnected").catch(() => {});
-      };
-      current.onerror = () => current.close();
-    } catch {
-      await relay("disconnected");
-    } finally {
-      connecting = false;
-    }
+      });
+    return connections;
   }
   async function start() {
     await chrome.alarms.create(alarmName, { periodInMinutes: 0.5 });
     await connect();
     await poll().catch(() => {});
   }
+  chrome.permissions.onAdded.addListener(start);
+  chrome.permissions.onRemoved.addListener(start);
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === alarmName) return Promise.all([connect(), poll().catch(() => {})]);
   });

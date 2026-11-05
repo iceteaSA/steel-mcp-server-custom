@@ -12,7 +12,8 @@ export function createBadgeRenderer(pendingCount = () => 0) {
         const results = Array.isArray(lastResults) ? lastResults : [];
         const failed = results.some((result) => !result.ok);
         const warning = results.some((result) => result.warning);
-        const down = signinRelay?.status === "disconnected";
+        const needsAccess = signinRelay?.status === "needs_access";
+        const down = signinRelay?.status === "disconnected" || needsAccess;
         const pending = pendingCount();
         const text = down
           ? "!"
@@ -27,19 +28,21 @@ export function createBadgeRenderer(pendingCount = () => 0) {
               : "";
         const color =
           down || pending ? "#805500" : failed ? "#b42318" : warning ? "#805500" : "#167044";
-        const title = down
-          ? "Steel: relay down. Requests cannot arrive."
-          : pending
-            ? `Steel: ${pending} sign-in requests pending.`
-            : failed
-              ? "Steel: push failed. Open for recovery steps."
-              : warning
-                ? "Steel: cookies pushed; storage incomplete."
-                : results.length
-                  ? "Steel: last push completed"
-                  : signinRelay?.status === "unconfigured"
-                    ? "Steel: set the relay URL and secret in Settings."
-                    : "Steel sign-in transfer";
+        const title = needsAccess
+          ? "Steel: relay access is missing. Open to grant relay access."
+          : down
+            ? "Steel: relay down. Requests cannot arrive."
+            : pending
+              ? `Steel: ${pending} sign-in requests pending.`
+              : failed
+                ? "Steel: push failed. Open for recovery steps."
+                : warning
+                  ? "Steel: cookies pushed; storage incomplete."
+                  : results.length
+                    ? "Steel: last push completed"
+                    : signinRelay?.status === "unconfigured"
+                      ? "Steel: set the relay URL and secret in Settings."
+                      : "Steel sign-in transfer";
         const next = JSON.stringify({ text, color, title });
         if (!force && next === previous) return;
         await chrome.action.setBadgeText({ text });

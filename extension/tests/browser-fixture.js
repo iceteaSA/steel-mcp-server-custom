@@ -95,7 +95,10 @@ export function mockChrome({
     cookieCount: 2,
     parents: [{ domain: "example.com", granted: false }],
   };
-  const relayOrigins = relayAccess ? ["http://localhost/*"] : [];
+  const relayOrigins = [
+    ...(relayAccess ? ["http://localhost/*"] : []),
+    ...(signinAccess ? ["https://example.com/*", "http://example.com/*"] : []),
+  ];
   const permissionListeners = [];
   globalThis.chrome = {
     storage: {
@@ -104,15 +107,16 @@ export function mockChrome({
       onChanged: { addListener: (fn) => chromeChanges.push(fn) },
     },
     permissions: {
-      contains: async ({ origins }) =>
-        signinAccess || globalThis.chromeContains(relayOrigins, origins),
+      contains: async ({ origins }) => globalThis.chromeContains(relayOrigins, origins),
       request: async (permission) => {
         record(["grant", permission]);
-        if (allow) {
+        const granted =
+          allow && globalThis.chromeContains(["http://*/*", "https://*/*"], permission.origins);
+        if (granted) {
           relayOrigins.push(...permission.origins);
           for (const listener of permissionListeners) listener(permission);
         }
-        return allow;
+        return granted;
       },
       onAdded: { addListener: (listener) => permissionListeners.push(listener) },
     },

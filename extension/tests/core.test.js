@@ -196,6 +196,14 @@ describe("explicit host permissions", () => {
 });
 
 describe("transfer boundaries", () => {
+  it("directs saved relay settings without access to the popup grant action", async () => {
+    globalThis.chrome = { permissions: { contains: async () => false } };
+    await expect(
+      relayRequest("/profiles", {
+        settings: { serverUrl: "http://localhost:3001", serverSecret: "fixture-only" },
+      }),
+    ).rejects.toThrow("Grant relay access in the popup");
+  });
   it("gives loopback Host recovery steps for a relay 403", async () => {
     globalThis.chrome = { permissions: { contains: async () => true } };
     globalThis.fetch = async () => Response.json({ error: "fixture-only" }, { status: 403 });

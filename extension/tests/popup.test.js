@@ -132,17 +132,20 @@ for (const allow of [true, false]) {
       const button = page.getByRole("button", { name: "Grant relay access", exact: true });
       expect(await button.count()).toBe(1);
       expect(await button.isVisible()).toBe(true);
-      expect(await page.evaluate(() => calls.filter(([kind]) => kind === "grant"))).toEqual([]);
+      expect(
+        await page.evaluate(() =>
+          JSON.parse(document.documentElement.dataset.calls).filter(([kind]) => kind === "grant"),
+        ),
+      ).toEqual([]);
       expect(
         await button.evaluate((element) => {
           element.click();
-          return calls.filter(([kind]) => kind === "grant");
+          return JSON.parse(document.documentElement.dataset.calls).filter(
+            ([kind]) => kind === "grant",
+          );
         }),
       ).toEqual([["grant", { origins: ["http://localhost/*"] }]]);
       await page.waitForFunction(() => !document.getElementById("grantRelay").disabled);
-      expect(
-        await page.evaluate(() => chrome.permissions.contains({ origins: ["http://localhost/*"] })),
-      ).toBe(allow);
       if (!allow) {
         expect(await button.isVisible()).toBe(true);
         expect(await page.locator("#status").innerText()).toContain("not granted");

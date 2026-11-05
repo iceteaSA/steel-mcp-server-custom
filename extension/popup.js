@@ -1,5 +1,7 @@
 import {
   getSettings,
+  relayUrl,
+  hostPattern,
   validProfile,
   sitePatterns,
   domainPatterns,
@@ -14,6 +16,7 @@ let sites = [];
 const selected = new Set();
 let connected = false;
 let busy = false;
+let relayServerUrl;
 
 function status(text, error = false) {
   $("status").textContent = text;
@@ -21,6 +24,8 @@ function status(text, error = false) {
 }
 function renderRelayState(state) {
   const down = state?.status === "disconnected";
+  const needsAccess = state?.status === "needs_access";
+  $("grantRelay").hidden = !needsAccess;
   const time = Number.isFinite(state?.since)
     ? new Date(state.since).toLocaleTimeString([], {
         hour: "2-digit",
@@ -30,12 +35,14 @@ function renderRelayState(state) {
     : "unknown";
   $("relayState").textContent = down
     ? `Relay down since ${time} — requests cannot arrive`
-    : state?.status === "unconfigured"
-      ? "Set the relay URL and secret in Settings"
-      : state?.status === "connected"
-        ? "Relay connected"
-        : "Checking sign-in relay…";
-  $("relayState").className = `notice ${down ? "error" : "muted"}`;
+    : needsAccess
+      ? "Relay access is missing — grant relay access to connect"
+      : state?.status === "unconfigured"
+        ? "Set the relay URL and secret in Settings"
+        : state?.status === "connected"
+          ? "Relay connected"
+          : "Checking sign-in relay…";
+  $("relayState").className = `notice ${down || needsAccess ? "error" : "muted"}`;
 }
 function destination() {
   return validProfile($("profilePicker").value || $("profileName").value.trim());
@@ -234,6 +241,19 @@ async function push(items) {
   }
 }
 
+$("grantRelay").addEventListener("click", async () => {
+  $("grantRelay").disabled = true;
+  try {
+    const origins = [hostPattern(relayUrl(relayServerUrl))];
+    if (!(await chrome.permissions.request({ origins })))
+      throw new Error("Relay access was not granted. Grant relay access to connect.");
+    await loadProfiles();
+  } catch (error) {
+    status(error.message, true);
+  } finally {
+    $("grantRelay").disabled = false;
+  }
+});
 $("grantSite").addEventListener("click", async () => {
   try {
     if (!site) return;
@@ -325,12 +345,14 @@ $("pinSite").addEventListener("click", async () => {
   }
 });
 chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === "local" && changes.serverUrl) relayServerUrl = changes.serverUrl.newValue;
   if (area === "local" && (changes.lastResults || changes.lastSync)) void loadResults();
   if (area === "session" && changes.signinRelay) renderRelayState(changes.signinRelay.newValue);
 });
 
 async function init() {
   const settings = await getSettings();
+  relayServerUrl = settings.serverUrl;
   $("profileName").value = settings.profileName;
   $("includeStorage").checked = settings.includeStorage;
   renderRelayState((await chrome.storage.session.get("signinRelay")).signinRelay);

@@ -95,7 +95,7 @@ export async function relayRequest(route, { method = "GET", body, settings } = {
   if (!settings.serverSecret) throw new Error("Open Settings and save the relay secret first.");
   const origin = relayUrl(settings.serverUrl);
   if (!(await chrome.permissions.contains({ origins: [hostPattern(origin)] }))) {
-    throw new Error("Open Settings and save the relay URL to grant connection access.");
+    throw new Error("Relay access is missing. Click Grant relay access in the popup to connect.");
   }
   let response;
   try {
