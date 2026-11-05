@@ -13,6 +13,7 @@ import {
   validateCookies,
   validateUrlPattern,
 } from "../helpers.js";
+import { assertNotReservedStore } from "../reserved-stores.js";
 import { withBackgroundTab, writeToFile } from "../utils.js";
 import type { ToolRegistrar } from "./shared.js";
 import { tabTarget, tabTargetForce } from "./shared.js";
@@ -319,10 +320,11 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
     handler: async ({ url, outputPath, timeout = 30000, forceFetch = false, tabId: _tabId }) => {
       // Validate outputPath up-front so we fail fast (before the browser does
       // the download) when the destination escapes OUTPUT_ROOT.
-      const resolveSavePath = async (suggested: string): Promise<string> =>
-        outputPath === undefined
-          ? path.join(env.OUTPUT_DIR, suggested)
-          : await assertInsideRoot(outputPath, env.OUTPUT_ROOT, "outputPath");
+      const resolveSavePath = async (suggested: string): Promise<string> => {
+        const candidate = outputPath ?? path.join(env.OUTPUT_DIR, suggested);
+        await assertNotReservedStore(candidate, env);
+        return await assertInsideRoot(candidate, env.OUTPUT_ROOT, "outputPath");
+      };
 
       const saveViaFetch = async (via: string): Promise<string> => {
         const ctx = mgr.context!;

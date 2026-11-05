@@ -3,6 +3,7 @@ import { clipText } from "../page-output.js";
 
 import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
+import { assertNotReservedStore } from "../reserved-stores.js";
 import { afterAction, actionFeedback } from "../utils.js";
 import { awaitCaptcha, formatCaptchaResult } from "../captcha.js";
 import {
@@ -819,6 +820,7 @@ Errors: missing file paths, path escapes UPLOAD_ROOT, selector timeout, element 
         // disable (escape hatch for trusted operators).
         const escape: string[] = [];
         for (const f of files as string[]) {
+          await assertNotReservedStore(f, env, "read");
           try {
             await assertInsideRoot(f, env.UPLOAD_ROOT, "upload path");
           } catch {

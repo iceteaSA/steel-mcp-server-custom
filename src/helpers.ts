@@ -884,7 +884,7 @@ export async function assertInsideRoot(
   label: string,
 ): Promise<string> {
   if (containmentDisabled(root)) return p;
-  const resolvedRoot = await fs.realpath(root!);
+  const resolvedRoot = await safeRealpath(root!);
   const resolved = await safeRealpath(p);
   // Append path.sep to root so /foo doesn't match /foobar.
   const rootWithSep = resolvedRoot.endsWith(path.sep) ? resolvedRoot : resolvedRoot + path.sep;
