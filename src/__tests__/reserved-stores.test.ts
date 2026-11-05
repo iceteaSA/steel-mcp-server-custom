@@ -88,42 +88,62 @@ test("default output accepts a nested OUTPUT_DIR inside a different OUTPUT_ROOT"
     const file = await writeToFile("ordinary", "default.txt", env);
     expect(file).toBe(join(output, "default.txt"));
     expect(await readFile(file, "utf8")).toBe("ordinary");
-    await expect(writeToFile("escape", "unused", env, join(root, "..", "escape.txt"))).rejects.toThrow("escapes");
-  } finally { await rm(root, { recursive: true, force: true }); }
+    await expect(
+      writeToFile("escape", "unused", env, join(root, "..", "escape.txt")),
+    ).rejects.toThrow("escapes");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("a root PROFILES_DIR reserves every descendant", async () => {
   const root = await mkdtemp(join(tmpdir(), "root-profiles-"));
   try {
-    await expect(assertNotReservedStore(join(root, "new.txt"), { OUTPUT_DIR: root, PROFILES_DIR: "/" })).rejects.toThrow("reserved_store");
-  } finally { await rm(root, { recursive: true, force: true }); }
+    await expect(
+      assertNotReservedStore(join(root, "new.txt"), { OUTPUT_DIR: root, PROFILES_DIR: "/" }),
+    ).rejects.toThrow("reserved_store");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("parent replacement after output validation cannot overwrite server state", async () => {
   const root = await mkdtemp(join(tmpdir(), "output-race-"));
   const output = join(root, "out");
   const profiles = join(root, "profiles");
-  const env = EnvSchema.parse({ BROWSER_MODE: "local", OUTPUT_DIR: output, PROFILES_DIR: profiles, OUTPUT_ROOT: "*" });
+  const env = EnvSchema.parse({
+    BROWSER_MODE: "local",
+    OUTPUT_DIR: output,
+    PROFILES_DIR: profiles,
+    OUTPUT_ROOT: "*",
+  });
   const mkdir = fs.mkdir.bind(fs);
   let swapped = false;
   try {
     await mkdir(output);
     await mkdir(profiles);
     await writeFile(join(profiles, "saved.json"), "SERVER_ONLY_CANARY");
-    const spy = spyOn(fs, "mkdir").mockImplementation(async (...args: Parameters<typeof fs.mkdir>) => {
-      await mkdir(...args);
-      if (!swapped && args[0] === output) {
-        swapped = true;
-        await fs.rename(output, join(root, "original"));
-        await symlink(profiles, output);
-      }
-      return undefined;
-    });
-    try { await writeToFile("untrusted", "saved.json", env).catch(() => {}); }
-    finally { spy.mockRestore(); }
+    const spy = spyOn(fs, "mkdir").mockImplementation(
+      async (...args: Parameters<typeof fs.mkdir>) => {
+        await mkdir(...args);
+        if (!swapped && args[0] === output) {
+          swapped = true;
+          await fs.rename(output, join(root, "original"));
+          await symlink(profiles, output);
+        }
+        return undefined;
+      },
+    );
+    try {
+      await writeToFile("untrusted", "saved.json", env).catch(() => {});
+    } finally {
+      spy.mockRestore();
+    }
     expect(swapped).toBe(true);
     expect(await readFile(join(profiles, "saved.json"), "utf8")).toBe("SERVER_ONLY_CANARY");
-  } finally { await rm(root, { recursive: true, force: true }); }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("output writes fail closed when descriptor paths are unavailable", async () => {
@@ -134,7 +154,86 @@ test("output writes fail closed when descriptor paths are unavailable", async ()
     return access(file, mode);
   });
   try {
-    await expect(writeToFile("untrusted", "ordinary.txt", EnvSchema.parse({ BROWSER_MODE: "local", OUTPUT_DIR: root }))).rejects.toThrow("descriptor");
+    await expect(
+      writeToFile(
+        "untrusted",
+        "ordinary.txt",
+        EnvSchema.parse({ BROWSER_MODE: "local", OUTPUT_DIR: root }),
+      ),
+    ).rejects.toThrow("descriptor");
     expect(await Bun.file(join(root, "ordinary.txt")).exists()).toBe(false);
-  } finally { spy.mockRestore(); await rm(root, { recursive: true, force: true }); }
+  } finally {
+    spy.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
 });
+
+for (const window of ["before directory open", "after directory open", "before leaf open"]) {
+  test(`output stays bound to the checked directory ${window}`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "output-fd-race-"));
+    const output = join(root, "out");
+    const profiles = join(root, "profiles");
+    const original = join(root, "original");
+    const env = EnvSchema.parse({
+      BROWSER_MODE: "local",
+      OUTPUT_DIR: output,
+      PROFILES_DIR: profiles,
+      OUTPUT_ROOT: "*",
+    });
+    const open = fs.open.bind(fs);
+    let swapped = false;
+    try {
+      await mkdir(output);
+      await mkdir(profiles);
+      await writeFile(join(output, "ordinary.txt"), "OLD_OUTPUT");
+      await writeFile(join(profiles, "ordinary.txt"), "SERVER_ONLY_CANARY");
+      const spy = spyOn(fs, "open").mockImplementation(
+        async (...args: Parameters<typeof fs.open>) => {
+          if (!swapped && args[0] === output && window !== "before leaf open") {
+            swapped = true;
+            if (window === "before directory open") {
+              await fs.rename(output, original);
+              await mkdir(output);
+              return open(...args);
+            }
+            const handle = await open(...args);
+            await fs.rename(output, original);
+            await symlink(profiles, output);
+            return handle;
+          }
+          if (
+            !swapped &&
+            window === "before leaf open" &&
+            String(args[0]).startsWith("/proc/self/fd/") &&
+            String(args[0]).endsWith("/ordinary.txt")
+          ) {
+            swapped = true;
+            await fs.unlink(join(output, "ordinary.txt"));
+            await link(join(profiles, "ordinary.txt"), join(output, "ordinary.txt"));
+          }
+          return open(...args);
+        },
+      );
+      let rejected = false;
+      try {
+        await writeToFile("untrusted", "ordinary.txt", env);
+      } catch {
+        rejected = true;
+      } finally {
+        spy.mockRestore();
+      }
+      expect(swapped).toBe(true);
+      expect(await readFile(join(profiles, "ordinary.txt"), "utf8")).toBe("SERVER_ONLY_CANARY");
+      if (window === "after directory open") {
+        expect(rejected).toBe(false);
+        expect(await readFile(join(original, "ordinary.txt"), "utf8")).toBe("untrusted");
+      } else {
+        expect(rejected).toBe(true);
+        if (window === "before directory open")
+          expect(await Bun.file(join(output, "ordinary.txt")).exists()).toBe(false);
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}

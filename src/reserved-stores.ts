@@ -30,7 +30,10 @@ export async function writeReservedSafeOutput(
   await assertInsideRoot(resolved, env.OUTPUT_ROOT, "outputPath");
   const directory = path.dirname(resolved);
   const checked = await fs.lstat(directory);
-  const parent = await fs.open(directory, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+  const parent = await fs.open(
+    directory,
+    constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW,
+  );
   try {
     const opened = await parent.stat();
     if (!opened.isDirectory() || opened.dev !== checked.dev || opened.ino !== checked.ino)
@@ -38,17 +41,26 @@ export async function writeReservedSafeOutput(
     const anchored = `/proc/self/fd/${parent.fd}/${path.basename(resolved)}`;
     await assertNotReservedStore(anchored, env);
     await assertInsideRoot(anchored, env.OUTPUT_ROOT, "outputPath");
-    const leaf = await fs.open(anchored, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+    const leaf = await fs.open(
+      anchored,
+      constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+      0o600,
+    );
     try {
-      if (!(await leaf.stat()).isFile()) throw new Error("reserved_store: output must be a regular file.");
+      if (!(await leaf.stat()).isFile())
+        throw new Error("reserved_store: output must be a regular file.");
       // Check the opened inode before truncation. A leaf can change after its path check.
       await assertNotReservedStore(`/proc/self/fd/${leaf.fd}`, env);
       await assertInsideRoot(`/proc/self/fd/${leaf.fd}`, env.OUTPUT_ROOT, "outputPath");
       await leaf.truncate(0);
       if (typeof data === "string" || Buffer.isBuffer(data)) await leaf.writeFile(data);
       else for await (const chunk of data) await leaf.writeFile(chunk);
-    } finally { await leaf.close(); }
-  } finally { await parent.close(); }
+    } finally {
+      await leaf.close();
+    }
+  } finally {
+    await parent.close();
+  }
 }
 
 async function metadata(file: string) {

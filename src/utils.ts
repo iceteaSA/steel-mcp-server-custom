@@ -16,7 +16,11 @@ import {
   truncateAtLine,
 } from "./snapshot.js";
 import { assertInsideRoot } from "./helpers.js";
-import { assertNotReservedStore, writeReservedSafeOutput, type ReservedStoreEnv } from "./reserved-stores.js";
+import {
+  assertNotReservedStore,
+  writeReservedSafeOutput,
+  type ReservedStoreEnv,
+} from "./reserved-stores.js";
 
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
