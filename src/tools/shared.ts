@@ -429,27 +429,47 @@ export async function execFillField(
     kind = detectFieldKind(info.tag, info.type);
   }
 
+  const locator = ctx.locator(sel);
+  if (kind === "select" || kind === "selectLabel" || kind === "selectIndex") {
+    const index = parseInt(opts.value, 10);
+    if (kind === "selectIndex" && Number.isNaN(index)) {
+      throw new Error(`selectIndex expects numeric value, got "${opts.value}"`);
+    }
+    const found = await locator.evaluate(
+      (element, choice) => {
+        if (!(element instanceof HTMLSelectElement)) throw new Error("Element is not a select");
+        return Array.from(element.options).some((option, i) =>
+          choice.kind === "selectIndex" ? i === choice.index :
+          choice.kind === "selectLabel" ? option.label === choice.value : option.value === choice.value,
+        );
+      },
+      { kind, value: opts.value, index },
+      { timeout },
+    );
+    if (!found) throw new Error(`Option not found: "${opts.value}" in ${sel}`);
+  }
+
   switch (kind) {
     case "select":
-      await ctx.locator(sel).selectOption(opts.value, { timeout });
+      await locator.selectOption(opts.value, { timeout });
       break;
     case "selectLabel":
-      await ctx.locator(sel).selectOption({ label: opts.value }, { timeout });
+      await locator.selectOption({ label: opts.value }, { timeout });
       break;
     case "selectIndex": {
       const idx = parseInt(opts.value, 10);
       if (Number.isNaN(idx)) {
         throw new Error(`selectIndex expects numeric value, got "${opts.value}"`);
       }
-      await ctx.locator(sel).selectOption({ index: idx }, { timeout });
+      await locator.selectOption({ index: idx }, { timeout });
       break;
     }
     case "check": {
       const intent = interpretCheckboxValue(opts.value);
       if (intent === "check") {
-        await ctx.locator(sel).check({ timeout });
+        await locator.check({ timeout });
       } else if (intent === "uncheck") {
-        await ctx.locator(sel).uncheck({ timeout });
+        await locator.uncheck({ timeout });
       } else {
         const fullSel = buildRadioSelector(sel, opts.value);
         await ctx.locator(fullSel).check({ timeout });
@@ -462,7 +482,7 @@ export async function execFillField(
       break;
     }
     default:
-      await ctx.locator(sel).fill(opts.value, { timeout });
+      await locator.fill(opts.value, { timeout });
   }
 
   if (opts.settle !== false) {
