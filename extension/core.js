@@ -57,9 +57,19 @@ export function hostPattern(value) {
   return `${url.protocol}//${url.hostname}/*`;
 }
 
+const DNS_HOST =
+  /^(?=.{1,253}$)[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?(?:\.[a-z0-9_](?:[a-z0-9_-]{0,61}[a-z0-9_])?)*$/i;
+const IPV6_HOST = /^\[[0-9a-f:.]+\]$/i;
+
 // Chrome grants a requested pattern only when one declared optional pattern contains it.
 // The manifest declares http://*/* and https://*/*, so a "*://" request is always refused.
+// Those declared patterns also contain https://*/*: a wildcard host would ask for all sites,
+// so only one exact hostname can make a pattern.
 export function domainPatterns(hostname) {
+  if (typeof hostname !== "string" || !(DNS_HOST.test(hostname) || IPV6_HOST.test(hostname)))
+    throw new Error(
+      "The request names a host that is not one exact hostname. No access was requested.",
+    );
   return [`https://${hostname}/*`, `http://${hostname}/*`];
 }
 
@@ -275,7 +285,13 @@ export async function pushSignin(request, remember = false, useGrant = false, no
 
 export function approveSignin(request, remember = false, note) {
   // The Chrome permission API must run in the approval click, before an asynchronous read.
-  const permission = chrome.permissions.request({ origins: signinPatterns(request) });
+  let origins;
+  try {
+    origins = signinPatterns(request);
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  const permission = chrome.permissions.request({ origins });
   return Promise.resolve(permission).then((allowed) => {
     if (!allowed) throw new Error("Request site access was not granted. No data was sent.");
     return pushSignin(request, remember, false, note);

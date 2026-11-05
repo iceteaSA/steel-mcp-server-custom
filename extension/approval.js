@@ -23,7 +23,14 @@ async function preview() {
 }
 $("inspect").addEventListener("click", async () => {
   if (!request || busy || finished) return;
-  const permission = chrome.permissions.request({ origins: signinPatterns(request) });
+  let origins;
+  try {
+    origins = signinPatterns(request);
+  } catch (error) {
+    status(error.message);
+    return;
+  }
+  const permission = chrome.permissions.request({ origins });
   busy = true;
   controls();
   try {
