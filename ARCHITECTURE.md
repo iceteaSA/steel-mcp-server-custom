@@ -15,6 +15,23 @@ Compatibility mode (`STEEL_LANES=off`) keeps owner-tagged tabs and isolated cont
 Automatic and explicit closure use a bounded drain. Lane closure does not stop the shared browser or operator context.
 Caller identity is necessary for credential mutations. `list_profiles` reports active use only for the caller.
 
+## Site policy
+
+Each lane manager owns one `SitePolicy`. Compatibility contexts share the process manager's policy.
+The policy reads `config/site-deny.txt` or `STEEL_SITE_DENY_FILE` and adds the lane's `block_site` entries.
+Domain checks use the public suffix list through `tldts`, with private domains enabled.
+
+Context routes and guarded page routes check requests before the first hop. CDP `Fetch` pauses only denied document hosts to stop redirects.
+CDP `Network` denies subresources. Permitted requests stay in the browser network stack.
+Navigation wrappers give structured policy errors and stop pages above resource limits.
+
+HTTP fetch and download paths check each redirect before the next request. Their requests consume the same lane budget.
+No limit closes a different lane. Request counters use rolling windows and keep at most the configured request limit.
+
+Popup guards start after the context page event. A first redirect can contact a denied host before that event.
+The adoption check closes that popup before tab registration. The next call receives the policy error.
+The policy does not control WebSockets or service-worker redirects. Redirect budget enforcement can send one more hop before the stop command.
+
 ## Sign-in state
 
 `src/index.ts` makes one `SigninStore` for the MCP tools and HTTP server.

@@ -1,5 +1,6 @@
 import dotenv from "dotenv";
 import { z } from "zod";
+import { fileURLToPath } from "node:url";
 
 dotenv.config({ quiet: true });
 
@@ -18,6 +19,13 @@ export const EnvSchema = z
     // When set, STEEL_API_KEY is optional.
     STEEL_BASE_URL: z.string().optional(),
     STEEL_LANES: z.enum(["on", "off"]).default("on"),
+    STEEL_SITE_DENY_FILE: z
+      .string()
+      .default(fileURLToPath(new URL("../config/site-deny.txt", import.meta.url))),
+    STEEL_MAX_REDIRECTS: z.coerce.number().int().nonnegative().optional(),
+    STEEL_MAX_REQUESTS: z.coerce.number().int().positive().optional(),
+    STEEL_REQUEST_WINDOW_MS: z.coerce.number().int().positive().default(60000),
+    STEEL_NAVIGATION_TIMEOUT_MS: z.coerce.number().int().positive().optional(),
     STEEL_NTFY_TOPIC_FILE: z.string().optional(),
     LANE_IDLE_MS: z.coerce.number().int().positive().default(900000),
     LANE_DRAIN_MS: z.coerce.number().int().nonnegative().default(5000),
@@ -112,6 +120,10 @@ export const EnvSchema = z
   })
   .transform((env) => ({
     ...env,
+    STEEL_MAX_REDIRECTS: env.STEEL_MAX_REDIRECTS ?? (env.STEEL_LANES === "on" ? 20 : undefined),
+    STEEL_MAX_REQUESTS: env.STEEL_MAX_REQUESTS ?? (env.STEEL_LANES === "on" ? 2000 : undefined),
+    STEEL_NAVIGATION_TIMEOUT_MS:
+      env.STEEL_NAVIGATION_TIMEOUT_MS ?? (env.STEEL_LANES === "on" ? 120000 : undefined),
     // Derive persistent paths from OUTPUT_DIR if not explicitly set.
     PROFILES_DIR: env.PROFILES_DIR ?? `${env.OUTPUT_DIR}/profiles`,
     CREDENTIALS_FILE: env.CREDENTIALS_FILE ?? `${env.OUTPUT_DIR}/credentials.json`,

@@ -31,6 +31,7 @@ import { llmConfigured } from "../llm.js";
 
 // Tools with outputSchema (structured output).
 const JSON_TOOLS = new Set([
+  "block_site",
   "list_tabs",
   "get_links",
   "get_attrs",
@@ -217,7 +218,7 @@ describe("ALL_TOOLSETS", () => {
 // ---------------------------------------------------------------------------
 
 describe("tools/list wire-level completeness", () => {
-  it("all 41 tools have title, description, annotations; 10 have outputSchema", async () => {
+  it("all 42 tools have title, description, annotations; JSON tools have outputSchema", async () => {
     const server = new McpServer(
       { name: "test", version: "0.0.0" },
       { capabilities: { tools: {} } },
@@ -239,8 +240,7 @@ describe("tools/list wire-level completeness", () => {
     registerProfiles(register, stubMgr, stubEnv);
     registerIntercept(register, stubMgr, stubEnv);
 
-    // 41 tools total (without act/extract_ai since ACT_LLM env not set)
-    expect(toolCount()).toBe(41);
+    expect(toolCount()).toBe(42);
 
     // Create client-server pair
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -253,7 +253,7 @@ describe("tools/list wire-level completeness", () => {
     const tools = result.tools;
 
     // Exact tool count on the wire
-    expect(tools.length).toBe(41);
+    expect(tools.length).toBe(42);
 
     for (const tool of tools) {
       const name = tool.name;

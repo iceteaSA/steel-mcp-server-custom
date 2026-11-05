@@ -19,6 +19,7 @@ import { afterAction } from "../utils.js";
 import { fenceToolResult } from "../untrusted.js";
 import { LaneRuntime, type LaneOptions } from "../lanes.js";
 import type { BrowserManager } from "../manager.js";
+import { policyErrorResult } from "../site-policy.js";
 
 // Re-exported because @modelcontextprotocol/sdk 1.29 doesn't re-export
 // ToolAnnotations from the server/mcp module.
@@ -159,7 +160,12 @@ export function makeRegistrar(
         fenceToolResult(
           runtime
             ? await runtime.run(spec.name, args, extra?._meta, () => spec.handler(args))
-            : await spec.handler(args),
+            : (policyErrorResult(lanes?.manager.takePolicyError?.()) ??
+                (await (async () => {
+                  const result = await spec.handler(args);
+                  await lanes?.manager.waitForPopups?.();
+                  return policyErrorResult(lanes?.manager.takePolicyError?.()) ?? result;
+                })())),
           spec.name,
         )) as Parameters<McpServer["registerTool"]>[2],
     );

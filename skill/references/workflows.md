@@ -17,6 +17,15 @@ return await tools["steel"].go_to_url({ url: "https://example.com", readPage: tr
 - Use `Promise.allSettled` only for independent calls on separate tabs.
 - Keep the tab ID from the result and give it on each call to that page.
 
+## Site policy
+
+- Use `block_site({site, reason})` to deny a registrable domain and its subdomains in your lane.
+- Call `block_site({})` to read the shared and lane lists.
+- Do not remove an entry. Entries expire with the lane, or with the process when lanes are off.
+- On `site_blocked`, use a different site or stop. Do not bypass the deny list.
+- On `budget_exceeded`, read `budget`, `limit`, and `observed` before a new task step.
+- Do not use this policy as a network firewall. WebSockets and service-worker redirects have no complete guard.
+
 ## Sign-in requests
 
 - Call `request_signin` when a permitted task gets a sign-in page and the caller's lane does not have the necessary state.

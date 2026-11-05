@@ -6,6 +6,8 @@
 | `src/manager.ts` | Browser lifecycle, owner-tagged tabs, profiles, listeners, and recovery |
 | `src/lanes.ts` | Caller contexts, queues for each tab, and bounded closure |
 | `src/hidden-text.ts` | Read-path visibility policy and frame checks |
+| `src/site-policy.ts` | Shared and lane deny lists, HTTP routes, CDP guards, and navigation budgets |
+| `config/site-deny.txt` | Reviewed shared domains, empty by default |
 | `src/signin.ts` | Sign-in requests, grants, audit, and notifications |
 | `src/profile-store.ts` | Shared schema, queue for each file, merge, and atomic JSON writes |
 | `src/untrusted.ts` | Output fences and unsafe-control removal |

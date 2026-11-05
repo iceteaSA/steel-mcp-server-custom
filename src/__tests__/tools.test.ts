@@ -133,8 +133,9 @@ describe("non-browser tools", () => {
   it("tools/list returns expected tools with correct names", async () => {
     const r = await client.call(100, "tools/list");
     const names = r.result?.tools?.map((t) => t.name).sort() || [];
-    expect(names.length).toBe(45);
+    expect(names.length).toBe(46);
     expect(names).toEqual([
+      "block_site",
       "cancel_signin",
       "captcha_status",
       "click",
@@ -241,11 +242,11 @@ describe("non-browser tools", () => {
       const documented = [...section.matchAll(/^\| `([a-z_]+)` \|/gm)]
         .map((match) => match[1])
         .sort();
-      expect(names).toHaveLength(47);
+      expect(names).toHaveLength(48);
       expect(documented).toEqual(names);
       expect(new Set(documented).size).toBe(documented.length);
-      expect(readme).toContain("45 default, 47 with AI tools");
-      expect(readme).toContain("**48 browser tools** (50 with AI tools) in lane mode");
+      expect(readme).toContain("46 default, 48 with AI tools");
+      expect(readme).toContain("**49 browser tools** (51 with AI tools) in lane mode");
     } finally {
       allTools.kill();
     }

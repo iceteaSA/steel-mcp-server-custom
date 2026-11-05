@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add `block_site` with shared and lane deny lists and structured `site_blocked` errors.
+- Add lane budgets for requests, redirects, and document load time. Keep off-mode budgets disabled unless configured.
+
 - Refuse a first profile binding after stateful lane use with `lane_not_fresh`. Keep empty `about:blank` tabs permitted.
 - Check cookies and origin entries before binding. Keep the used mark after pages close or cookies clear. Do not clear state on refusal.
 - Use the caller's held lease for saved-file deletion. Give `profile_busy` for a different holder and `profile_lease_required` without a holder.

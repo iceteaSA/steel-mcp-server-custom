@@ -3,6 +3,7 @@ import type { BrowserManager, Env } from "../manager.js";
 import { globalWait } from "../utils.js";
 import { cleanErrorMessage } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
+import { policyErrorResult } from "../site-policy.js";
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
   // list_tabs -----------------------------------------------------------------
@@ -94,6 +95,8 @@ CONTEXT BUDGET — tab list grows with session activity. Filter with owner or pr
           structuredContent: { tabs: structured },
         };
       } catch (err) {
+        const policy = policyErrorResult(err);
+        if (policy) return policy;
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
@@ -148,6 +151,8 @@ CONTEXT BUDGET — tab list grows with session activity. Filter with owner or pr
           ],
         };
       } catch (err) {
+        const policy = policyErrorResult(err);
+        if (policy) return policy;
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }

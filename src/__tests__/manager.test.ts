@@ -20,6 +20,11 @@ import { makeRegistrar as makeMcpRegistrar } from "../tools/shared.js";
 
 /** Minimal mock env — only field required at runtime by the tab logic is TAB_IDLE_TIMEOUT_MS (0 disables sweeper). */
 const mockEnv: Env = {
+  STEEL_SITE_DENY_FILE: new URL("../../config/site-deny.txt", import.meta.url).pathname,
+  STEEL_MAX_REDIRECTS: undefined,
+  STEEL_MAX_REQUESTS: undefined,
+  STEEL_NAVIGATION_TIMEOUT_MS: undefined,
+  STEEL_REQUEST_WINDOW_MS: 60000,
   STEEL_LANES: "off",
   LANE_IDLE_MS: 900000,
   LANE_DRAIN_MS: 5000,

@@ -15,6 +15,7 @@ import { join } from "node:path";
 
 const expectedToolNames = [
   "act",
+  "block_site",
   "cancel_signin",
   "captcha_status",
   "click",
@@ -95,7 +96,7 @@ test("every tool explicitly declares all four MCP safety hints", async () => {
   await client.close();
   await server.close();
   await handle.close?.();
-  expect(tools).toHaveLength(50);
+  expect(tools).toHaveLength(51);
   expect(tools.map((tool) => tool.name).sort()).toEqual(
     [...expectedToolNames, "list_lanes", "close_lane", "use_profile"].sort(),
   );
@@ -185,7 +186,7 @@ test("annotations cover mutating modes, arbitrary page effects, and remote navig
   }
 });
 
-test("the complete 47-tool annotation policy matches every declared mode", () => {
+test("the complete 48-tool annotation policy matches every declared mode", () => {
   const readOnly = new Set([
     "signin_status",
     "captcha_status",
@@ -200,6 +201,7 @@ test("the complete 47-tool annotation policy matches every declared mode", () =>
   ]);
   const nonDestructive = new Set([...readOnly, "smoke_test", "start_browser", "request_signin"]);
   const idempotent = new Set([
+    "block_site",
     "cancel_signin",
     "signin_status",
     "captcha_status",
@@ -218,6 +220,7 @@ test("the complete 47-tool annotation policy matches every declared mode", () =>
     "wait_for",
   ]);
   const closedWorld = new Set([
+    "block_site",
     "cancel_signin",
     "signin_status",
     "close_tabs",
@@ -231,7 +234,7 @@ test("the complete 47-tool annotation policy matches every declared mode", () =>
     "stop_browser",
   ]);
   const tools = specs();
-  expect(tools).toHaveLength(47);
+  expect(tools).toHaveLength(48);
   expect(tools.map((tool) => tool.name).sort()).toEqual(expectedToolNames);
   for (const tool of tools) {
     expect(tool.annotations.readOnlyHint, tool.name).toBe(readOnly.has(tool.name));
@@ -244,6 +247,7 @@ test("the complete 47-tool annotation policy matches every declared mode", () =>
 test("all JSON-producing tools publish an output schema", () => {
   const tools = specs();
   for (const name of [
+    "block_site",
     "request_signin",
     "signin_status",
     "cancel_signin",

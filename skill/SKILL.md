@@ -11,12 +11,12 @@ description: >
 
 ## Call tools
 
-- Find the correct tool signature through Code Mode search before a call.
+- Search Code Mode for the tool signature before a call.
 - Call tools in Code Mode as `tools["steel"].<tool>({ ... })`.
-- Give native JavaScript objects as arguments. Do not apply shell quoting.
+- Give JavaScript objects, not shell-quoted arguments.
 - Await each call when its result is necessary.
-- Use parallel calls only when work can continue independently on different tabs.
-- Read [workflow instructions](references/workflows.md) for extraction, browser profiles, credentials, screenshots, and human handoff.
+- Run parallel calls only on different tabs with no dependencies.
+- Read [workflows](references/workflows.md) for extraction, `profile` use, credentials, screenshots, policy, and handoff.
 
 ```javascript
 const tab = await tools["steel"].new_tab({
@@ -34,7 +34,7 @@ return tab;
 - Use `owner` only as an optional tab name.
 - Do not use `force` across lanes. Lane mode ignores it with a NOTE.
 - Use `close_tabs` for selected tabs or `close_lane` for all tabs and storage.
-- Use `list_lanes` for caller names, ages, and tab counts, not different lanes' URLs.
+- Use `list_lanes` for callers, ages, and tab counts, not URLs.
 - On `not_in_lane`, select one of your tabs through `list_tabs`.
 - On `lane_closed`, discard previous IDs and call without `tabId` for a new lane.
 - On `lanes_full`, use `list_lanes`, then release your lane with `close_lane` before a retry.
@@ -49,7 +49,8 @@ return tab;
 - Hold the lease for `save_profile` or `delete_profile({removeSaved:true})`. Set `autosave: true` for a save before closure.
 - Use `close_lane` to clear state and release leases without a save, unless autosave is on. Delete keeps the live context and lease.
 - Send caller metadata for credential writes and deletes, even without a browser lane.
-- In legacy mode (`STEEL_LANES=off`), use unique owner labels and do not stop the shared browser.
+- With lanes off, use unique owners. Do not stop the browser.
+- Use `block_site({site, reason})` to deny a domain. On `site_blocked` or `budget_exceeded`, stop or change sites, not the policy.
 
 ## Observation and interaction
 
