@@ -14,6 +14,7 @@ import { BrowserManager } from "../manager.js";
 import { makeRegistrar, ALL_TOOLSETS } from "../tools/shared.js";
 import * as groups from "../tools/index.js";
 import * as profileCrypto from "../crypto.js";
+import { fenceDelimiters } from "../untrusted.js";
 
 async function fixture(mode = "on", overrides: Record<string, string> = {}) {
   const launchOptions = {
@@ -119,6 +120,55 @@ function tab(result: Awaited<ReturnType<Client["callTool"]>>) {
 function structured(result: Awaited<ReturnType<Client["callTool"]>>) {
   return result.structuredContent as Record<string, unknown> | undefined;
 }
+
+for (const target of ["closed", "unknown", "foreign", "operator"] as const)
+  test(`request_human preserves checkTab diagnostics for ${target} tabs`, async () => {
+    const f = await fixture();
+    try {
+      const own = tab(await f.call("a", "new_tab"));
+      let tabId = own;
+      if (target === "closed") await f.call("a", "close_tabs", { tabId: own });
+      if (target === "unknown") tabId = Number.MAX_SAFE_INTEGER;
+      if (target === "foreign") tabId = tab(await f.call("b", "new_tab"));
+      if (target === "operator") tabId = f.root.activeTabId;
+      const result = await f.call("a", "request_human", { tabId, reason: "fixture" });
+      const code = target === "closed" || target === "unknown" ? "lane_closed" : "not_in_lane";
+      const message =
+        code === "lane_closed"
+          ? "lane_closed: tab is closed or predates this MCP process. Omit tabId to open a fresh lane."
+          : target === "operator"
+            ? "not_in_lane: the tab belongs to the operator's default context."
+            : "not_in_lane: the tab is not in the caller's lane. Use list_tabs for your tabs.";
+      expect(result.isError).toBe(true);
+      expect(structured(result)).toEqual({ error: code });
+      const { open, close } = fenceDelimiters("request_human");
+      expect(result.content).toEqual([{ type: "text", text: open + message + close }]);
+      expect(f.handle.handoff!.snapshot().requests).toEqual([]);
+    } finally {
+      await f.close();
+    }
+  });
+
+test("request_human preserves unexpected checkTab failures instead of assigning a lane code", async () => {
+  const f = await fixture();
+  const failure = new Error("unexpected checkTab failure");
+  const hasTab = spyOn(f.root, "hasTab").mockImplementation(() => {
+    throw failure;
+  });
+  try {
+    const result = await f.call("a", "request_human", {
+      tabId: Number.MAX_SAFE_INTEGER,
+      reason: "fixture",
+    });
+    expect(result.isError).toBe(true);
+    expect(text(result)).toContain(failure.message);
+    expect(result.structuredContent).toBeUndefined();
+    expect(f.handle.handoff!.snapshot().requests).toEqual([]);
+  } finally {
+    hasTab.mockRestore();
+    await f.close();
+  }
+});
 
 test("long caller IDs have bounded display labels without sharing tabs with literal labels", async () => {
   const f = await fixture();
