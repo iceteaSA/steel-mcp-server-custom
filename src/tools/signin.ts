@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { ToolRegistrar, ToolDependencies } from "./shared.js";
 import type { BrowserManager, Env } from "../manager.js";
-import { NoCallerError } from "../caller.js";
+import { NoCallerError, callerKey } from "../caller.js";
 
 function result(request: SigninRequest) {
   const { id, status, site, profile, created, expires, counts, note } = request;
@@ -60,7 +60,7 @@ export function register(
 ): void {
   const getStore = () =>
     dependencies.signin?.store ?? Promise.reject(new Error("signin_unavailable"));
-  const getCaller = () => dependencies.signin?.getCaller() ?? "single-process";
+  const getCaller = () => dependencies.signin?.getCaller() ?? callerKey("single-process");
   // `signin_unknown` has only `error`, with no request metadata.
   const outputSchema = {
     id: z.string().optional(),

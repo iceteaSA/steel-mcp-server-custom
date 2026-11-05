@@ -255,7 +255,7 @@ export function makeRegistrar(
       getCaller: () =>
         runtime
           ? (runtime.getCaller() ?? "")
-          : (callerScope.getStore()?.caller ?? "single-process"),
+          : (callerScope.getStore()?.caller ?? callerKey("single-process")),
       getAgent: () => callerScope.getStore()?.agent ?? "Agent",
     };
   if (runtime) {
