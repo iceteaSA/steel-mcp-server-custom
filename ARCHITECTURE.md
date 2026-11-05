@@ -18,6 +18,9 @@ Caller identity is necessary for credential mutations. `list_profiles` reports a
 Missing callers use one `no_caller` code and text. The registrar includes a structured error only when the tool's output schema accepts it.
 With no output schema, the registrar also includes the structured error.
 
+Shared fill helpers read the selected options after selection. `fill` and `act` report each selected value, `option.label`, and index.
+If readback does not agree with the specified selection rule, the helper gives an error, not success.
+
 ## Sign-in state
 
 `src/index.ts` makes one `SigninStore` for the MCP tools and HTTP server.

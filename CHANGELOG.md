@@ -3,7 +3,8 @@
 ## Unreleased
 
 - Wait for select options until the tool timeout. On failure, report the option count and first `option.label` values with `Option not found`.
-- Keep the selected value and change-event count unchanged on select failure.
+- If a select option is unavailable, keep the selected value and change-event count unchanged.
+- Use browser selection rules for values and `option.label`. Report the selected value and `option.label`. Refuse success if readback does not agree.
 - Use checked directory descriptors for generic output and download writes. Refuse writes when Linux descriptor paths are unavailable.
 - Refuse generic writes to all descendants when `PROFILES_DIR=/`. Keep default outputs in a different `OUTPUT_ROOT` permitted.
 - Use one `no_caller` text and error code. Keep structured errors compatible with each tool's output schema.
