@@ -450,13 +450,16 @@ export async function execFillField(
           (element, choice) => {
             if (!(element instanceof HTMLSelectElement)) throw new Error("Element is not a select");
             const options = Array.from(element.options);
+            const normalizeLabel = (label: string) =>
+              label.replace(/[\u200b\u00ad]/g, "").trim().replace(/\s+/g, " ");
             return {
               found: options.some((option, i) =>
                 choice.kind === "selectIndex"
                   ? i === choice.index
                   : choice.kind === "selectLabel"
-                    ? option.label === choice.value
-                    : option.value === choice.value,
+                    ? normalizeLabel(option.label) === normalizeLabel(choice.value)
+                    : option.value === choice.value ||
+                      normalizeLabel(option.label) === normalizeLabel(choice.value),
               ),
               count: options.length,
               labels: options.slice(0, 5).map((option) => option.label.slice(0, 120)),
