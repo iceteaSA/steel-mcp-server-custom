@@ -12,6 +12,7 @@ import {
 } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
 import { tabTargetForce } from "./shared.js";
+import { policyErrorResult } from "../site-policy.js";
 
 // Module-level ErrorTracker instance — persists across tool calls.
 const errorTracker = new ErrorTracker();
@@ -22,6 +23,46 @@ const errorTracker = new ErrorTracker();
 const mediaBlockedTabs = new WeakSet<Page>();
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
+  register({
+    name: "block_site",
+    title: "Block Site",
+    toolset: "core",
+    description:
+      "Add a registrable domain to your lane deny list. This also blocks its subdomains. Entries cannot be removed and expire with the lane. In lanes-off mode the list belongs to the process. Omit site to list the effective shared and lane entries. A site requires a reason.",
+    inputSchema: {
+      site: z.string().min(1).max(2048).optional(),
+      reason: z.string().trim().min(1).max(500).optional(),
+    },
+    outputSchema: {
+      sites: z.array(
+        z.object({
+          domain: z.string(),
+          source: z.enum(["shared", "lane"]),
+          reason: z.string().optional(),
+        }),
+      ),
+    },
+    annotations: {
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+    handler: async ({ site, reason }) => {
+      try {
+        const result = await mgr.blockSite(site, reason);
+        return {
+          structuredContent: result,
+          content: [{ type: "text", text: JSON.stringify(result) }],
+        };
+      } catch (error) {
+        return {
+          isError: true,
+          content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+        };
+      }
+    },
+  });
   // go_to_url -----------------------------------------------------------------
   register({
     name: "go_to_url",
@@ -94,7 +135,9 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         let mediaNote = "";
         const alreadyBlocked = mediaBlockedTabs.has(page);
         if (disableMedia && !alreadyBlocked) {
-          await page.route("**/*", (route) => {
+          const guardPolicy = mgr.guardPolicy;
+          await page.route("**/*", async (route) => {
+            if (await guardPolicy?.call(mgr, route)) return;
             const type = route.request().resourceType();
             if (["image", "font", "stylesheet", "media"].includes(type)) {
               return route.abort();
@@ -105,6 +148,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
           mediaNote = "\nMedia blocking enabled.";
         } else if (!disableMedia && alreadyBlocked) {
           await page.unrouteAll({ behavior: "ignoreErrors" });
+          await mgr.restorePolicyRoute?.(page);
           mediaBlockedTabs.delete(page);
           if (env.OPTIMIZE_BANDWIDTH) {
             mediaNote =
@@ -114,7 +158,8 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
           }
         }
 
-        await page.goto(url, { waitUntil: "domcontentloaded" });
+        const navigate = () => page.goto(url, { waitUntil: "domcontentloaded" });
+        await (mgr.navigate ? mgr.navigate(page, navigate) : navigate());
         await afterAction(page, env);
 
         let finalUrl = page.url();
@@ -221,6 +266,8 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
           ],
         };
       } catch (err) {
+        const policy = policyErrorResult(err);
+        if (policy) return policy;
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }
@@ -253,11 +300,14 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         const beforeUrl = page.url();
         let navResult: Awaited<ReturnType<typeof page.goBack>> | null = null;
         if (action === "back") {
-          navResult = await page.goBack({ waitUntil: "commit", timeout: 10000 });
+          const navigate = () => page.goBack({ waitUntil: "commit", timeout: 10000 });
+          navResult = await (mgr.navigate ? mgr.navigate(page, navigate) : navigate());
         } else if (action === "forward") {
-          navResult = await page.goForward({ waitUntil: "commit", timeout: 10000 });
+          const navigate = () => page.goForward({ waitUntil: "commit", timeout: 10000 });
+          navResult = await (mgr.navigate ? mgr.navigate(page, navigate) : navigate());
         } else {
-          await page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
+          const navigate = () => page.reload({ waitUntil: "domcontentloaded", timeout: 15000 });
+          await (mgr.navigate ? mgr.navigate(page, navigate) : navigate());
         }
         await afterAction(page, env);
         const afterUrl = page.url();
@@ -293,6 +343,8 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
           ],
         };
       } catch (err) {
+        const policy = policyErrorResult(err);
+        if (policy) return policy;
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }

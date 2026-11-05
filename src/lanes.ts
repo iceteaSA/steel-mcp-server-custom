@@ -4,6 +4,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { Page } from "patchright";
 import { BrowserManager, type Env } from "./manager.js";
 import { NoCallerError } from "./caller.js";
+import { policyErrorResult } from "./site-policy.js";
 
 // A random process offset reduces restart collisions. Leave half the safe range for growth.
 let nextTabId = Number(randomBytes(8).readBigUInt64BE() >> 12n);
@@ -33,6 +34,7 @@ export interface LaneOptions {
 const STATELESS = new Set(["list_profiles", "credentials", "captcha_status"]);
 const SIGNIN_TOOLS = new Set(["request_signin", "signin_status", "cancel_signin"]);
 const CONTEXT_TOOLS = new Set([
+  "block_site",
   "new_tab",
   "use_profile",
   "list_tabs",
@@ -49,6 +51,7 @@ const CONTEXT_TOOLS = new Set([
 ]);
 
 const FRESH_READS = new Set([
+  "block_site",
   "list_tabs",
   "start_browser",
   "close_tabs",
@@ -595,6 +598,8 @@ export class LaneRuntime {
           name === "delete_profile" ||
           (name === "new_tab" && typeof args.profile === "string");
         return this.queue(lane, profileMutation ? [0, ...ids] : ids, async () => {
+          const pending = policyErrorResult(lane.manager.takePolicyError?.());
+          if (pending) return pending;
           if (lane.manager.isLaneClosed)
             throw new Error("lane_closed: context closed while the call was queued.");
           const profileName = name === "new_tab" ? args.profile : args.name;
@@ -647,7 +652,8 @@ export class LaneRuntime {
               const lease = this.leases.get(String(profileName));
               if (lease?.lane === lane) lease.autosave = false;
             }
-            return result;
+            await lane.manager.waitForPopups?.();
+            return policyErrorResult(lane.manager.takePolicyError?.()) ?? result;
           } catch (error) {
             if (acquired) {
               this.releaseLease(String(profileName), lane, acquired);

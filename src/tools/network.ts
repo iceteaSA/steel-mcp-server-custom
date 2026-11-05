@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import { clipText } from "../page-output.js";
 import path from "path";
 import { z } from "zod";
+import { policyErrorResult } from "../site-policy.js";
 import type { BrowserContext } from "patchright";
 import type { BrowserManager, Env, NetworkEvent } from "../manager.js";
 import {
@@ -328,7 +329,22 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
 
       const saveViaFetch = async (via: string): Promise<string> => {
         const ctx = mgr.context!;
-        const resp = await ctx.request.fetch(url, { timeout: timeout + 5000 });
+        const policy = mgr.getSitePolicy?.();
+        const resp =
+          policy && (await policy.enabled())
+            ? await policy.http(url, async (current, remaining) => {
+                const value = await ctx.request.fetch(current, {
+                  maxRedirects: 0,
+                  timeout: Math.min(timeout + 5000, remaining ?? Infinity),
+                });
+                return {
+                  value,
+                  status: value.status(),
+                  location: value.headers()["location"],
+                  dispose: () => value.dispose(),
+                };
+              })
+            : await ctx.request.fetch(url, { timeout: timeout + 5000 });
         if (!resp.ok()) {
           throw new Error(`fetch fallback HTTP ${resp.status()} ${resp.statusText()}`);
         }
@@ -357,16 +373,18 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
           try {
             const [download] = await Promise.all([
               page.waitForEvent("download", { timeout }),
-              page.goto(url).catch((err) => {
-                const msg = (err as Error).message;
-                if (
-                  !/ERR_ABORTED|net::ERR_ABORTED|Download is starting|Cannot load download URL/i.test(
-                    msg,
-                  )
-                ) {
-                  throw err;
-                }
-              }),
+              (mgr.navigate ? mgr.navigate(page, () => page.goto(url)) : page.goto(url)).catch(
+                (err) => {
+                  const msg = (err as Error).message;
+                  if (
+                    !/ERR_ABORTED|net::ERR_ABORTED|Download is starting|Cannot load download URL/i.test(
+                      msg,
+                    )
+                  ) {
+                    throw err;
+                  }
+                },
+              ),
             ]);
             const suggested = download.suggestedFilename() || deriveDownloadFilename(url);
             const savePath = await resolveSavePath(suggested);
@@ -398,6 +416,8 @@ CONTEXT BUDGET — default cap: 50 cookies. Set limit=0 for all.`,
 
         return { content: [{ type: "text", text: resultText }] };
       } catch (err) {
+        const policy = policyErrorResult(err);
+        if (policy) return policy;
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }

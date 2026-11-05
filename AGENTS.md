@@ -69,8 +69,8 @@ node dist/index.cjs
 cp skill/SKILL.md ~/.agents/skills/steel-browser/SKILL.md
 ```
 
-The artifact runs under `node` on the LXC — bun is not needed at runtime. The `skill/`
-directory holds the agent-facing usage skill — keep it in sync with tool changes.
+Ship `config/site-deny.txt` or set `STEEL_SITE_DENY_FILE`. See README for limits.
+Run the artifact with `node`. Keep `skill/` in sync with tool changes.
 
 **Build — patchright is external.** `bun build --outdir dist --target=node --format=cjs
 --external patchright --external patchright-core` bundles all JS deps EXCEPT patchright
@@ -136,7 +136,7 @@ context-budget-constrained agents:
 
 | Group    | Includes                                                          |
 |----------|-------------------------------------------------------------------|
-| `core`   | Always active. `go_to_url`, `history`, `click`, `click_at`, `fill`, `scroll`, `wait_for`, `press_key`, `handle_dialog`, `upload_file`, `snapshot`, `page_state`, `get_page_text`, `mouse_move`, `mouse_down`, `mouse_up`, `start_browser`, `stop_browser`, `solve_captcha`. Lane mode adds `list_lanes` and `close_lane`. |
+| `core`   | Always active. `block_site`, `go_to_url`, `history`, `click`, `click_at`, `fill`, `scroll`, `wait_for`, `press_key`, `handle_dialog`, `upload_file`, `snapshot`, `page_state`, `get_page_text`, `mouse_move`, `mouse_down`, `mouse_up`, `start_browser`, `stop_browser`, `solve_captcha`. Lane mode adds `list_lanes` and `close_lane`. |
 | `tabs`   | `list_tabs`, `new_tab`, `close_tabs`.                              |
 | `extract`| `get_links`, `get_attrs`, `evaluate`, `extract`, `fetch_urls`.     |
 | `media`  | `get_screenshot`, `download_file`.                                 |
@@ -149,8 +149,8 @@ context-budget-constrained agents:
 Precedence: `--toolsets a,b` CLI flag > `TOOLSETS` env var > all toolsets.
 Unknown names fail startup with a list of valid values.
 
-All 9 toolsets are active by default. Lane mode has 48 tools, or 50 with AI tools.
-Compatibility mode (`STEEL_LANES=off`) has 45 tools, or 47 with AI tools.
+All 9 toolsets are active by default. Lane mode has 49 tools, or 51 with AI tools.
+Compatibility mode (`STEEL_LANES=off`) has 46 tools, or 48 with AI tools.
 The `ai` toolset operates only with `ACT_LLM_BASE_URL` and `ACT_LLM_MODEL`.
 Without these values, the server has no `act` or `extract_ai`, with or without `--toolsets=ai`.
 

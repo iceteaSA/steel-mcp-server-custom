@@ -8,7 +8,7 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 
 ## Features
 
-- **48 browser tools** (50 with AI tools) in lane mode. Each caller has different tabs and browser storage. `STEEL_LANES=off` uses the legacy tool set.
+- **49 browser tools** (51 with AI tools) in lane mode. Each caller has different tabs and browser storage. `STEEL_LANES=off` uses the legacy tool set.
 - **Patchright browser engine** — drops the `Runtime.enable` CDP fingerprint that vanilla Playwright leaks; native binary stays compatible with all standard Playwright page APIs
 - **Snapshot-first paradigm** — `snapshot` returns an accessibility tree with stable `[ref=eN]` tokens; refs feed `click`/`fill`/`scroll`/`get_attrs`/`extract`/`press_key` directly without re-discovering selectors
 - **MCP 2025 best practices** — `server.registerTool` with `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` annotations and `outputSchema` → `structuredContent` on JSON tools
@@ -83,6 +83,11 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 | `STEEL_API_KEY` | — | Required for Steel Cloud (when `STEEL_BASE_URL` is not set) |
 | `STEEL_BASE_URL` | Steel Cloud | Self-hosted Steel URL (e.g. `http://your-steel-host:3000`) |
 | `STEEL_LANES` | `on` | Isolated caller lanes. Set `off` for the legacy shared context, owner guard, and `force` override. |
+| `STEEL_SITE_DENY_FILE` | `config/site-deny.txt` | Reviewed shared deny list. One registrable domain or IP literal on each line. |
+| `STEEL_MAX_REDIRECTS` | `20` in lanes | Maximum redirects for each navigation. Off-mode default: disabled. |
+| `STEEL_MAX_REQUESTS` | `2000` in lanes | Maximum requests for each rolling window in each lane. Off-mode default: disabled. |
+| `STEEL_REQUEST_WINDOW_MS` | `60000` | Request window in milliseconds. |
+| `STEEL_NAVIGATION_TIMEOUT_MS` | `120000` in lanes | Navigation wall time in milliseconds. Off-mode default: disabled. |
 | `LANE_IDLE_MS` | `900000` | Close an idle lane after 15 minutes. Active calls keep the lane open. |
 | `LANE_DRAIN_MS` | `5000` | Maximum drain time in ms before context closure. |
 | `LANE_MAX` | `8` | Maximum number of open or pending lanes. |
@@ -126,6 +131,43 @@ Set `OUTPUT_ROOT=*` to disable root containment, not server-store protection. Ge
 The writer checks the opened directory and file before it changes file contents. Download output uses the same writer.
 
 ## Agent lanes
+
+### Site policy
+
+`block_site({site, reason})` adds a registrable domain and all its subdomains to the caller's deny list.
+The agent cannot remove entries. They expire with the lane. With lanes off, entries belong to the process.
+
+Use `block_site({})` for the shared and lane entries. The shared file ships with comments only.
+Ship `config/site-deny.txt` with the built package, or set `STEEL_SITE_DENY_FILE` to a reviewed file.
+
+The process validates the file at startup, before browser allocation. Each lane uses that cached list.
+An unreadable or malformed file gives `site_policy_invalid`. Restart the process to apply shared-file changes.
+
+The file must be a regular file, not a `symlink`, FIFO, or directory.
+IPv4 and bracketed IPv6 entries deny only that address. Decimal, hexadecimal, and octal URLs use the same canonical address.
+The URL parser normalizes Unicode entries to ASCII. One bad entry invalidates the complete file.
+
+Context routes and page CDP guards deny HTTP requests without a proxy fetch or a change to the browser's TLS identity.
+Navigation errors contain `site_blocked`, `domain`, and `source` (`shared` or `lane`).
+Budget errors contain `budget_exceeded`, `budget`, `limit`, and `observed`.
+
+The request window counts requests when they start, not when they finish. Long-poll time does not consume more request slots.
+Navigation wall time includes document load, not the subsequent CAPTCHA wait or extraction.
+The HTTP fetch and download paths check each redirect before the next request.
+
+A manual HTTP chain with more than 20 redirects gives `redirect_loop: more than 20 redirects`.
+This internal limit is different from configured budgets. A lower configured redirect budget gives `budget_exceeded`.
+
+A popup's first redirect can send one request to a denied host before its CDP guard starts.
+The server closes that popup before tab registration and reports `site_blocked` with `popup: true` on the next lane call.
+Redirect budgets stop the page after observation, so one more hop can contact the server.
+The HTTP policy does not control WebSockets. Service-worker requests can follow redirects to denied hosts.
+
+IPv6 subresources use route guards only. The CDP `Network` layer has no IPv6 guard.
+
+A denied domain stays reachable at an IP address that the list does not name. There is no DNS-to-IP expansion.
+
+### Caller lanes
 
 `STEEL_LANES=on` is the default. The hub must send `params._meta["ai.opencode/sessionID"]` on each `tools/call`.
 The SDK supplies this value as `extra._meta` to the tool handler. Tool arguments cannot select a different caller.
@@ -243,7 +285,7 @@ Concurrent calls share one new browser startup. `SESSION_TIMEOUT_MS` stays uncha
 Set `STEEL_LANES=off` to restore the legacy shared context, owner-based targeting, `force` override, tab sweeper, and whole-browser stop.
 Restart the MCP process to change this switch. The restart does not keep lanes from the previous process.
 
-## Tools (45 default, 47 with AI tools, legacy mode)
+## Tools (46 default, 48 with AI tools, legacy mode)
 
 This table lists the legacy tool set, which lane mode also includes. The lane rules above replace its shared-state behavior.
 
@@ -253,6 +295,7 @@ All page-interacting tools accept an optional `tabId`. Omit for current-active-t
 |---|---|
 | **Navigation** | |
 | `go_to_url` | Navigate + optional `waitFor`. `readPage` extracts content in the same call. `disableMedia` blocks images/fonts/CSS. Waits up to 90 s for detected CAPTCHAs. Detects bot walls + error loops |
+| `block_site` | Add `site` and `reason` to the lane deny list. Call without `site` for the shared and lane lists. |
 | `history` | Back, forward, or reload |
 | `scroll` | Scroll up/down by `selector`/`ref`. `readAfterScroll` returns visible text in same call |
 | `wait_for` | Wait for selector, text appear, text disappear. Accepts `ref` |

@@ -97,6 +97,7 @@ if (llmConfigured(env)) {
 // Server lifecycle
 // -----------------------------------------------------------------------------
 async function runServer() {
+  await rootManager.getSitePolicy().enabled();
   const store = await signinStore;
   const transport = new StdioServerTransport();
   await server.connect(transport);

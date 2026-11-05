@@ -8,6 +8,8 @@
 | `src/caller.ts` | Shared missing-caller error code, text, and structured result |
 | `src/reserved-stores.ts` | Server-store protection and descriptor-bound generic output writes |
 | `src/hidden-text.ts` | Read-path visibility policy and frame checks |
+| `src/site-policy.ts` | Shared and lane deny lists, HTTP routes, CDP guards, and navigation budgets |
+| `config/site-deny.txt` | Reviewed shared domains, empty by default |
 | `src/signin.ts` | Sign-in requests, grants, audit, and notifications |
 | `src/profile-store.ts` | Shared schema, queue for each file, merge, and atomic JSON writes |
 | `src/untrusted.ts` | Output fences and unsafe-control removal |

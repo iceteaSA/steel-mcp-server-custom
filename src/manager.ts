@@ -35,6 +35,7 @@ import {
 } from "./helpers";
 import { clearSnapshot, clearAllSnapshots } from "./snapshot.js";
 import { SETTLE_INIT_SCRIPT } from "./settle.js";
+import { SitePolicy } from "./site-policy.js";
 
 // Inferred type of the parsed env object.
 export type Env = z.infer<typeof EnvSchema>;
@@ -222,6 +223,45 @@ export class BrowserManager {
 
   constructor(private readonly env: Env) {}
 
+  private sitePolicy?: SitePolicy;
+  private policyAttached = false;
+  private popupAdoptions = new Set<Promise<void>>();
+  private get policy() {
+    return (this.sitePolicy ??= new SitePolicy(this.env));
+  }
+  getSitePolicy() {
+    return this.policy;
+  }
+
+  async blockSite(site?: string, reason?: string) {
+    const result = await this.policy.block(site, reason);
+    if (await this.policy.enabled()) {
+      this.policyAttached = true;
+      if (this.browserContext) await this.policy.attach(this.browserContext);
+      for (const { context } of this.profiles.values()) await this.policy.attach(context);
+    }
+    return result;
+  }
+
+  takePolicyError() {
+    return this.sitePolicy?.takePending();
+  }
+  async waitForPopups() {
+    await Promise.allSettled(this.popupAdoptions);
+  }
+
+  async guardPolicy(route: import("patchright").Route) {
+    return this.sitePolicy ? this.sitePolicy.guard(route) : false;
+  }
+
+  async restorePolicyRoute(page: Page) {
+    await this.sitePolicy?.restorePageRoute(page);
+  }
+
+  async navigate(page: Page, operation: () => Promise<Response | null>): Promise<Response | null> {
+    return (await this.policy.enabled()) ? this.policy.navigate(page, operation) : operation();
+  }
+
   enableLanes(): void {
     this.lanesEnabled = true;
   }
@@ -266,6 +306,7 @@ export class BrowserManager {
     allocateId: () => number,
     onTabCreated?: (tabId: number) => void,
   ): Promise<BrowserManager> {
+    await this.policy.enabled();
     await this.initialize();
     const browser = this.browser;
     if (!browser?.isConnected()) throw new Error("lane_closed: shared browser session ended.");
@@ -290,6 +331,10 @@ export class BrowserManager {
     lane.debugUrl = this.debugUrl;
     lane.sessionViewerUrl = this.sessionViewerUrl;
     lane._wireNetworkCapture(context);
+    if (await lane.policy.enabled()) {
+      lane.policyAttached = true;
+      await lane.policy.attach(context);
+    }
     lane._wirePopupCapture(context);
     context.on("close", () => {
       lane.laneClosed = true;
@@ -350,9 +395,12 @@ export class BrowserManager {
   ): Promise<void> {
     const page = this.tabs.get(tabId);
     if (!page) throw new Error(`No tab ${tabId}`);
-    await page.route(pattern, handler);
+    const guarded = async (route: import("patchright").Route) => {
+      if (!(await this.guardPolicy(route))) await handler(route);
+    };
+    await page.route(pattern, guarded);
     const list = this.tabRoutes.get(tabId) ?? [];
-    list.push({ pattern, owner, unroute: () => page.unroute(pattern, handler) });
+    list.push({ pattern, owner, unroute: () => page.unroute(pattern, guarded) });
     this.tabRoutes.set(tabId, list);
   }
 
@@ -906,6 +954,7 @@ export class BrowserManager {
   }
 
   private async initializeBrowser(): Promise<void> {
+    await this.policy.enabled();
     if (this.sessionEnded) {
       if (this.steelClient && this.sessionId) {
         await this.steelClient.sessions.release(this.sessionId).catch(() => {});
@@ -970,6 +1019,10 @@ export class BrowserManager {
     // Wire network capture before popup capture so requests made by the
     // initial page are recorded from the start.
     this._wireNetworkCapture(this.browserContext!);
+    if (!this.lanesEnabled && (await this.policy.enabled())) {
+      this.policyAttached = true;
+      await this.policy.attach(this.browserContext!);
+    }
 
     // Register popup/new-page detection. Pages created by the site
     // (target=_blank, window.open) bypass allocateTab — this listener
@@ -1023,6 +1076,7 @@ export class BrowserManager {
 
     context.on("response", async (response) => {
       try {
+        if (this.policyAttached && !this.sitePolicy?.allowsResponse(response)) return;
         const request = response.request();
         const start = this.requestStartTimes.get(request);
         const page = request.frame()?.page();
@@ -1163,7 +1217,18 @@ export class BrowserManager {
     context.on("page", (popup) => {
       // allocateTab is idempotent — pages already registered (e.g.
       // through _doNewTab) just return their existing tabId.
-      this.allocateTab(popup);
+      if (this.sitePolicy?.hasDenyList()) {
+        const adoption = this.sitePolicy
+          .adopt(popup)
+          .then((allowed) => {
+            if (allowed) this.allocateTab(popup);
+          })
+          .catch(() => {
+            void popup.close().catch(() => {});
+          });
+        this.popupAdoptions.add(adoption);
+        void adoption.finally(() => this.popupAdoptions.delete(adoption));
+      } else this.allocateTab(popup);
     });
   }
   private attachConsoleListener(page: Page) {
@@ -1351,7 +1416,7 @@ export class BrowserManager {
       this.tabToProfile.set(tabId, profileName);
     }
     if (url) {
-      await page.goto(url, { waitUntil: "domcontentloaded" });
+      await this.navigate(page, () => page.goto(url, { waitUntil: "domcontentloaded" }));
     }
     return { tabId, page };
   }
@@ -1509,6 +1574,7 @@ export class BrowserManager {
     }[]
   > {
     await this.initialize();
+    await this.waitForPopups();
     const now = Date.now();
     const openTabs = Array.from(this.tabs).filter(([, page]) => !page.isClosed());
 
@@ -1607,6 +1673,10 @@ export class BrowserManager {
     // the same request/response and new-page tracking as the default context.
     if (!this.laneContext) {
       this._wireNetworkCapture(context);
+      if (await this.policy.enabled()) {
+        this.policyAttached = true;
+        await this.policy.attach(context);
+      }
       this._wirePopupCapture(context);
     }
 
@@ -1639,7 +1709,7 @@ export class BrowserManager {
         restored = true;
       }
       if (url && state.localStorage) {
-        await page.goto(url, { waitUntil: "domcontentloaded" });
+        await this.navigate(page, () => page.goto(url, { waitUntil: "domcontentloaded" }));
         const origin = new URL(url).origin;
         const ls = state.localStorage[origin];
         if (ls) {
@@ -1669,7 +1739,7 @@ export class BrowserManager {
     }
 
     if (url) {
-      await page.goto(url, { waitUntil: "domcontentloaded" });
+      await this.navigate(page, () => page.goto(url, { waitUntil: "domcontentloaded" }));
     }
     return { tabId, restored };
   }
@@ -1717,13 +1787,14 @@ export class BrowserManager {
       try {
         if (!existing) {
           // Use a local response to prevent a network request from the temporary page.
-          await page.route("**/*", (route) =>
-            route.fulfill({
+          await page.route("**/*", async (route) => {
+            if (await this.guardPolicy(route)) return;
+            await route.fulfill({
               status: 200,
               contentType: "text/html",
               body: "<!doctype html><title></title>",
-            }),
-          );
+            });
+          });
           await page.goto(origin, { waitUntil: "domcontentloaded", timeout: 5000 });
         }
         if (!this.hasProfile(name) || this.profiles.get(name) !== profile) return false;

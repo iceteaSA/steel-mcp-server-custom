@@ -168,10 +168,14 @@ test("all tool outputSchema JSON bytes equal the pre-hardening catalog", () => {
   });
   for (const register of Object.values(groups))
     register((s) => specs.push(s), {} as BrowserManager, env);
-  const schemas = specs.map((s) => ({
-    name: s.name,
-    outputSchema: s.outputSchema ? z.toJSONSchema(z.object(s.outputSchema)) : null,
-  }));
+  expect(specs).toHaveLength(48);
+  expect(specs.find((s) => s.name === "block_site")?.outputSchema).toBeDefined();
+  const schemas = specs
+    .filter((s) => s.name !== "block_site")
+    .map((s) => ({
+      name: s.name,
+      outputSchema: s.outputSchema ? z.toJSONSchema(z.object(s.outputSchema)) : null,
+    }));
   const added = new Set(["request_signin", "signin_status", "cancel_signin"]);
   const legacy = schemas.filter((s) => !added.has(s.name));
   expect(legacy).toHaveLength(44);

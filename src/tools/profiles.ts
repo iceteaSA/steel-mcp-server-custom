@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { BrowserManager, Env } from "../manager.js";
 import { cleanErrorMessage, isValidProfileName } from "../helpers.js";
 import type { ToolRegistrar } from "./shared.js";
+import { policyErrorResult } from "../site-policy.js";
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, _env: Env): void {
   // create_profile ------------------------------------------------------------
@@ -38,6 +39,8 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, _env: Env
         if (url) parts.push(`Navigated to ${url}`);
         return { content: [{ type: "text", text: parts.join(" ") }] };
       } catch (err) {
+        const policy = policyErrorResult(err);
+        if (policy) return policy;
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };
       }

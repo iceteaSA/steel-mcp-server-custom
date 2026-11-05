@@ -21,6 +21,29 @@ With no output schema, the registrar also includes the structured error.
 Shared fill helpers read the selected options after selection. `fill` and `act` report each selected value, `option.label`, and index.
 If readback does not agree with the specified selection rule, the helper gives an error, not success.
 
+## Site policy
+
+Each lane manager owns one `SitePolicy`. Compatibility contexts share the process manager's policy.
+The policy reads `config/site-deny.txt` or `STEEL_SITE_DENY_FILE` and adds the lane's `block_site` entries.
+Domain checks use the public suffix list through `tldts`, with private domains enabled.
+
+The shared file uses `O_NOFOLLOW` and `O_NONBLOCK`. `fstat` must identify a regular file. The cached snapshot accepts IP literals and IDNs.
+Request hosts use WHATWG URL normalization. An IP entry has no subdomain rule or DNS expansion.
+
+Context routes and guarded page routes check requests before the first hop. CDP `Fetch` pauses only denied document hosts to stop redirects.
+CDP `Network` denies domain and IPv4 subresources. IPv6 subresources use route guards only.
+Permitted requests stay in the browser network stack.
+Navigation wrappers give structured policy errors and stop pages above resource limits.
+
+HTTP fetch and download paths check each redirect before the next request. Their requests consume the same lane budget.
+Manual HTTP chains stop after 20 redirects with `redirect_loop`, not `budget_exceeded`.
+The optional operator budget can stop the chain before that limit.
+No limit closes a different lane. Request counters use rolling windows and keep at most the configured request limit.
+
+Popup guards start after the context page event. A first redirect can contact a denied host before that event.
+The adoption check closes that popup before tab registration. The next call receives the policy error.
+The policy does not control WebSockets or service-worker redirects. Redirect budget enforcement can send one more hop before the stop command.
+
 ## Sign-in state
 
 `src/index.ts` makes one `SigninStore` for the MCP tools and HTTP server.

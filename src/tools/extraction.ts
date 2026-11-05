@@ -4,6 +4,7 @@ import { Readability } from "@mozilla/readability";
 import { parseHTML } from "linkedom";
 import TurndownService from "turndown";
 import { Impit } from "impit";
+import { PolicyError, policyErrorResult, type SitePolicy } from "../site-policy.js";
 import { clipText, PageTextStore } from "../page-output.js";
 import { hiddenReadContext, hiddenNotice, guardSnapshot } from "../hidden-text.js";
 import type { BrowserManager, Env } from "../manager.js";
@@ -110,12 +111,24 @@ export async function fetchHttp(
     timeout?: number;
     extractContent?: boolean;
     maxCharsPerPage?: number;
+    policy?: SitePolicy;
   } = {},
 ): Promise<FetchResult> {
   const extractContent = opts.extractContent ?? true;
   const maxCharsPerPage = opts.maxCharsPerPage ?? 0;
   const client = opts.client ?? new Impit({ browser: "chrome", timeout: opts.timeout ?? 15_000 });
-  const response = await client.fetch(url, { redirect: "follow" });
+  const response =
+    opts.policy && (await opts.policy.enabled())
+      ? await opts.policy.http(url, async (current, remaining) => {
+          const value = await client.fetch(current, {
+            redirect: "manual",
+            ...(remaining === undefined
+              ? {}
+              : { signal: AbortSignal.timeout(Math.max(1, remaining)) }),
+          });
+          return { value, status: value.status, location: value.headers.get("location") };
+        })
+      : await client.fetch(url, { redirect: "follow" });
   const status: number = response.status;
   const html: string = await response.text();
   // Decide escalation on the FULL extracted text + html. A tiny
@@ -166,7 +179,8 @@ export async function runFetchUrls(
   // Browser path: original behavior — open a real background tab.
   const fetchBrowser = async (url: string): Promise<FetchResult> => {
     return withBackgroundTab(mgr, async (page) => {
-      await page.goto(url, { waitUntil: "domcontentloaded" });
+      const navigate = () => page.goto(url, { waitUntil: "domcontentloaded" });
+      await (mgr.navigate ? mgr.navigate(page, navigate) : navigate());
       await globalWait(env);
 
       const pageTitle = await page.title().catch(() => "");
@@ -202,8 +216,13 @@ export async function runFetchUrls(
     if (mode === "browser") return fetchBrowser(url);
     if (mode === "http") {
       try {
-        return await fetchHttpFn(url, { extractContent, maxCharsPerPage });
+        return await fetchHttpFn(url, {
+          extractContent,
+          maxCharsPerPage,
+          policy: mgr.getSitePolicy?.(),
+        });
       } catch (err) {
+        if (err instanceof PolicyError) throw err;
         const error = err as Error;
         const msg = `[http] ${url}\n[ERROR: ${cleanErrorMessage(error)}]`;
         return { url, title: url, text: msg, path: "http", escalated: false };
@@ -212,8 +231,13 @@ export async function runFetchUrls(
     // mode === "auto": try HTTP, escalate on shell/challenge.
     let httpResult: FetchResult;
     try {
-      httpResult = await fetchHttpFn(url, { extractContent, maxCharsPerPage });
+      httpResult = await fetchHttpFn(url, {
+        extractContent,
+        maxCharsPerPage,
+        policy: mgr.getSitePolicy?.(),
+      });
     } catch (err) {
+      if (err instanceof PolicyError) throw err;
       // HTTP path failed entirely — fall back to browser.
       try {
         const br = await fetchBrowser(url);
@@ -227,6 +251,7 @@ export async function runFetchUrls(
           escalated: true,
         };
       } catch (err2) {
+        if (err2 instanceof PolicyError) throw err2;
         const err2Msg = `[browser] ${url}\n[ERROR: ${cleanErrorMessage(err2 as Error)}]`;
         return { url, title: url, text: err2Msg, path: "browser", escalated: false };
       }
@@ -239,6 +264,7 @@ export async function runFetchUrls(
         // consumers know auto chose to switch paths.
         return { ...br, escalated: true };
       } catch (escalationErr) {
+        if (escalationErr instanceof PolicyError) throw escalationErr;
         // Browser escalation failed — keep whatever the http path gave us
         // so the caller at least sees the raw HTML/text shell response.
         // Surface the underlying error in the structured response for debugging.
@@ -262,6 +288,7 @@ export async function runFetchUrls(
         escalated: r.value.escalated ?? false,
       });
     } else {
+      if (r.reason instanceof PolicyError) throw r.reason;
       const errText = `## ${urls[i]}\n[ERROR: ${cleanErrorMessage(r.reason)}]`;
       results.push(errText);
       structured.push({
@@ -750,6 +777,8 @@ CONTEXT BUDGET — output capped at maxCharsPerPage per URL (default 3K per URL)
       try {
         return await runFetchUrls({ urls, extractContent, maxCharsPerPage, mode }, mgr, env);
       } catch (err) {
+        const policy = policyErrorResult(err);
+        if (policy) return policy;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(err) }] };
       }
     },

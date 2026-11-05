@@ -15,6 +15,10 @@
 - Use one `no_caller` text and error code. Keep structured errors compatible with each tool's output schema.
 - Give sign-in dependencies through an explicit argument.
 - Accept underscore cookie domains in saved state and cookie pushes. Keep sign-in requests in their approved domain scope.
+- Add `block_site` with shared and lane deny lists and structured `site_blocked` errors.
+- Add lane budgets for requests, redirects, and document load time. Keep off-mode budgets disabled unless configured.
+- Refuse non-regular deny files. Add IP and Unicode domain entries, measured redirect errors, and policy-route restoration after media changes.
+- Stop manual HTTP loops after 20 redirects with `redirect_loop`. Keep lower configured budgets and document route-only IPv6 subresource guards.
 
 - Refuse a first profile binding after stateful lane use with `lane_not_fresh`. Keep empty `about:blank` tabs permitted.
 - Check cookies and origin entries before binding. Keep the used mark after pages close or cookies clear. Do not clear state on refusal.
