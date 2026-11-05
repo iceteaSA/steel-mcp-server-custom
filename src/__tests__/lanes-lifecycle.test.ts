@@ -68,6 +68,78 @@ function fixture(overrides: Record<string, string> = {}) {
   };
 }
 
+test("one lease per lane rejects a second name before its handler or lease admission", async () => {
+  const f = fixture();
+  let entered = false;
+  const meta = { "ai.opencode/sessionID": "a" };
+  try {
+    expect(
+      (await f.runtime.run("use_profile", { name: "alpha" }, meta, async () => ({ content: [] })))
+        .isError,
+    ).not.toBe(true);
+    const rejected = await f.runtime.run("use_profile", { name: "beta" }, meta, async () => {
+      entered = true;
+      return { content: [] };
+    });
+    expect(rejected.isError).toBe(true);
+    expect(JSON.stringify(rejected)).toContain("lane_profile_conflict");
+    expect(JSON.stringify(rejected)).toContain("alpha");
+    expect(JSON.stringify(rejected)).not.toContain("beta");
+    expect(entered).toBe(false);
+    expect(
+      (
+        await f.runtime.run(
+          "use_profile",
+          { name: "beta" },
+          { "ai.opencode/sessionID": "b" },
+          async () => ({ content: [] }),
+        )
+      ).isError,
+    ).not.toBe(true);
+  } finally {
+    await f.runtime.close();
+  }
+});
+
+test("L10: an unrelated lane succeeds when an idle lane's autosave times out", async () => {
+  const f = fixture();
+  const log = spyOn(console, "error").mockImplementation(() => {});
+  try {
+    expect(
+      (
+        await f.runtime.run(
+          "use_profile",
+          { name: "alpha", autosave: true },
+          { "ai.opencode/sessionID": "a" },
+          async () => ({ content: [] }),
+        )
+      ).isError,
+    ).not.toBe(true);
+    const save = spyOn(f.managers[0], "saveProfile").mockImplementation(
+      () => new Promise<string>(() => {}),
+    );
+    f.advance(101);
+    const unrelated = await bounded(f.call("b"));
+    expect(unrelated.isError).not.toBe(true);
+    expect(f.state.lanes.has("a")).toBe(false);
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(log).toHaveBeenCalledTimes(1);
+    expect(
+      (
+        await f.runtime.run(
+          "use_profile",
+          { name: "alpha" },
+          { "ai.opencode/sessionID": "c" },
+          async () => ({ content: [] }),
+        )
+      ).isError,
+    ).not.toBe(true);
+  } finally {
+    log.mockRestore();
+    await f.runtime.close();
+  }
+});
+
 test("close_lane bounds a held handler drain, closes its context, and permits reopen", async () => {
   const f = fixture();
   const entered = barrier();

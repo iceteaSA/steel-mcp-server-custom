@@ -170,8 +170,7 @@ export function makeRegistrar(
     register({
       name: "use_profile",
       title: "Use Profile",
-      description:
-        "Take an exclusive profile lease and restore saved cookies and storage into your lane. A busy profile returns its holder label and lease age. Close releases the lease without saving unless autosave is true. Use save_profile for an explicit save. delete_profile does not clear the lane's live context or release its lease.",
+      description: "Take an exclusive profile lease and restore saved cookies and storage into your lane. One profile per lane context; a different name returns lane_profile_conflict before lease admission. Use close_lane or another lane to change profiles. A busy profile returns its holder label and lease age. Close releases the lease without saving unless autosave is true. Use save_profile for an explicit save. delete_profile does not clear the lane's live context or release its lease.",
       toolset: "auth",
       inputSchema: {
         name: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),

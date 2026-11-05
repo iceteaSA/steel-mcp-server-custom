@@ -181,12 +181,23 @@ export class LaneRuntime {
     for (const notify of this.leaseChanged) notify();
   }
 
+  private assertLaneProfile(lane: Lane, name: string): void {
+    lane.manager.assertLaneProfile?.(name);
+    for (const [held, lease] of this.leases) {
+      if (lease.lane === lane && held !== name)
+        throw new Error(
+          `lane_profile_conflict: lane holds profile "${held}". Use close_lane or another lane.`,
+        );
+    }
+  }
+
   private async acquire(
     lane: Lane,
     name: string,
     wait: number,
     autosave: boolean,
   ): Promise<boolean> {
+    this.assertLaneProfile(lane, name);
     const deadline = Date.now() + Math.min(120, Math.max(0, wait)) * 1000;
     for (;;) {
       if (lane.closing || lane.manager.isLaneClosed || this.stopping)
@@ -433,7 +444,7 @@ export class LaneRuntime {
 
   async sweep(): Promise<void> {
     this.pruneClosed();
-    await Promise.all(
+    const settled = await Promise.allSettled(
       [...this.lanes.values()]
         .filter(
           (lane) =>
@@ -443,6 +454,9 @@ export class LaneRuntime {
         )
         .map((lane) => this.dispose(lane, lane.manager.isLaneClosed ? "restart" : "idle")),
     );
+    for (const result of settled) {
+      if (result.status === "rejected") console.error("[steel-mcp] lane cleanup failed.");
+    }
   }
 
   async run(
@@ -560,6 +574,8 @@ export class LaneRuntime {
           if (lane.manager.isLaneClosed)
             throw new Error("lane_closed: context closed while the call was queued.");
           const profileName = name === "new_tab" ? args.profile : args.name;
+          if (profileMutation && typeof profileName === "string")
+            this.assertLaneProfile(lane, profileName);
           const takesLease =
             name === "use_profile" ||
             name === "create_profile" ||
