@@ -70,6 +70,8 @@ export function mockChrome({
   relayState,
   signinAccess = false,
   relayAccess = true,
+  serverUrl = "http://localhost:3001",
+  deferSettings = false,
 } = {}) {
   globalThis.calls = [];
   globalThis.chromeChanges = [];
@@ -82,12 +84,23 @@ export function mockChrome({
     for (const listener of chromeChanges) listener({ signinRelay: { newValue } }, "session");
   });
   const settings = {
-    serverUrl: "http://localhost:3001",
+    serverUrl,
     serverSecret: "SYNTHETIC_SECRET",
     profileName: "work",
     pinnedSites: [],
     includeStorage: true,
   };
+  let releaseSettings;
+  const settingsReady = new Promise((resolve) => {
+    releaseSettings = resolve;
+    if (!deferSettings) resolve();
+  });
+  addEventListener("mockSettingsReady", () => releaseSettings());
+  addEventListener("mockServerUrl", () => {
+    settings.serverUrl = document.documentElement.dataset.serverUrl;
+    for (const listener of chromeChanges)
+      listener({ serverUrl: { newValue: settings.serverUrl } }, "local");
+  });
   const site = {
     url: "https://login.example.com/",
     domain: "login.example.com",
@@ -102,7 +115,13 @@ export function mockChrome({
   const permissionListeners = [];
   globalThis.chrome = {
     storage: {
-      local: { get: async () => settings, set: async (value) => Object.assign(settings, value) },
+      local: {
+        get: async () => {
+          await settingsReady;
+          return settings;
+        },
+        set: async (value) => Object.assign(settings, value),
+      },
       session: { get: async () => ({ signinRelay: relayState }) },
       onChanged: { addListener: (fn) => chromeChanges.push(fn) },
     },

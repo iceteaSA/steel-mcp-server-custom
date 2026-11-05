@@ -150,8 +150,9 @@ export function startSigninWorker() {
     await connect();
     await poll().catch(() => {});
   }
-  chrome.permissions.onAdded.addListener(start);
-  chrome.permissions.onRemoved.addListener(start);
+  const reconnect = () => connect().catch(() => {});
+  chrome.permissions.onAdded.addListener(reconnect);
+  chrome.permissions.onRemoved.addListener(reconnect);
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (alarm.name === alarmName) return Promise.all([connect(), poll().catch(() => {})]);
   });

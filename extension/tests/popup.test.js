@@ -84,6 +84,80 @@ for (const allow of [true, false]) {
   });
 }
 
+for (const serverUrl of ["https://*.example.com", "https://exa*mple.com", "https://*.localhost"]) {
+  it(`requests no relay permission for ${serverUrl}`, async () => {
+    const page = await popup({
+      relayState: { status: "needs_access" },
+      relayAccess: false,
+      serverUrl,
+    });
+    try {
+      await page.getByRole("button", { name: "Grant relay access", exact: true }).click();
+      await page.waitForFunction(() => !document.getElementById("grantRelay").disabled);
+      expect(
+        await page.evaluate(() =>
+          JSON.parse(document.documentElement.dataset.calls).filter(([kind]) => kind === "grant"),
+        ),
+      ).toEqual([]);
+      expect(await page.locator("#status").innerText()).toContain("Settings");
+    } finally {
+      await page.close();
+    }
+  });
+}
+
+it("requests only the exact HTTPS relay host outside localhost", async () => {
+  const page = await popup({
+    relayState: { status: "needs_access" },
+    relayAccess: false,
+    serverUrl: "https://relay.example.net:8443",
+  });
+  try {
+    const button = page.getByRole("button", { name: "Grant relay access", exact: true });
+    expect(
+      await button.evaluate((element) => {
+        element.click();
+        return JSON.parse(document.documentElement.dataset.calls).filter(
+          ([kind]) => kind === "grant",
+        );
+      }),
+    ).toEqual([["grant", { origins: ["https://relay.example.net/*"] }]]);
+  } finally {
+    await page.close();
+  }
+});
+
+it("reveals relay access only after settings resolve and hides it when the URL is removed", async () => {
+  const page = await fixture.browser.newPage();
+  await installMockChrome(page, {
+    deferSettings: true,
+    relayState: { status: "needs_access" },
+    relayAccess: false,
+  });
+  try {
+    await page.goto(`${fixture.origin}/popup.html`);
+    await page.evaluate(() => {
+      document.documentElement.dataset.relayState = JSON.stringify({ status: "needs_access" });
+      dispatchEvent(new Event("mockRelayState"));
+    });
+    const button = page.getByRole("button", { name: "Grant relay access", exact: true });
+    expect(await page.locator("#relayState").innerText()).toContain("Relay access is missing");
+    expect(await button.isVisible()).toBe(false);
+    await page.evaluate(() => dispatchEvent(new Event("mockSettingsReady")));
+    await page.waitForFunction(() =>
+      document.getElementById("connection").textContent.includes("secret accepted"),
+    );
+    expect(await button.isVisible()).toBe(true);
+    await page.evaluate(() => {
+      document.documentElement.dataset.serverUrl = "";
+      dispatchEvent(new Event("mockServerUrl"));
+    });
+    expect(await button.isVisible()).toBe(false);
+  } finally {
+    await page.close();
+  }
+});
+
 it("shows the session relay state on open and changes it without a popup reload", async () => {
   const since = Date.UTC(2026, 0, 1, 13, 42);
   const page = await popup({ relayState: { status: "disconnected", since } });

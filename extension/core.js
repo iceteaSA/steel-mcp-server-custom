@@ -40,8 +40,9 @@ export function relayUrl(value) {
   let url;
   try {
     url = siteUrl(value);
+    domainPatterns(url.hostname);
   } catch {
-    throw new Error("Enter an HTTP or HTTPS relay URL in Settings.");
+    throw new Error("Enter an HTTP or HTTPS relay URL with one exact hostname in Settings.");
   }
   if (url.username || url.password || url.search || url.hash || url.pathname !== "/") {
     throw new Error("Use only the relay origin, with no path, query, or embedded credentials.");
@@ -54,7 +55,7 @@ export function relayUrl(value) {
 
 export function hostPattern(value) {
   const url = siteUrl(value);
-  return `${url.protocol}//${url.hostname}/*`;
+  return domainPatterns(url.hostname).find((pattern) => pattern.startsWith(url.protocol));
 }
 
 const DNS_HOST =

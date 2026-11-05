@@ -495,6 +495,28 @@ function wildcardSchemes(source) {
 // http://*/* and https://*/* contain https://*/*, so a "*" host from a forged relay request
 // would ask Chrome for all sites. The old *://*/* form was refused by Chrome before the prompt.
 describe("host patterns are built only from one exact hostname", () => {
+  for (const value of [
+    "https://*.example.com",
+    "https://exa*mple.com",
+    "https://*.localhost",
+    "http://*.localhost",
+    "https://example..com",
+    "https://.example.com",
+    "https://example.com.",
+  ]) {
+    it(`rejects non-exact relay and host-pattern URLs: ${value}`, () => {
+      expect(() => hostPattern(value)).toThrow("exact hostname");
+      expect(() => relayUrl(value)).toThrow("exact hostname");
+      expect(() => relayUrl(value)).toThrow("Settings");
+    });
+  }
+  it("keeps exact HTTPS relay, IPv4 and bracketed IPv6 patterns without ports or paths", () => {
+    expect(hostPattern(relayUrl("https://relay.example.net:8443"))).toBe(
+      "https://relay.example.net/*",
+    );
+    expect(hostPattern("http://127.0.0.1:3001/path")).toBe("http://127.0.0.1/*");
+    expect(hostPattern("http://[::1]:3001/path")).toBe("http://[::1]/*");
+  });
   const bad = [
     "*",
     "*.example.com",

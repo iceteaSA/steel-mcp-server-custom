@@ -23,6 +23,7 @@ let timers;
 let settings;
 let localState;
 let origins;
+let titles;
 const request = {
   id: "one",
   caller: { agent: "agent", title: "Task" },
@@ -45,6 +46,7 @@ beforeEach(() => {
   events = {};
   notifications = [];
   badges = [];
+  titles = [];
   tabs = [];
   fetches = [];
   session = {};
@@ -112,7 +114,7 @@ beforeEach(() => {
     action: {
       setBadgeText: async ({ text }) => badges.push(text),
       setBadgeBackgroundColor: async () => {},
-      setTitle: async () => {},
+      setTitle: async ({ title }) => titles.push(title),
     },
     tabs: { create: async (input) => tabs.push(input), query: async () => [] },
     cookies: {
@@ -317,6 +319,7 @@ it("marks saved settings without relay access as needs_access ahead of pending a
   await client.update(requests);
   expect(session.signinRelay).toEqual({ status: "needs_access" });
   expect(badges.at(-1)).toBe("!");
+  expect(titles.at(-1)).toBe("Steel: relay access is missing. Open to grant relay access.");
   expect(sockets).toEqual([]);
   expect(fetches).toEqual([]);
 });
@@ -372,6 +375,42 @@ it("rechecks a permission change that arrives during an in-flight permission rea
   expect(events.permissionRemoved).toBeFunction();
   expect(session.signinRelay).toEqual({ status: "needs_access" });
   expect(sockets.every((socket) => socket.readyState === 3)).toBe(true);
+});
+
+it("checks permission events without recreating the alarm, polling, or replacing a permitted socket", async () => {
+  requests = [];
+  client = startSigninWorker();
+  await client.start();
+  sockets[0].open();
+  await client.update([]);
+  const polls = fetches.length;
+  const alarmCount = alarms.length;
+  for (let index = 0; index < 5; index++) {
+    await events.permissionAdded({ origins: ["https://unrelated.example/*"] });
+    await events.permissionRemoved({ origins: ["https://unrelated.example/*"] });
+  }
+  expect(fetches).toHaveLength(polls);
+  expect(alarms).toHaveLength(alarmCount);
+  expect(sockets).toHaveLength(1);
+  expect(sockets[0].readyState).toBe(1);
+});
+
+it("catches rejected permission-event connection checks before returning to Chrome", async () => {
+  requests = [];
+  client = startSigninWorker();
+  await client.start();
+  chrome.storage.local.get = async () => {
+    throw new Error("Synthetic settings failure");
+  };
+  chrome.storage.session.set = async () => {
+    throw new Error("Synthetic state failure");
+  };
+  await expect(
+    events.permissionAdded({ origins: ["https://unrelated.example/*"] }),
+  ).resolves.toBeUndefined();
+  await expect(
+    events.permissionRemoved({ origins: ["https://unrelated.example/*"] }),
+  ).resolves.toBeUndefined();
 });
 
 it("recomputes the badge on session relay and local result changes without changing the result time", async () => {

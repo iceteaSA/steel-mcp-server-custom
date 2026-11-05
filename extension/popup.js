@@ -17,15 +17,17 @@ const selected = new Set();
 let connected = false;
 let busy = false;
 let relayServerUrl;
+let relayState;
 
 function status(text, error = false) {
   $("status").textContent = text;
   $("status").className = `notice ${error ? "error" : "success"}`;
 }
 function renderRelayState(state) {
+  relayState = state;
   const down = state?.status === "disconnected";
   const needsAccess = state?.status === "needs_access";
-  $("grantRelay").hidden = !needsAccess;
+  $("grantRelay").hidden = !relayServerUrl || !needsAccess;
   const time = Number.isFinite(state?.since)
     ? new Date(state.since).toLocaleTimeString([], {
         hour: "2-digit",
@@ -345,7 +347,10 @@ $("pinSite").addEventListener("click", async () => {
   }
 });
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === "local" && changes.serverUrl) relayServerUrl = changes.serverUrl.newValue;
+  if (area === "local" && changes.serverUrl) {
+    relayServerUrl = changes.serverUrl.newValue;
+    renderRelayState(relayState);
+  }
   if (area === "local" && (changes.lastResults || changes.lastSync)) void loadResults();
   if (area === "session" && changes.signinRelay) renderRelayState(changes.signinRelay.newValue);
 });
