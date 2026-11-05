@@ -25,7 +25,8 @@ function expectPolicyText(
     .join("\n");
   expect(text).toContain(`${fields.error}:`);
   for (const [key, value] of Object.entries(fields)) {
-    if (key !== "error") expect(text).toMatch(new RegExp(`(?:^|\\s)${key}=${value}(?=\\s|$)`));
+    const token = `${key}=${value}`.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (key !== "error") expect(text).toMatch(new RegExp(`(?:^|\\s)${token}(?=\\s|$)`));
   }
 }
 
