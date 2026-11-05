@@ -176,3 +176,53 @@ it("uses remembered grants without a notification or duplicate push when a stale
   expect(client.pending).toEqual([]);
   expect(JSON.stringify(session)).not.toContain("CANARY_PRIVATE");
 });
+
+it("records relay transitions without settings and keeps the outage time and down badge across retries", async () => {
+  requests = [];
+  client = startSigninWorker();
+  await client.start();
+  sockets[0].open();
+  await client.update([]);
+  expect(session.signinRelay).toEqual({ status: "connected" });
+  sockets[0].close();
+  await client.update([]);
+  expect(session.signinRelay).toEqual({ status: "disconnected", since: expect.any(Number) });
+  const since = session.signinRelay.since;
+  expect(badges.at(-1)).toBe("!");
+  const count = badges.length;
+  await events.alarm({ name: "steel-signin-poll" });
+  sockets[1].close();
+  await client.update([]);
+  expect(session.signinRelay.since).toBe(since);
+  expect(badges.slice(count)).toEqual([]);
+  sockets[1].open();
+  await client.update([]);
+  expect(session.signinRelay).toEqual({ status: "connected" });
+  expect(badges.at(-1)).toBe("");
+  expect(JSON.stringify(session)).not.toContain("fake-secret");
+  expect(JSON.stringify(session)).not.toContain("localhost");
+});
+
+it("shows relay down even with pending requests and preserves the pending badge on recovery", async () => {
+  client = startSigninWorker();
+  await client.start();
+  sockets[0].open();
+  await client.update(requests);
+  sockets[0].onerror();
+  await client.update(requests);
+  expect(badges.at(-1)).toBe("!");
+  await events.alarm({ name: "steel-signin-poll" });
+  sockets[1].open();
+  await client.update(requests);
+  expect(badges.at(-1)).toBe("1");
+});
+
+it("records synchronous connection failures without persisting exception text", async () => {
+  globalThis.WebSocket = class { constructor() { throw new Error("SYNTHETIC_SECRET URL"); } };
+  client = startSigninWorker();
+  await client.start();
+  await client.update([]);
+  expect(session.signinRelay).toEqual({ status: "disconnected", since: expect.any(Number) });
+  expect(JSON.stringify(session)).not.toContain("SYNTHETIC_SECRET");
+  expect(badges.at(-1)).toBe("!");
+});

@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import ts from "typescript";
 import * as core from "../core.js";
 import {
   DEFAULTS,
@@ -386,6 +387,22 @@ function chromeContains(declared, requested) {
 }
 
 describe("requested host patterns fit the manifest one pattern at a time", () => {
+  it("contains schemes, host subdomains, ports and paths as Chromium does", () => {
+    const cases = [
+      [["https://example.com:443/private/*"], ["https://example.com:8443/private/a"], false],
+      [["https://example.com:443/private/*"], ["https://example.com:443/public/*"], false],
+      [["https://example.com:443/private/*"], ["https://example.com:443/private/a"], true],
+      [["https://example.com:443/private/*"], ["https://example.com/private/*"], false],
+      [["https://*.example.com/*"], ["https://login.example.com/*"], true],
+      [["https://example.com/*"], ["https://*.example.com/*"], false],
+      [["https://*.example.com/*"], ["https://notexample.com/*"], false],
+      [["*://example.com/*"], ["*://example.com/*"], true],
+      [["https://example.com/*"], ["*://example.com/*"], false],
+      [["http://*/*", "https://*/*"], ["*://example.com/*"], false],
+    ];
+    for (const [declared, requested, expected] of cases)
+      expect({ declared, requested, result: chromeContains(declared, requested) }).toEqual({ declared, requested, result: expected });
+  });
   it("covers site, parent and sign-in patterns with a declared optional pattern", async () => {
     const manifest = JSON.parse(
       await readFile(new URL("../manifest.json", import.meta.url), "utf8"),
@@ -411,12 +428,40 @@ describe("requested host patterns fit the manifest one pattern at a time", () =>
     expect(chromeContains(declared, core.domainPatterns("example.com"))).toBe(true);
   });
   it("builds no wildcard-scheme host pattern in the extension sources", async () => {
-    for (const file of ["core.js", "background.js", "popup.js", "approval.js", "options.js"]) {
+    const files = await readdir(new URL("../", import.meta.url), { recursive: true });
+    for (const file of files.filter((name) => /\.(js|html)$/.test(name) && !name.startsWith("tests/"))) {
       const source = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
       expect({ file, wildcard: source.includes("`*://${") }).toEqual({ file, wildcard: false });
+      expect({ file, patterns: wildcardSchemes(source) }).toEqual({ file, patterns: file === "background.js" ? ["*://*/*"] : [] });
     }
   });
+  it("finds wildcard schemes in literals, templates and static concatenations, not comments", () => {
+    for (const source of ['const p = "*://" + host;', 'const p = `*://${host}/*`;', 'const p = "*:" + "//" + host;', 'const p = "*" + ":" + "/" + "/" + host;', '<script>const p = "*:" + "//" + host;</script>'])
+      expect(wildcardSchemes(source).length).toBeGreaterThan(0);
+    expect(wildcardSchemes('// "*://" is not executable\n const p = "https://host/*";')).toEqual([]);
+  });
 });
+
+function wildcardSchemes(source) {
+  const html = [...source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)];
+  if (html.length) return html.flatMap((match) => wildcardSchemes(match[1]));
+  const ast = ts.createSourceFile("extension.js", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const value = (node) => {
+    if (ts.isStringLiteralLike(node) || ts.isTemplateHead(node)) return node.text;
+    if (ts.isTemplateExpression(node)) return node.head.text;
+    if (ts.isParenthesizedExpression(node)) return value(node.expression);
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) return value(node.left) + value(node.right);
+    return "";
+  };
+  const patterns = [];
+  const visit = (node) => {
+    const text = value(node);
+    if (text.includes("*://")) { patterns.push(text); return; }
+    ts.forEachChild(node, visit);
+  };
+  visit(ast);
+  return patterns;
+}
 
 // http://*/* and https://*/* contain https://*/*, so a "*" host from a forged relay request
 // would ask Chrome for all sites. The old *://*/* form was refused by Chrome before the prompt.
