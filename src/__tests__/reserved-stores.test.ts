@@ -1,9 +1,11 @@
-import { expect, test } from "bun:test";
+import { expect, test, spyOn } from "bun:test";
+import fs from "node:fs/promises";
 import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EnvSchema } from "../env.js";
 import { writeToFile } from "../utils.js";
+import { assertNotReservedStore } from "../reserved-stores.js";
 
 for (const shape of ["default", "separate"] as const) {
   for (const target of [
@@ -76,4 +78,63 @@ test("reserved stores do not block ordinary output aliases or new output directo
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("default output accepts a nested OUTPUT_DIR inside a different OUTPUT_ROOT", async () => {
+  const root = await mkdtemp(join(tmpdir(), "output-root-"));
+  const output = join(root, "nested", "out");
+  const env = EnvSchema.parse({ BROWSER_MODE: "local", OUTPUT_DIR: output, OUTPUT_ROOT: root });
+  try {
+    const file = await writeToFile("ordinary", "default.txt", env);
+    expect(file).toBe(join(output, "default.txt"));
+    expect(await readFile(file, "utf8")).toBe("ordinary");
+    await expect(writeToFile("escape", "unused", env, join(root, "..", "escape.txt"))).rejects.toThrow("escapes");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a root PROFILES_DIR reserves every descendant", async () => {
+  const root = await mkdtemp(join(tmpdir(), "root-profiles-"));
+  try {
+    await expect(assertNotReservedStore(join(root, "new.txt"), { OUTPUT_DIR: root, PROFILES_DIR: "/" })).rejects.toThrow("reserved_store");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("parent replacement after output validation cannot overwrite server state", async () => {
+  const root = await mkdtemp(join(tmpdir(), "output-race-"));
+  const output = join(root, "out");
+  const profiles = join(root, "profiles");
+  const env = EnvSchema.parse({ BROWSER_MODE: "local", OUTPUT_DIR: output, PROFILES_DIR: profiles, OUTPUT_ROOT: "*" });
+  const mkdir = fs.mkdir.bind(fs);
+  let swapped = false;
+  try {
+    await mkdir(output);
+    await mkdir(profiles);
+    await writeFile(join(profiles, "saved.json"), "SERVER_ONLY_CANARY");
+    const spy = spyOn(fs, "mkdir").mockImplementation(async (...args: Parameters<typeof fs.mkdir>) => {
+      const result = await mkdir(...args);
+      if (!swapped && args[0] === output) {
+        swapped = true;
+        await fs.rename(output, join(root, "original"));
+        await symlink(profiles, output);
+      }
+      return result;
+    });
+    try { await writeToFile("untrusted", "saved.json", env).catch(() => {}); }
+    finally { spy.mockRestore(); }
+    expect(swapped).toBe(true);
+    expect(await readFile(join(profiles, "saved.json"), "utf8")).toBe("SERVER_ONLY_CANARY");
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("output writes fail closed when descriptor paths are unavailable", async () => {
+  const root = await mkdtemp(join(tmpdir(), "output-no-proc-"));
+  const access = fs.access.bind(fs);
+  const spy = spyOn(fs, "access").mockImplementation(async (file, mode) => {
+    if (file === "/proc/self/fd") throw Object.assign(new Error("unavailable"), { code: "ENOENT" });
+    return access(file, mode);
+  });
+  try {
+    await expect(writeToFile("untrusted", "ordinary.txt", EnvSchema.parse({ BROWSER_MODE: "local", OUTPUT_DIR: root }))).rejects.toThrow("descriptor");
+    expect(await Bun.file(join(root, "ordinary.txt")).exists()).toBe(false);
+  } finally { spy.mockRestore(); await rm(root, { recursive: true, force: true }); }
 });
