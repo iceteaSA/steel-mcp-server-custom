@@ -13,6 +13,8 @@ The relay accepts only loopback `Host` headers: `localhost`, `127.0.0.1`, or `[:
 
 The background worker sends data after you close the popup. The badge shows `OK`, `!` for storage warnings, or `ERR` for failures. Open the popup for recovery steps. Results stay in local extension storage and contain domains, counts, and status only.
 
+The popup also shows the sign-in connection state. If the connection is down, the popup shows the outage start time in local hours and minutes. Requests cannot get through until the connection is available. The worker retries at 30-second intervals. The `!` badge replaces the pending count while the connection is down. Session storage holds only the connection state and outage start time, not the server URL or secret.
+
 The page follows the system light or dark theme. You can use the keyboard for all controls. **Alt+Shift+S** and the page context menu push to the last selected profile. Grant site access in the popup first. Change the shortcut at `chrome://extensions/shortcuts`.
 
 Current-site commands use only the active HTTP or HTTPS tab. An active extension page does not select a different open site.
@@ -20,6 +22,8 @@ Current-site commands use only the active HTTP or HTTPS tab. An active extension
 ## Site access and batch transfer
 
 The extension has no permanent host permissions. It requests relay access when you save settings and site access when you grant a site. The cookies API cannot read a host without the cookies permission and host access.
+
+Each site grant requests HTTP and HTTPS independently. Sign-in requests must name individual hostnames. The extension refuses wildcard and malformed hostnames before it requests access.
 
 For a subdomain, open **Parent-domain cookie access** and grant each parent hostname that holds shared sign-in cookies. Chrome can ignore parent cookies when only the current hostname has access. Each grant includes one hostname, not all its subdomains. The list shows parent hostnames, not a guessed public-suffix boundary.
 
@@ -54,6 +58,8 @@ Pushes and removals do not update active Steel contexts. Recreate the profile wi
 ## Verification
 
 Run `bun test` from the repository root for relay and extension unit tests. Run `bun run build`, `bun x tsc --noEmit`, `bun run lint`, and `bun run format:check` for server gates. Check extension code with `bun x oxlint extension/` and `bun x oxfmt --check extension/`.
+
+Run `cd extension && bun test tests/` for extension checks. Browser tests use Chromium with temporary browser data. They check approval button text in light, dark, and forced-dark modes, wide review pages, profile-name patterns, and popup grants and pushes. They do not use the operator browser.
 
 The headless fixture harness is `extension/tests/browser.mjs`. First bundle `src/relay.ts` as a Node CommonJS module named `relay.cjs` in a scratch directory in `/tmp/opencode/`. Then run `node extension/tests/browser.mjs <scratch-directory>`. It starts a throwaway relay on 127.0.0.1:3921 and a fixture site on 127.0.0.1:3922. It uses no Steel connection or operator browser.
 

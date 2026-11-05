@@ -43,7 +43,7 @@ body.options {
 }
 body.approval {
   width: 100%;
-  max-width: none;
+  max-width: 760px;
   margin: 0;
   overflow-wrap: anywhere;
 }

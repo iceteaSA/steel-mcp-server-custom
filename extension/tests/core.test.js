@@ -369,19 +369,37 @@ describe("transfer boundaries", () => {
 });
 
 // Chrome accepts permissions.request and permissions.contains only when ONE declared pattern
-// contains each requested pattern (URLPatternSet::Contains). A "*://" request is not inside
+// contains each requested pattern (URLPattern::Contains / UnpackOriginPermissions).
+// A "*://" request is not inside
 // "http://*/*" or "https://*/*" alone, so Chrome refuses it with
 // "Only permissions specified in the manifest may be requested."
 function chromeContains(declared, requested) {
   const parse = (pattern) => {
-    const match = /^(\*|https?):\/\/([^/]+)(\/.*)$/.exec(pattern);
+    const match = /^(\*|https?):\/\/(\[[^\]]+\]|[^/:]+)(?::(\*|\d+))?(\/.*)$/.exec(pattern);
     if (!match) throw new Error(`bad pattern ${pattern}`);
-    return { scheme: match[1], host: match[2], path: match[3] };
+    return {
+      schemes: match[1] === "*" ? ["http", "https"] : [match[1]],
+      host: match[2].replace(/^\*\./, ""),
+      subdomains: match[2] === "*" || match[2].startsWith("*."),
+      port: match[3] ?? "*",
+      path: match[4],
+    };
+  };
+  const matchesPath = (outer, inner) => {
+    const escaped = outer
+      .split("*")
+      .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+      .join(".*");
+    return new RegExp(`^${escaped}$`).test(inner.replace(/\*$/, ""));
   };
   const one = (outer, inner) =>
-    (outer.scheme === "*" || outer.scheme === inner.scheme) &&
-    (outer.host === "*" || outer.host === inner.host) &&
-    outer.path === "/*";
+    inner.schemes.every((scheme) => outer.schemes.includes(scheme)) &&
+    (outer.host === "*" ||
+      outer.host === inner.host ||
+      (outer.subdomains && inner.host.endsWith(`.${outer.host}`))) &&
+    (!inner.subdomains || outer.subdomains) &&
+    (outer.port === "*" || outer.port === inner.port) &&
+    matchesPath(outer.path, inner.path);
   const pool = declared.map(parse);
   return requested.every((pattern) => pool.some((outer) => one(outer, parse(pattern))));
 }
@@ -401,7 +419,11 @@ describe("requested host patterns fit the manifest one pattern at a time", () =>
       [["http://*/*", "https://*/*"], ["*://example.com/*"], false],
     ];
     for (const [declared, requested, expected] of cases)
-      expect({ declared, requested, result: chromeContains(declared, requested) }).toEqual({ declared, requested, result: expected });
+      expect({ declared, requested, result: chromeContains(declared, requested) }).toEqual({
+        declared,
+        requested,
+        result: expected,
+      });
   });
   it("covers site, parent and sign-in patterns with a declared optional pattern", async () => {
     const manifest = JSON.parse(
@@ -429,34 +451,64 @@ describe("requested host patterns fit the manifest one pattern at a time", () =>
   });
   it("builds no wildcard-scheme host pattern in the extension sources", async () => {
     const files = await readdir(new URL("../", import.meta.url), { recursive: true });
-    for (const file of files.filter((name) => /\.(js|html)$/.test(name) && !name.startsWith("tests/"))) {
+    for (const file of files.filter(
+      (name) => /\.(js|html)$/.test(name) && !name.startsWith("tests/"),
+    )) {
       const source = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
       expect({ file, wildcard: source.includes("`*://${") }).toEqual({ file, wildcard: false });
-      expect({ file, patterns: wildcardSchemes(source) }).toEqual({ file, patterns: file === "background.js" ? ["*://*/*"] : [] });
+      expect({ file, patterns: wildcardSchemes(source) }).toEqual({
+        file,
+        patterns: file === "background.js" ? ["*://*/*"] : [],
+      });
     }
   });
   it("finds wildcard schemes in literals, templates and static concatenations, not comments", () => {
-    for (const source of ['const p = "*://" + host;', 'const p = `*://${host}/*`;', 'const p = "*:" + "//" + host;', 'const p = "*" + ":" + "/" + "/" + host;', '<script>const p = "*:" + "//" + host;</script>'])
+    for (const source of [
+      'const p = "*://" + host;',
+      "const p = `*://${host}/*`;",
+      'const p = "*:" + "//" + host;',
+      'const p = "*" + ":" + "/" + "/" + host;',
+      '<script>const p = "*:" + "//" + host;</script>',
+    ])
       expect(wildcardSchemes(source).length).toBeGreaterThan(0);
-    expect(wildcardSchemes('// "*://" is not executable\n const p = "https://host/*";')).toEqual([]);
+    expect(wildcardSchemes('// "*://" is not executable\n const p = "https://host/*";')).toEqual(
+      [],
+    );
   });
 });
 
 function wildcardSchemes(source) {
   const html = [...source.matchAll(/<script\b[^>]*>([\s\S]*?)<\/script>/gi)];
   if (html.length) return html.flatMap((match) => wildcardSchemes(match[1]));
-  const ast = ts.createSourceFile("extension.js", source, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
+  const ast = ts.createSourceFile(
+    "extension.js",
+    source,
+    ts.ScriptTarget.Latest,
+    true,
+    ts.ScriptKind.JS,
+  );
   const value = (node) => {
-    if (ts.isStringLiteralLike(node) || ts.isTemplateHead(node)) return node.text;
-    if (ts.isTemplateExpression(node)) return node.head.text;
+    if (
+      ts.isStringLiteralLike(node) ||
+      ts.isTemplateHead(node) ||
+      ts.isTemplateMiddle(node) ||
+      ts.isTemplateTail(node)
+    )
+      return node.text;
+    if (ts.isTemplateExpression(node))
+      return node.head.text + node.templateSpans.map((span) => value(span.literal)).join("");
     if (ts.isParenthesizedExpression(node)) return value(node.expression);
-    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) return value(node.left) + value(node.right);
+    if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken)
+      return value(node.left) + value(node.right);
     return "";
   };
   const patterns = [];
   const visit = (node) => {
     const text = value(node);
-    if (text.includes("*://")) { patterns.push(text); return; }
+    if (text.includes("*://")) {
+      patterns.push(text);
+      return;
+    }
     ts.forEachChild(node, visit);
   };
   visit(ast);

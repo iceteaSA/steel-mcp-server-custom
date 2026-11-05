@@ -7,8 +7,38 @@ export function startSigninWorker() {
   let ping;
   let pending = [];
   let updates = Promise.resolve();
+  let relayState;
+  let badgeText;
+  let stopped = false;
+  const relayReady = chrome.storage.session.get("signinRelay").then(({ signinRelay }) => {
+    if (signinRelay?.status === "disconnected" && Number.isFinite(signinRelay.since))
+      relayState = { status: "disconnected", since: signinRelay.since };
+  });
   const applying = new Set();
   const completed = new Map();
+
+  async function badge() {
+    await relayReady;
+    const text =
+      relayState?.status === "disconnected" ? "!" : pending.length ? String(pending.length) : "";
+    if (text === badgeText) return;
+    await chrome.action.setBadgeText({ text });
+    await chrome.action.setBadgeBackgroundColor({ color: "#805500" });
+    badgeText = text;
+  }
+  function relay(status) {
+    updates = updates
+      .catch(() => {})
+      .then(async () => {
+        await relayReady;
+        if (relayState?.status !== status) {
+          relayState = status === "connected" ? { status } : { status, since: Date.now() };
+          await chrome.storage.session.set({ signinRelay: relayState });
+        }
+        await badge();
+      });
+    return updates;
+  }
 
   const review = (id) =>
     chrome.tabs.create({
@@ -58,8 +88,7 @@ export function startSigninWorker() {
     for (const id of signinNotified)
       if (!ids.has(id)) await chrome.notifications.clear(`signin:${id}`);
     await chrome.storage.session.set({ signinNotified: [...notified].filter((id) => ids.has(id)) });
-    await chrome.action.setBadgeText({ text: pending.length ? String(pending.length) : "" });
-    await chrome.action.setBadgeBackgroundColor({ color: "#805500" });
+    await badge();
   }
   function update(requests) {
     updates = updates.catch(() => {}).then(() => render(requests));
@@ -71,18 +100,26 @@ export function startSigninWorker() {
     await update(requests);
   }
   async function connect() {
-    if (connecting || (socket && socket.readyState <= 1)) return;
+    if (stopped || connecting || (socket && socket.readyState <= 1)) return;
     connecting = true;
     try {
       const settings = await getSettings();
-      if (!settings.serverSecret) return;
+      if (!settings.serverSecret) {
+        await relay("disconnected");
+        return;
+      }
       const origin = relayUrl(settings.serverUrl);
-      if (!(await chrome.permissions.contains({ origins: [hostPattern(origin)] }))) return;
+      if (!(await chrome.permissions.contains({ origins: [hostPattern(origin)] }))) {
+        await relay("disconnected");
+        return;
+      }
       const current = new WebSocket(origin.replace(/^http/, "ws") + "/signin/events");
       socket = current;
       let currentPing;
       current.onopen = () => {
+        if (socket !== current || stopped) return;
         current.send(JSON.stringify({ secret: settings.serverSecret }));
+        void relay("connected").catch(() => {});
         currentPing = setInterval(() => {
           if (current.readyState === 1) current.send(JSON.stringify({ type: "keepalive" }));
         }, 20_000);
@@ -99,9 +136,13 @@ export function startSigninWorker() {
       };
       current.onclose = () => {
         clearInterval(currentPing);
-        if (socket === current) socket = undefined;
+        if (socket !== current) return;
+        socket = undefined;
+        if (!stopped) void relay("disconnected").catch(() => {});
       };
       current.onerror = () => current.close();
+    } catch {
+      await relay("disconnected");
     } finally {
       connecting = false;
     }
@@ -136,7 +177,11 @@ export function startSigninWorker() {
     get pending() {
       return pending;
     },
+    get relayDisconnected() {
+      return relayState?.status === "disconnected";
+    },
     stop() {
+      stopped = true;
       clearInterval(ping);
       socket?.close();
     },

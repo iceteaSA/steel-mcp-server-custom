@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Request HTTP and HTTPS host access independently so Chrome accepts site and sign-in grants (`7b2c90b`).
+- Refuse wildcard and malformed hostnames from sign-in requests before the permission prompt (`ee32511`).
+- Correct profile-name validation for Chrome's Unicode Sets regular expressions. Keep the same permitted names.
+- Limit the sign-in review page to 760 pixels so the approval button text stays with the content on wide screens.
+- Show the sign-in connection state in the popup. Keep a warning badge and the outage start time while the connection is down.
+
 - Refuse a first profile binding after stateful lane use with `lane_not_fresh`. Keep empty `about:blank` tabs permitted.
 - Check cookies and origin entries before binding. Keep the used mark after pages close or cookies clear. Do not clear state on refusal.
 - Use the caller's held lease for saved-file deletion. Give `profile_busy` for a different holder and `profile_lease_required` without a holder.

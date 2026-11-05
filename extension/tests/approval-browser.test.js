@@ -9,19 +9,44 @@ for (const mode of ["light", "dark", "force-dark"]) {
       for (const populated of [false, true]) {
         const page = await context.newPage();
         await page.emulateMedia({ colorScheme: mode === "light" ? "light" : "dark" });
-        const requests = populated ? [{ id: "one", site: "https://example.com", domains: ["example.com"], profile: "work", caller: { agent: "Agent" }, reason: "Read account", expires: Date.now() + 300000 }] : [];
-        await page.addInitScript(mockChrome, { requests });
+        const requests = populated
+          ? [
+              {
+                id: "one",
+                site: "https://example.com",
+                domains: ["example.com"],
+                profile: "work",
+                caller: { agent: "Agent" },
+                reason: "Read account",
+                expires: Date.now() + 300000,
+              },
+            ]
+          : [];
+        await page.addInitScript(mockChrome, { requests, signinAccess: populated });
         await page.goto(`${origin}/approval.html?id=one`);
-        await page.waitForFunction(() => document.getElementById("status").textContent || document.getElementById("review").querySelector("h2"));
+        await page.waitForFunction(
+          () =>
+            document.getElementById("status").textContent ||
+            document.getElementById("review").querySelector("h2"),
+        );
         const button = page.getByRole("button", { name: "Approve sign-in transfer", exact: true });
         expect(await button.innerText()).toBe("Approve sign-in transfer");
         expect(await button.isVisible()).toBe(true);
         expect(await button.isDisabled()).toBe(!populated);
+        if (populated)
+          expect(await page.locator("#review").innerText()).toContain("1 cookies (names only)");
         const style = await button.evaluate((element) => {
           const css = getComputedStyle(element);
-          const range = document.createRange(); range.selectNodeContents(element);
+          const range = document.createRange();
+          range.selectNodeContents(element);
           const rect = range.getBoundingClientRect();
-          return { color: css.color, background: css.backgroundColor, font: parseFloat(css.fontSize), width: rect.width, height: rect.height };
+          return {
+            color: css.color,
+            background: css.backgroundColor,
+            font: parseFloat(css.fontSize),
+            width: rect.width,
+            height: rect.height,
+          };
         });
         expect(style.color).not.toBe(style.background);
         expect(style.font).toBeGreaterThan(0);
@@ -32,7 +57,9 @@ for (const mode of ["light", "dark", "force-dark"]) {
         expect(pixels.labelPixels).toBeGreaterThan(50);
         await page.close();
       }
-    } finally { await context.close(); }
+    } finally {
+      await context.close();
+    }
   }, 30000);
 }
 
@@ -58,5 +85,33 @@ it("keeps the approval label inside the first 900 pixels of a wide window", asyn
       expect(label.x).toBeGreaterThanOrEqual(0);
       expect(label.right).toBeLessThan(900);
     }
-  } finally { await context.close(); }
+  } finally {
+    await context.close();
+  }
+});
+
+it("keeps the down marker when a manual push writes its result badge", async () => {
+  const { context, worker, origin } = await unpackedExtensionBrowser();
+  try {
+    const page = await context.newPage();
+    await page.goto(`${origin}/popup.html`);
+    await page.waitForFunction(
+      async () =>
+        (await chrome.storage.session.get("signinRelay")).signinRelay?.status === "disconnected",
+    );
+    const cdp = await context.newCDPSession(page);
+    const { result, exceptionDetails } = await cdp.send("Runtime.evaluate", {
+      expression:
+        'chrome.runtime.sendMessage({ type: "push", sites: [{ url: "https://example.com/" }], profile: "work", includeStorage: false })',
+      awaitPromise: true,
+      returnByValue: true,
+    });
+    expect(exceptionDetails).toBeUndefined();
+    const response = result.value;
+    expect(response.ok).toBe(true);
+    expect(response.data[0].ok).toBe(false);
+    expect(await worker.evaluate(() => chrome.action.getBadgeText({}))).toBe("!");
+  } finally {
+    await context.close();
+  }
 });

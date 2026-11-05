@@ -14,7 +14,11 @@ export async function extensionBrowser() {
   });
   let browser;
   try {
-    browser = await chromium.launch({ executablePath: chromiumPath, headless: true, args: ["--no-sandbox"] });
+    browser = await chromium.launch({
+      executablePath: chromiumPath,
+      headless: true,
+      args: ["--no-sandbox"],
+    });
   } catch (error) {
     server.stop(true);
     throw error;
@@ -35,16 +39,31 @@ export async function unpackedExtensionBrowser(forceDark = false) {
     executablePath: chromiumPath,
     headless: true,
     ignoreDefaultArgs: ["--disable-extensions"],
-    args: ["--no-sandbox", `--disable-extensions-except=${path}`, `--load-extension=${path}`,
-      ...(forceDark ? ["--enable-features=WebContentsForceDark", "--force-dark-mode"] : [])],
+    args: [
+      "--no-sandbox",
+      `--disable-extensions-except=${path}`,
+      `--load-extension=${path}`,
+      ...(forceDark ? ["--enable-features=WebContentsForceDark", "--force-dark-mode"] : []),
+    ],
   });
   try {
-    const worker = context.serviceWorkers()[0] ?? await context.waitForEvent("serviceworker", { timeout: 10000 });
-    return { context, origin: new URL(worker.url()).origin.replace("null", worker.url().split("/").slice(0, 3).join("/")) };
-  } catch (error) { await context.close(); throw error; }
+    const worker =
+      context.serviceWorkers()[0] ??
+      (await context.waitForEvent("serviceworker", { timeout: 10000 }));
+    return { context, worker, origin: worker.url().split("/").slice(0, 3).join("/") };
+  } catch (error) {
+    await context.close();
+    throw error;
+  }
 }
 
-export function mockChrome({ requests = [], granted = false, allow = true, relayState } = {}) {
+export function mockChrome({
+  requests = [],
+  granted = false,
+  allow = true,
+  relayState,
+  signinAccess = false,
+} = {}) {
   globalThis.calls = [];
   globalThis.chromeChanges = [];
   const record = (value) => {
@@ -55,8 +74,20 @@ export function mockChrome({ requests = [], granted = false, allow = true, relay
     const newValue = JSON.parse(document.documentElement.dataset.relayState);
     for (const listener of chromeChanges) listener({ signinRelay: { newValue } }, "session");
   });
-  const settings = { serverUrl: "http://localhost:3001", serverSecret: "SYNTHETIC_SECRET", profileName: "work", pinnedSites: [], includeStorage: true };
-  const site = { url: "https://login.example.com/", domain: "login.example.com", granted, cookieCount: 2, parents: [{ domain: "example.com", granted: false }] };
+  const settings = {
+    serverUrl: "http://localhost:3001",
+    serverSecret: "SYNTHETIC_SECRET",
+    profileName: "work",
+    pinnedSites: [],
+    includeStorage: true,
+  };
+  const site = {
+    url: "https://login.example.com/",
+    domain: "login.example.com",
+    granted,
+    cookieCount: 2,
+    parents: [{ domain: "example.com", granted: false }],
+  };
   globalThis.chrome = {
     storage: {
       local: { get: async () => settings, set: async (value) => Object.assign(settings, value) },
@@ -64,8 +95,12 @@ export function mockChrome({ requests = [], granted = false, allow = true, relay
       onChanged: { addListener: (fn) => chromeChanges.push(fn) },
     },
     permissions: {
-      contains: async ({ origins }) => origins.every((origin) => origin.includes("localhost")),
-      request: async (permission) => { record(["grant", permission]); return allow; },
+      contains: async ({ origins }) =>
+        signinAccess || origins.every((origin) => origin.includes("localhost")),
+      request: async (permission) => {
+        record(["grant", permission]);
+        return allow;
+      },
     },
     runtime: {
       getURL: (path) => path,
@@ -76,12 +111,18 @@ export function mockChrome({ requests = [], granted = false, allow = true, relay
         if (message.type === "site-list") data = [site];
         if (message.type === "profiles") data = { profiles: [{ name: "work" }] };
         if (message.type === "summary") data = { domains: [] };
-        if (message.type === "push") data = [{ ok: true, domain: site.domain, profile: "work", cookieCount: 2, storageKeyCount: 0 }];
+        if (message.type === "push")
+          data = [
+            { ok: true, domain: site.domain, profile: "work", cookieCount: 2, storageKeyCount: 0 },
+          ];
         return { ok: true, data };
       },
     },
     tabs: { query: async () => [{ id: 7, url: site.url }], create: async () => {} },
-    cookies: { getAll: async () => [] },
+    cookies: {
+      getAll: async () =>
+        signinAccess ? [{ domain: "example.com", name: "sid", value: "SYNTHETIC_COOKIE" }] : [],
+    },
     scripting: { executeScript: async () => [] },
   };
   globalThis.fetch = async () => Response.json({ requests, grants: [] });

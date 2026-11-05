@@ -195,7 +195,8 @@ it("records relay transitions without settings and keeps the outage time and dow
   await client.update([]);
   expect(session.signinRelay.since).toBe(since);
   expect(badges.slice(count)).toEqual([]);
-  sockets[1].open();
+  await events.alarm({ name: "steel-signin-poll" });
+  sockets[2].open();
   await client.update([]);
   expect(session.signinRelay).toEqual({ status: "connected" });
   expect(badges.at(-1)).toBe("");
@@ -218,7 +219,11 @@ it("shows relay down even with pending requests and preserves the pending badge 
 });
 
 it("records synchronous connection failures without persisting exception text", async () => {
-  globalThis.WebSocket = class { constructor() { throw new Error("SYNTHETIC_SECRET URL"); } };
+  globalThis.WebSocket = class {
+    constructor() {
+      throw new Error("SYNTHETIC_SECRET URL");
+    }
+  };
   client = startSigninWorker();
   await client.start();
   await client.update([]);

@@ -19,6 +19,22 @@ function status(text, error = false) {
   $("status").textContent = text;
   $("status").className = `notice ${error ? "error" : "success"}`;
 }
+function renderRelayState(state) {
+  const down = state?.status === "disconnected";
+  const time = Number.isFinite(state?.since)
+    ? new Date(state.since).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: false,
+      })
+    : "unknown";
+  $("relayState").textContent = down
+    ? `Relay down since ${time} — requests cannot arrive`
+    : state?.status === "connected"
+      ? "Relay connected"
+      : "Checking sign-in relay…";
+  $("relayState").className = `notice ${down ? "error" : "muted"}`;
+}
 function destination() {
   return validProfile($("profilePicker").value || $("profileName").value.trim());
 }
@@ -308,12 +324,14 @@ $("pinSite").addEventListener("click", async () => {
 });
 chrome.storage.onChanged.addListener((changes, area) => {
   if (area === "local" && (changes.lastResults || changes.lastSync)) void loadResults();
+  if (area === "session" && changes.signinRelay) renderRelayState(changes.signinRelay.newValue);
 });
 
 async function init() {
   const settings = await getSettings();
   $("profileName").value = settings.profileName;
   $("includeStorage").checked = settings.includeStorage;
+  renderRelayState((await chrome.storage.session.get("signinRelay")).signinRelay);
   await Promise.all([loadResults(), loadSite(), loadSites(), loadProfiles()]);
   await loadSummary();
 }

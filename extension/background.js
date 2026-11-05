@@ -78,16 +78,24 @@ async function setResults(results) {
   const warning = results.some((result) => result.warning);
   await chrome.storage.local.set({ lastResults: results, lastSync: new Date().toISOString() });
   await chrome.action.setBadgeText({
-    text: signinWorker?.pending.length
-      ? String(signinWorker.pending.length)
-      : failed
-        ? "ERR"
-        : warning
-          ? "!"
-          : "OK",
+    text: signinWorker?.relayDisconnected
+      ? "!"
+      : signinWorker?.pending.length
+        ? String(signinWorker.pending.length)
+        : failed
+          ? "ERR"
+          : warning
+            ? "!"
+            : "OK",
   });
   await chrome.action.setBadgeBackgroundColor({
-    color: failed ? "#b42318" : warning ? "#805500" : "#167044",
+    color: signinWorker?.relayDisconnected
+      ? "#805500"
+      : failed
+        ? "#b42318"
+        : warning
+          ? "#805500"
+          : "#167044",
   });
   await chrome.action.setTitle({
     title: failed

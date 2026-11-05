@@ -12,6 +12,7 @@
       <a href="options.html" target="_blank">Settings</a>
     </header>
     <p id="connection" class="notice muted" role="status">Checking relay connection…</p>
+    <p id="relayState" class="notice muted" role="status">Checking sign-in relay…</p>
     <p id="secretSettings" hidden>
       <a href="options.html" target="_blank">Open Settings to save the relay secret</a>
     </p>
@@ -57,7 +58,7 @@
         ><input
           id="profileName"
           maxlength="64"
-          pattern="[a-zA-Z0-9_-]{1,64}"
+          pattern="[a-zA-Z0-9_\-]{1,64}"
           autocomplete="off"
           value="vivaldi"
         />
