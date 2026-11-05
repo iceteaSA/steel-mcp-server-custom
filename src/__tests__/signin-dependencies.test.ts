@@ -15,16 +15,28 @@ test("sign-in registration uses explicit shared dependencies and resolves the ca
   const store = await SigninStore.open({ profilesDir: directory, automaticTimers: false });
   const specs: ToolSpec[] = [];
   let caller = "first";
-  Reflect.apply(signin, undefined, [(spec: ToolSpec) => specs.push(spec), manager, env, { signin: { store: Promise.resolve(store), getCaller: () => caller } }]);
+  Reflect.apply(signin, undefined, [
+    (spec: ToolSpec) => specs.push(spec),
+    manager,
+    env,
+    { signin: { store: Promise.resolve(store), getCaller: () => caller } },
+  ]);
   try {
     const request = specs.find((spec) => spec.name === "request_signin")!;
     for (const value of ["first", "second"]) {
       caller = value;
-      const result = await request.handler({ site: "https://example.test", profile: value, reason: "fixture" });
+      const result = await request.handler({
+        site: "https://example.test",
+        profile: value,
+        reason: "fixture",
+      });
       expect(result.isError).not.toBe(true);
       expect(result.structuredContent.status).toBe("pending");
     }
-    expect((await store.pending()).map((request) => request.caller.sessionID)).toEqual(["first", "second"]);
+    expect((await store.pending()).map((request) => request.caller.sessionID)).toEqual([
+      "first",
+      "second",
+    ]);
     expect(manager.tabIds).toEqual([]);
   } finally {
     store.close();

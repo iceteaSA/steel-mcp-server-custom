@@ -52,8 +52,14 @@ export async function cancel_signin(
   return terminal;
 }
 
-export function register(register: ToolRegistrar, _manager: BrowserManager, _env: Env, dependencies: ToolDependencies = {}): void {
-  const getStore = () => dependencies.signin?.store ?? Promise.reject(new Error("signin_unavailable"));
+export function register(
+  register: ToolRegistrar,
+  _manager: BrowserManager,
+  _env: Env,
+  dependencies: ToolDependencies = {},
+): void {
+  const getStore = () =>
+    dependencies.signin?.store ?? Promise.reject(new Error("signin_unavailable"));
   const getCaller = () => dependencies.signin?.getCaller() ?? "single-process";
   // `signin_unknown` has only `error`, with no request metadata.
   const outputSchema = {
