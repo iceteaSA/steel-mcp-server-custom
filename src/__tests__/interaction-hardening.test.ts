@@ -102,12 +102,35 @@ for (const kind of ["select", "selectLabel", "selectIndex"]) {
     );
     const start = performance.now();
     const result = await tools()("fill").handler({
+      timeout: 1000,
       fields: [{ selector: "#country", kind, value: kind === "selectIndex" ? "99" : "missing" }],
     });
     expect(result.isError).toBe(true);
     expect(JSON.stringify(result)).toContain("Option not found");
+    expect(JSON.stringify(result)).toContain("2 options");
+    expect(JSON.stringify(result)).toContain("Canada");
+    expect(JSON.stringify(result)).toContain("United States");
+    expect(performance.now() - start).toBeGreaterThanOrEqual(900);
     expect(performance.now() - start).toBeLessThan(2000);
     expect(await page.locator("#country").inputValue()).toBe("ca");
     expect(await page.locator("#country").getAttribute("data-changes")).toBe("0");
   }, 15000);
+}
+
+for (const kind of ["select", "selectLabel", "selectIndex"]) {
+  test(`fill ${kind} waits for an option added after the call starts`, async () => {
+    await page.setContent('<select id="country" data-changes="0" onchange="this.dataset.changes=String(Number(this.dataset.changes)+1)"><option value="ca">Canada</option></select>');
+    const pending = tools()("fill").handler({ fields: [{ selector: "#country", kind, value: kind === "selectLabel" ? "United States" : kind === "selectIndex" ? "1" : "us" }] });
+    await page.evaluate(() => {
+      setTimeout(() => {
+        const select = document.querySelector("select")!;
+        select.add(new Option("United States", "us"));
+      }, 800);
+    });
+    await page.locator('option[value="us"]').waitFor({ state: "attached", timeout: 2000 });
+    const result = await pending;
+    expect(result.isError).not.toBe(true);
+    expect(await page.locator("#country").inputValue()).toBe("us");
+    expect(await page.locator("#country").getAttribute("data-changes")).toBe("1");
+  });
 }
