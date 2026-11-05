@@ -120,6 +120,28 @@ function structured(result: Awaited<ReturnType<Client["callTool"]>>) {
   return result.structuredContent as Record<string, unknown> | undefined;
 }
 
+test("long caller IDs have bounded display labels without sharing tabs with literal labels", async () => {
+  const f = await fixture();
+  try {
+    const caller = "é".repeat(65);
+    const digest = new Bun.CryptoHasher("sha256").update(caller).digest("hex");
+    const label = `sha256:${digest.slice(0, 16)}`;
+    const own = tab(await f.call(caller, "new_tab"));
+    const foreign = tab(await f.call(label, "new_tab"));
+    expect(foreign).not.toBe(own);
+    expect(text(await f.call(label, "list_tabs", { tabId: own }))).toContain("not_in_lane");
+    const lanes = structured(await f.call(caller, "list_lanes"))?.lanes as { caller: string }[];
+    expect(lanes.map((lane) => lane.caller)).toEqual([label, label]);
+    expect(lanes.every((lane) => Buffer.byteLength(lane.caller) <= 128)).toBe(true);
+    const short = "é".repeat(64);
+    await f.call(short, "new_tab");
+    const updated = structured(await f.call(short, "list_lanes"))?.lanes as { caller: string }[];
+    expect(updated.at(-1)?.caller).toBe(short);
+  } finally {
+    await f.close();
+  }
+});
+
 for (const mode of ["on", "off"] as const) {
   for (const vector of [
     "evaluate-profile",
