@@ -64,7 +64,10 @@ export class LaneRuntime {
     closeTabIds?: number[];
   }>();
   private readonly lanes = new Map<string, Lane>();
-  private readonly leases = new Map<string, { lane: Lane; since: number; autosave: boolean }>();
+  private readonly leases = new Map<
+    string,
+    { lane: Lane; token: symbol; since: number; autosave: boolean }
+  >();
   private nextLabel = 0;
   private readonly leaseChanged = new Set<() => void>();
   private readonly opening = new Map<string, Promise<Lane>>();
@@ -185,10 +188,18 @@ export class LaneRuntime {
     return this.profileCaller.getStore() ?? this.current.getStore()?.lane.caller;
   }
 
+  private releaseLease(name: string, lane: Lane, token: symbol): void {
+    const held = this.leases.get(name);
+    if (!held || held.lane !== lane || held.token !== token) return;
+    this.leases.delete(name);
+    for (const notify of this.leaseChanged) notify();
+  }
+
   private releaseLeases(lane: Lane): void {
     for (const [name, lease] of this.leases) {
-      if (lease.lane === lane) this.leases.delete(name);
+      if (lease.lane === lane) this.releaseLease(name, lane, lease.token);
     }
+    // Closed lanes can wait without a lease. Notify those waiters too.
     for (const notify of this.leaseChanged) notify();
   }
 
@@ -207,7 +218,7 @@ export class LaneRuntime {
     name: string,
     wait: number,
     autosave: boolean,
-  ): Promise<boolean> {
+  ): Promise<symbol | undefined> {
     this.assertLaneProfile(lane, name);
     const deadline = Date.now() + Math.min(120, Math.max(0, wait)) * 1000;
     for (;;) {
@@ -215,12 +226,14 @@ export class LaneRuntime {
         throw new Error("lane_closed: lane closed while waiting for a profile.");
       const held = this.leases.get(name);
       if (!held || held.lane === lane) {
+        const token = held?.token ?? Symbol("profile-lease");
         this.leases.set(name, {
           lane,
+          token,
           since: held?.since ?? this.now(),
           autosave: autosave || held?.autosave === true,
         });
-        return !held;
+        return held ? undefined : token;
       }
       const remaining = deadline - Date.now();
       if (remaining <= 0)
@@ -600,7 +613,7 @@ export class LaneRuntime {
             name === "use_profile" ||
             name === "create_profile" ||
             (name === "new_tab" && typeof args.profile === "string");
-          let acquired = false;
+          let acquired: symbol | undefined;
           if (takesLease && typeof profileName === "string")
             acquired = await this.acquire(
               lane,
@@ -637,8 +650,7 @@ export class LaneRuntime {
               handler,
             );
             if (result.isError && acquired) {
-              this.leases.delete(String(profileName));
-              for (const notify of this.leaseChanged) notify();
+              this.releaseLease(String(profileName), lane, acquired);
             }
             if (name === "delete_profile" && !result.isError) {
               const lease = this.leases.get(String(profileName));
@@ -647,8 +659,7 @@ export class LaneRuntime {
             return result;
           } catch (error) {
             if (acquired) {
-              this.leases.delete(String(profileName));
-              for (const notify of this.leaseChanged) notify();
+              this.releaseLease(String(profileName), lane, acquired);
             }
             throw error;
           }
