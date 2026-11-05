@@ -1,4 +1,11 @@
-import { getSettings, validProfile, sitePatterns, requestAccess, send } from "./core.js";
+import {
+  getSettings,
+  validProfile,
+  sitePatterns,
+  domainPatterns,
+  requestAccess,
+  send,
+} from "./core.js";
 import { mountSigninLists } from "./signin-ui.js";
 
 const $ = (id) => document.getElementById(id);
@@ -228,7 +235,7 @@ $("grantParent").addEventListener("click", async () => {
   try {
     const domain = $("parentDomain").value;
     if (!site?.parents?.some((parent) => parent.domain === domain)) return;
-    const granted = await requestAccess([`*://${domain}/*`]);
+    const granted = await requestAccess(domainPatterns(domain));
     if (!granted)
       throw new Error(
         "Parent cookie access was not granted. Counts can omit shared sign-in cookies.",

@@ -10,6 +10,7 @@ import {
   currentTab,
   readStorage,
   parentDomains,
+  domainPatterns,
   revokeDiscoveryAccess,
   DISCOVERY_ORIGINS,
 } from "./core.js";
@@ -245,7 +246,7 @@ async function handleMessage(message) {
         parents: await Promise.all(
           parentDomains(url.hostname).map(async (domain) => ({
             domain,
-            granted: await chrome.permissions.contains({ origins: [`*://${domain}/*`] }),
+            granted: await chrome.permissions.contains({ origins: domainPatterns(domain) }),
           })),
         ),
       };

@@ -57,9 +57,14 @@ export function hostPattern(value) {
   return `${url.protocol}//${url.hostname}/*`;
 }
 
+// Chrome grants a requested pattern only when one declared optional pattern contains it.
+// The manifest declares http://*/* and https://*/*, so a "*://" request is always refused.
+export function domainPatterns(hostname) {
+  return [`https://${hostname}/*`, `http://${hostname}/*`];
+}
+
 export function sitePatterns(value) {
-  const url = siteUrl(value);
-  return [`*://${url.hostname}/*`];
+  return domainPatterns(siteUrl(value).hostname);
 }
 
 export function parentDomains(hostname) {
@@ -198,7 +203,7 @@ export async function send(type, data = {}) {
 }
 
 export function signinPatterns(request) {
-  return request.domains.map((domain) => `*://${domain}/*`);
+  return request.domains.flatMap(domainPatterns);
 }
 
 async function signinData(request, countOnly) {
@@ -206,7 +211,8 @@ async function signinData(request, countOnly) {
     throw new Error("This request expired. Ask for a new request.");
   const granted = [];
   for (const domain of request.domains) {
-    if (await chrome.permissions.contains({ origins: [`*://${domain}/*`] })) granted.push(domain);
+    if (await chrome.permissions.contains({ origins: domainPatterns(domain) }))
+      granted.push(domain);
   }
   const cookies = (await chrome.cookies.getAll({})).filter((cookie) =>
     granted.includes(normalizeDomain(cookie.domain)),

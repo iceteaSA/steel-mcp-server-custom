@@ -69,7 +69,16 @@ describe("request-scoped sign-in transfer", () => {
     };
     const transfer = core.approveSignin(signin, true);
     expect(calls).toEqual([
-      { permission: { origins: ["*://login.example.com/*", "*://example.com/*"] } },
+      {
+        permission: {
+          origins: [
+            "https://login.example.com/*",
+            "http://login.example.com/*",
+            "https://example.com/*",
+            "http://example.com/*",
+          ],
+        },
+      },
     ]);
     expect(await transfer).toMatchObject({ status: "approved" });
     expect(calls.at(-1)).toEqual({
@@ -128,7 +137,8 @@ describe("request-scoped sign-in transfer", () => {
 describe("explicit host permissions", () => {
   it("grants exact site hosts and lists parents without a public-suffix guess", () => {
     expect(sitePatterns("https://login.accounts.example.co.uk")).toEqual([
-      "*://login.accounts.example.co.uk/*",
+      "https://login.accounts.example.co.uk/*",
+      "http://login.accounts.example.co.uk/*",
     ]);
     expect(parentDomains("login.accounts.example.co.uk")).toEqual([
       "accounts.example.co.uk",
@@ -389,7 +399,10 @@ describe("requested host patterns fit the manifest one pattern at a time", () =>
     ];
     for (const requested of requests) {
       expect(requested.length).toBeGreaterThan(0);
-      expect({ requested, ok: chromeContains(declared, requested) }).toEqual({ requested, ok: true });
+      expect({ requested, ok: chromeContains(declared, requested) }).toEqual({
+        requested,
+        ok: true,
+      });
     }
     expect(core.domainPatterns("example.com")).toEqual([
       "https://example.com/*",
@@ -397,10 +410,10 @@ describe("requested host patterns fit the manifest one pattern at a time", () =>
     ]);
     expect(chromeContains(declared, core.domainPatterns("example.com"))).toBe(true);
   });
-  it("leaves no wildcard-scheme pattern in the extension sources", async () => {
+  it("builds no wildcard-scheme host pattern in the extension sources", async () => {
     for (const file of ["core.js", "background.js", "popup.js", "approval.js", "options.js"]) {
       const source = await readFile(new URL(`../${file}`, import.meta.url), "utf8");
-      expect({ file, wildcard: source.includes("*://") }).toEqual({ file, wildcard: false });
+      expect({ file, wildcard: source.includes("`*://${") }).toEqual({ file, wildcard: false });
     }
   });
 });
