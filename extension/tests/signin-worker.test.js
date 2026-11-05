@@ -19,6 +19,8 @@ let fetches;
 let session;
 let alarms;
 let timers;
+let settings;
+let localState;
 const request = {
   id: "one",
   caller: { agent: "agent", title: "Task" },
@@ -47,6 +49,8 @@ beforeEach(() => {
   alarms = [];
   timers = new Map();
   requests = [{ ...request }];
+  settings = { serverUrl: "http://localhost:3001", serverSecret: "fake-secret" };
+  localState = {};
   globalThis.setInterval = (callback, delay) => {
     const id = timers.size + 1;
     timers.set(id, { callback, delay });
@@ -79,7 +83,7 @@ beforeEach(() => {
     runtime: { getURL: (path) => `chrome-extension://fake/${path}` },
     storage: {
       local: {
-        get: async () => ({ serverUrl: "http://localhost:3001", serverSecret: "fake-secret" }),
+        get: async () => ({ ...settings, ...localState }),
       },
       session: {
         get: async () => ({ ...session }),
@@ -101,6 +105,7 @@ beforeEach(() => {
     action: {
       setBadgeText: async ({ text }) => badges.push(text),
       setBadgeBackgroundColor: async () => {},
+      setTitle: async () => {},
     },
     tabs: { create: async (input) => tabs.push(input), query: async () => [] },
     cookies: {
@@ -230,4 +235,91 @@ it("records synchronous connection failures without persisting exception text", 
   expect(session.signinRelay).toEqual({ status: "disconnected", since: expect.any(Number) });
   expect(JSON.stringify(session)).not.toContain("SYNTHETIC_SECRET");
   expect(badges.at(-1)).toBe("!");
+});
+
+it("restores the stored push failure after ERR to down to reconnected", async () => {
+  requests = [];
+  client = startSigninWorker();
+  await client.start();
+  sockets[0].open();
+  await client.update([]);
+  localState.lastResults = [{ ok: false, domain: "example.com", error: "Synthetic failure" }];
+  localState.lastSync = "2026-11-05T00:00:00Z";
+  await chrome.action.setBadgeText({ text: "ERR" });
+  expect(badges.at(-1)).toBe("ERR");
+  sockets[0].close();
+  await client.update([]);
+  expect(badges.at(-1)).toBe("!");
+  await events.alarm({ name: "steel-signin-poll" });
+  sockets[1].open();
+  await client.update([]);
+  expect(badges.at(-1)).toBe("ERR");
+  expect(localState.lastSync).toBe("2026-11-05T00:00:00Z");
+});
+
+it("derives the result after a push lands during a queued reconnect", async () => {
+  requests = [];
+  client = startSigninWorker();
+  await client.start();
+  sockets[0].close();
+  await client.update([]);
+  await events.alarm({ name: "steel-signin-poll" });
+  const entered = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const set = chrome.storage.session.set;
+  let held = false;
+  chrome.storage.session.set = async (value) => {
+    if (value.signinNotified && !held) {
+      held = true;
+      entered.resolve();
+      await release.promise;
+    }
+    return set(value);
+  };
+  const update = client.update([]);
+  await entered.promise;
+  sockets[1].open();
+  localState.lastResults = [{ ok: false, domain: "example.com", error: "Synthetic failure" }];
+  events.changed({ lastResults: { newValue: localState.lastResults } }, "local");
+  release.resolve();
+  await update;
+  await client.update([]);
+  expect(session.signinRelay).toEqual({ status: "connected" });
+  expect(badges.at(-1)).toBe("ERR");
+});
+
+for (const missing of ["secret", "permission"]) {
+  it(`marks a missing ${missing} as unconfigured without an outage badge`, async () => {
+    requests = [];
+    if (missing === "secret") settings.serverSecret = "";
+    else chrome.permissions.contains = async () => false;
+    client = startSigninWorker();
+    await client.start();
+    await client.update([]);
+    expect(session.signinRelay).toEqual({ status: "unconfigured" });
+    expect(badges.at(-1)).toBe("");
+    expect(sockets).toEqual([]);
+  });
+}
+
+it("recomputes the badge on session relay and local result changes without changing the result time", async () => {
+  requests = [];
+  client = startSigninWorker();
+  await client.start();
+  sockets[0].open();
+  await client.update([]);
+  localState.lastResults = [{ ok: true, domain: "example.com" }];
+  localState.lastSync = "2026-11-05T00:00:00Z";
+  await events.changed({ lastResults: { newValue: localState.lastResults } }, "local");
+  await client.update([]);
+  expect(badges.at(-1)).toBe("OK");
+  session.signinRelay = { status: "disconnected", since: Date.now() };
+  await events.changed({ signinRelay: { newValue: session.signinRelay } }, "session");
+  await client.update([]);
+  expect(badges.at(-1)).toBe("!");
+  session.signinRelay = { status: "connected" };
+  await events.changed({ signinRelay: { newValue: session.signinRelay } }, "session");
+  await client.update([]);
+  expect(badges.at(-1)).toBe("OK");
+  expect(localState.lastSync).toBe("2026-11-05T00:00:00Z");
 });

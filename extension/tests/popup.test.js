@@ -111,3 +111,11 @@ it("shows the session relay state on open and changes it without a popup reload"
     await page.close();
   }
 });
+
+it("shows a setup hint rather than an outage for an unconfigured relay", async () => {
+  const page = await popup({ relayState: { status: "unconfigured" } });
+  try {
+    expect(await page.locator("#relayState").innerText()).toBe("Set the relay URL and secret in Settings");
+    expect(await page.locator("#relayState").innerText()).not.toContain("Relay down since");
+  } finally { await page.close(); }
+});
