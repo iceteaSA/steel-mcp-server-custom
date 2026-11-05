@@ -41,8 +41,10 @@ return tab;
 - On `lanes_full`, use `list_lanes` to inspect usage and `close_lane` to release your lane before a retry.
 - Read closure NOTE lines before the next step. Close, idle, or restart can reset cookies, tabs, and buffers.
 - Save a named profile only when the task must keep state on disk.
-- Load a profile through `new_tab({profile})` only when its saved state applies to the task.
+- Use `use_profile({name, wait?, autosave?})` or `new_tab({profile})` only when its saved state applies to the task.
 - Use only one named `profile` in each lane. On `lane_profile_conflict`, close the lane or use a different lane. After `delete_profile`, the context keeps its binding.
+- On `profile_busy`, wait at most 120 seconds or use a different profile. Do not remove a different lane's lease.
+- Use `save_profile` with a held lease. Set `autosave: true` for a save before lane closure. Without autosave, close releases without a save.
 - Send caller metadata for credential writes and deletes, even without a browser lane.
 - In legacy mode (`STEEL_LANES=off`), use unique owner labels and do not stop the shared browser.
 

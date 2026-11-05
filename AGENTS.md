@@ -149,7 +149,7 @@ context-budget-constrained agents:
 Precedence: `--toolsets a,b` CLI flag > `TOOLSETS` env var > all toolsets.
 Unknown names fail startup with a list of valid values.
 
-All 9 toolsets are active by default. Lane mode has 47 tools, or 49 with AI tools.
+All 9 toolsets are active by default. Lane mode has 48 tools, or 50 with AI tools.
 Compatibility mode (`STEEL_LANES=off`) has 45 tools, or 47 with AI tools.
 The `ai` toolset operates only with `ACT_LLM_BASE_URL` and `ACT_LLM_MODEL`.
 Without these values, the server has no `act` or `extract_ai`, with or without `--toolsets=ai`.
@@ -166,6 +166,9 @@ Without these values, the server has no `act` or `extract_ai`, with or without `
 - Do not use `stop_browser` for shared cleanup. It refuses while a different lane is active.
 - Respect `LANE_IDLE_MS`, `LANE_DRAIN_MS`, and `LANE_MAX`. Active calls prevent closure until the bounded drain condition applies.
 - Use only one named `profile` in each lane context. On `lane_profile_conflict`, use `close_lane` or a different lane. After `delete_profile`, the context keeps this binding.
+- Use `use_profile({name, wait?, autosave?})` to get a profile lease. Use `wait` for at most 120 seconds.
+- Use `save_profile` only with a held lease. Close releases the lease without a save unless `autosave` is `true`.
+- Do not use leases between processes.
 
 For compatibility mode (`STEEL_LANES=off`):
 

@@ -8,7 +8,7 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 
 ## Features
 
-- **47 browser tools** (49 with AI tools) in lane mode. Each caller has different tabs and browser storage. `STEEL_LANES=off` uses the legacy tool set.
+- **48 browser tools** (50 with AI tools) in lane mode. Each caller has different tabs and browser storage. `STEEL_LANES=off` uses the legacy tool set.
 - **Patchright browser engine** — drops the `Runtime.enable` CDP fingerprint that vanilla Playwright leaks; native binary stays compatible with all standard Playwright page APIs
 - **Snapshot-first paradigm** — `snapshot` returns an accessibility tree with stable `[ref=eN]` tokens; refs feed `click`/`fill`/`scroll`/`get_attrs`/`extract`/`press_key` directly without re-discovering selectors
 - **MCP 2025 best practices** — `server.registerTool` with `readOnlyHint` / `destructiveHint` / `idempotentHint` / `openWorldHint` annotations and `outputSchema` → `structuredContent` on JSON tools
@@ -16,7 +16,7 @@ Fork of [steel-dev/steel-mcp-server](https://github.com/steel-dev/steel-mcp-serv
 - **Agent lanes**: one BrowserContext for each calling session, with different current tabs, console buffers, network buffers, and idle leases. Each tab has a call queue.
 - **Iframe targeting** — `click`, `fill`, `scroll`, `wait_for`, `evaluate`, and `snapshot` accept `frame: "<name>" | "<url-substring>" | "<index>"` to reach into child frames
 - **TLS-impersonated batch fetch** — `fetch_urls(mode: "auto"|"http"|"browser")` uses `impit` for fast HTTP first, auto-escalates to a real browser tab when the response looks like an SPA shell
-- **Profiles**: saved cookies and localStorage load into the caller's lane. Profile leases are not available.
+- **Profiles**: one lane holds a named profile lease at a time. Saved cookies and localStorage load into that lane.
 - **Credentials** — encrypted credential store (AES-256-GCM) with auto-fill support
 - **Cookie Push Extension** — Chrome/Vivaldi extension pushes real browser sessions to Steel profiles via HTTP relay
 - **CAPTCHA solving**: navigation and action tools wait a maximum of 90 s for CAPTCHA widgets or bot walls. Use `solve_captcha` for the REST API fallback (reCAPTCHA v2/v3 and Turnstile).
@@ -144,13 +144,18 @@ With other active lanes, `stop_browser` refuses the call. With no other active l
 
 `owner` is an optional tab label, not an access check. `force` is accepted but ignored, with a NOTE line.
 
-`new_tab({profile})` loads the saved profile into the lane's context through the same load path as legacy mode.
-All tabs in that lane then share that storage. `list_profiles` keeps the same result format.
+`use_profile({name, wait?, autosave?})` gets a profile lease and loads cookies and localStorage for all saved origins.
+`new_tab({profile})` gets the same lease. All tabs in that lane share storage.
+A different lane gets `profile_busy` with the holder's lane label and `ageSeconds`, not its session ID.
 
 One lane context can hold only one named profile. A different name gives `lane_profile_conflict` with the held profile name.
 Use `close_lane` or a different lane to change profiles. After `delete_profile`, the live context keeps its profile binding.
 
-Profile files stay shared. Profile leases and encrypted profile storage are different work.
+Use `wait` for at most 120 seconds. A wait does not hold the profile write queue.
+Use `save_profile` with a held lease. Close and idle release it without a save unless `autosave` is `true`.
+A browser disconnect releases all leases. Autosave cannot read a closed browser context.
+
+`list_profiles` shows the holder and lease age in its text result. Leases stay only in this process.
 
 The idle lease closes a lane after `LANE_IDLE_MS`. It does not close individual idle tabs.
 The lease defaults to 15 minutes. A new call resets its activity clock.

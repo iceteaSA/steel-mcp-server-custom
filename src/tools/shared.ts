@@ -116,7 +116,7 @@ export function makeRegistrar(
       stop_browser:
         "Refuse while another lane is active. Otherwise close only the caller's lane, not the shared Steel session or operator context. force is accepted and ignored with a NOTE line.",
       create_profile:
-        "Create a named profile in the caller's lane and restore saved cookies and localStorage through the existing restore path. Return the initial tab ID. One profile name per lane context; a different name returns lane_profile_conflict. Use close_lane or another lane to change profiles.",
+        "Create a named profile in the caller's lane, take its exclusive lease, and restore saved cookies and localStorage through the existing restore path. Return the initial tab ID. One profile name per lane context; a different name returns lane_profile_conflict. Use close_lane or another lane to change profiles.",
       delete_profile:
         "Close the named profile's tabs in the caller's lane. Keep the lane context open. Optionally remove the shared saved profile file from disk.",
       get_console:
@@ -167,6 +167,28 @@ export function makeRegistrar(
   };
 
   if (runtime) {
+    register({
+      name: "use_profile",
+      title: "Use Profile",
+      description:
+        "Take an exclusive profile lease and restore saved cookies and storage into your lane. A busy profile returns its holder label and lease age. Close releases the lease without saving unless autosave is true. Use save_profile for an explicit save.",
+      toolset: "auth",
+      inputSchema: {
+        name: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),
+        wait: z.number().min(0).max(120).optional(),
+        autosave: z.boolean().optional(),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      handler: async ({ name }) => {
+        const { tabId } = await runtime.manager.newTab(undefined, undefined, name);
+        return { content: [{ type: "text", text: `Profile lease acquired. Tab ID: ${tabId}` }] };
+      },
+    });
     for (const name of ["list_lanes", "close_lane"] as const) {
       register({
         name,

@@ -95,10 +95,22 @@ test("every tool explicitly declares all four MCP safety hints", async () => {
   await client.close();
   await server.close();
   await handle.close?.();
-  expect(tools).toHaveLength(49);
+  expect(tools).toHaveLength(50);
   expect(tools.map((tool) => tool.name).sort()).toEqual(
-    [...expectedToolNames, "list_lanes", "close_lane"].sort(),
+    [...expectedToolNames, "list_lanes", "close_lane", "use_profile"].sort(),
   );
+  const use = tools.find((tool) => tool.name === "use_profile")!;
+  expect(use.annotations).toEqual({
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
+  });
+  expect(Object.keys(use.inputSchema.properties ?? {}).sort()).toEqual([
+    "autosave",
+    "name",
+    "wait",
+  ]);
   expect(tools.find((tool) => tool.name === "solve_captcha")?.annotations).toEqual({
     readOnlyHint: false,
     destructiveHint: true,

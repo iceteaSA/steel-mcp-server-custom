@@ -81,7 +81,10 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, _env: Env
             ? `active (${p.tabCount} tab${p.tabCount !== 1 ? "s" : ""})`
             : "saved";
           const saved = p.savedAt ? ` | saved: ${p.savedAt}` : "";
-          return `  ${p.name}: ${status}${saved}`;
+          const lease = p.leaseHolder
+            ? ` | holder: ${p.leaseHolder} | ageSeconds: ${p.leaseAgeSeconds}`
+            : "";
+          return `  ${p.name}: ${status}${saved}${lease}`;
         });
         const structured = profiles.map((p) => ({
           name: p.name,

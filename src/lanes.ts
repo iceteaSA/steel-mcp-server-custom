@@ -10,6 +10,7 @@ let nextTabId = Number(randomBytes(8).readBigUInt64BE() >> 12n);
 type CloseReason = "idle" | "close_lane" | "restart" | "session-ended";
 type Lane = {
   caller: string;
+  label: string;
   manager: BrowserManager;
   created: number;
   touched: number;
@@ -31,6 +32,7 @@ const STATELESS = new Set(["list_profiles", "credentials", "captcha_status"]);
 const SIGNIN_TOOLS = new Set(["request_signin", "signin_status", "cancel_signin"]);
 const CONTEXT_TOOLS = new Set([
   "new_tab",
+  "use_profile",
   "list_tabs",
   "start_browser",
   "cookies",
@@ -52,6 +54,8 @@ export class LaneRuntime {
     closeTabIds?: number[];
   }>();
   private readonly lanes = new Map<string, Lane>();
+  private readonly leases = new Map<string, { lane: Lane; since: number; autosave: boolean }>();
+  private readonly leaseChanged = new Set<() => void>();
   private readonly opening = new Map<string, Promise<Lane>>();
   private readonly closed = new Map<string, { reason: CloseReason; at: number }>();
   private readonly now: () => number;
@@ -72,6 +76,7 @@ export class LaneRuntime {
       }
       for (const lane of this.lanes.values()) {
         lane.closing = true;
+        this.releaseLeases(lane);
         const cleanup = lane.manager.stop();
         this.endedCleanup.add(cleanup);
         void cleanup.then(
@@ -149,11 +154,63 @@ export class LaneRuntime {
         if (profile.active) profiles.set(profile.name, profile);
       }
     }
-    return [...profiles.values()];
+    return [...profiles.values()].map((profile) => {
+      const lease = this.leases.get(profile.name);
+      return lease
+        ? {
+            ...profile,
+            leaseHolder: lease.lane.label,
+            leaseAgeSeconds: Math.max(0, (this.now() - lease.since) / 1000),
+          }
+        : profile;
+    });
   }
 
   getCaller(): string | undefined {
     return this.profileCaller.getStore() ?? this.current.getStore()?.lane.caller;
+  }
+
+  private releaseLeases(lane: Lane): void {
+    for (const [name, lease] of this.leases) {
+      if (lease.lane === lane) this.leases.delete(name);
+    }
+    for (const notify of this.leaseChanged) notify();
+  }
+
+  private async acquire(
+    lane: Lane,
+    name: string,
+    wait: number,
+    autosave: boolean,
+  ): Promise<boolean> {
+    const deadline = Date.now() + Math.min(120, Math.max(0, wait)) * 1000;
+    for (;;) {
+      if (lane.closing || lane.manager.isLaneClosed || this.stopping)
+        throw new Error("lane_closed: lane closed while waiting for a profile.");
+      const held = this.leases.get(name);
+      if (!held || held.lane === lane) {
+        this.leases.set(name, {
+          lane,
+          since: held?.since ?? this.now(),
+          autosave: autosave || held?.autosave === true,
+        });
+        return !held;
+      }
+      const remaining = deadline - Date.now();
+      if (remaining <= 0)
+        throw new Error(
+          `profile_busy: holder=${held.lane.label}; ageSeconds=${Math.max(0, (this.now() - held.since) / 1000)}`,
+        );
+      await new Promise<void>((resolve) => {
+        const done = () => {
+          clearTimeout(timer);
+          this.leaseChanged.delete(done);
+          resolve();
+        };
+        const timer = setTimeout(done, remaining);
+        this.leaseChanged.add(done);
+      });
+    }
   }
 
   async applyProfileUpdated(profile: string): Promise<boolean> {
@@ -250,6 +307,7 @@ export class LaneRuntime {
       );
       lane = {
         caller,
+        label: `Lane ${this.lanes.size + 1}`,
         manager,
         created: this.now(),
         touched: this.now(),
@@ -305,6 +363,7 @@ export class LaneRuntime {
   private dispose(lane: Lane, reason: CloseReason): Promise<void> {
     if (lane.disposal) return lane.disposal;
     lane.closing = true;
+    for (const notify of this.leaseChanged) notify();
     lane.disposal = (async () => {
       let timer: ReturnType<typeof setTimeout> | undefined;
       try {
@@ -317,7 +376,15 @@ export class LaneRuntime {
       } finally {
         clearTimeout(timer);
       }
-      await lane.manager.stop();
+      try {
+        for (const [name, lease] of this.leases) {
+          if (lease.lane === lane && lease.autosave && !lane.manager.isLaneClosed)
+            await lane.manager.saveProfile(name);
+        }
+      } finally {
+        this.releaseLeases(lane);
+        await lane.manager.stop();
+      }
       if (this.lanes.get(lane.caller) === lane) {
         this.rememberClosed(lane.caller, reason);
         this.lanes.delete(lane.caller);
@@ -460,6 +527,7 @@ export class LaneRuntime {
         if (name === "close_tabs" && args.tabId === undefined && args.owner === undefined)
           args.tabId = ids[0];
         const profileMutation =
+          name === "use_profile" ||
           name === "create_profile" ||
           name === "save_profile" ||
           name === "delete_profile" ||
@@ -467,15 +535,50 @@ export class LaneRuntime {
         return this.queue(lane, profileMutation ? [0, ...ids] : ids, async () => {
           if (lane.manager.isLaneClosed)
             throw new Error("lane_closed: context closed while the call was queued.");
-          return this.current.run(
-            {
+          const profileName = name === "new_tab" ? args.profile : args.name;
+          const takesLease =
+            name === "use_profile" ||
+            name === "create_profile" ||
+            (name === "new_tab" && typeof args.profile === "string");
+          let acquired = false;
+          if (takesLease && typeof profileName === "string")
+            acquired = await this.acquire(
               lane,
-              tabId: ids.length === 1 ? ids[0] : undefined,
-              completion,
-              ...(name === "close_tabs" ? { closeTabIds: ids } : {}),
-            },
-            handler,
-          );
+              profileName,
+              typeof args.wait === "number" ? args.wait : 0,
+              args.autosave === true,
+            );
+          if (name === "save_profile" && this.leases.get(String(args.name))?.lane !== lane)
+            throw new Error("profile_lease_required: use_profile before save_profile.");
+          if (name === "delete_profile") {
+            const held = this.leases.get(String(args.name));
+            if (held && held.lane !== lane)
+              throw new Error(
+                `profile_busy: holder=${held.lane.label}; ageSeconds=${Math.max(0, (this.now() - held.since) / 1000)}`,
+              );
+          }
+          try {
+            const result = await this.current.run(
+              {
+                lane,
+                tabId: ids.length === 1 ? ids[0] : undefined,
+                completion,
+                ...(name === "close_tabs" ? { closeTabIds: ids } : {}),
+              },
+              handler,
+            );
+            if ((result.isError && acquired) || (name === "delete_profile" && !result.isError)) {
+              this.leases.delete(String(profileName));
+              for (const notify of this.leaseChanged) notify();
+            }
+            return result;
+          } catch (error) {
+            if (acquired) {
+              this.leases.delete(String(profileName));
+              for (const notify of this.leaseChanged) notify();
+            }
+            throw error;
+          }
         });
       });
       lane.running.add(operation);

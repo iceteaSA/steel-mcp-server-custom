@@ -1612,6 +1612,10 @@ export class BrowserManager {
         await context.addCookies(state.cookies);
         restored = true;
       }
+      if (this.laneContext && state.localStorage) {
+        await this.applyProfileUpdated(name);
+        restored = true;
+      }
       if (url && state.localStorage) {
         await page.goto(url, { waitUntil: "domcontentloaded" });
         const origin = new URL(url).origin;
@@ -1769,7 +1773,14 @@ export class BrowserManager {
    * List all active profiles + any saved profiles on disk.
    */
   async listProfiles(): Promise<
-    Array<{ name: string; active: boolean; tabCount: number; savedAt?: string }>
+    Array<{
+      name: string;
+      active: boolean;
+      tabCount: number;
+      savedAt?: string;
+      leaseHolder?: string;
+      leaseAgeSeconds?: number;
+    }>
   > {
     const result: Array<{ name: string; active: boolean; tabCount: number; savedAt?: string }> = [];
 
