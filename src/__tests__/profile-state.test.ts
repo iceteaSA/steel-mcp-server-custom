@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, expect, test } from "bun:test";
 import { chromium, type Browser, type BrowserContext } from "patchright";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BrowserManager } from "../manager.js";
 import { EnvSchema } from "../env.js";
+import { encryptJSON } from "../crypto.js";
 import {
   mergeProfileData,
   httpOrigin,
@@ -164,4 +165,22 @@ test("the strict profile reader preserves partitionKey returned by actual Chromi
   const file = join(directory, "state.json");
   await withProfileWrite(file, () => writeProfileData(file, { cookies }));
   expect((await readProfileData(file)).cookies?.[0].partitionKey).toBe("https://top.example");
+});
+
+test("compatibility mode still ignores a malformed plaintext restore when encryption is off", async () => {
+  await writeFile(join(directory, "broken.json"), '{"cookies": invalid}');
+  const restored = await manager.createProfile("broken");
+  expect(restored.restored).toBe(false);
+  const page = await manager.getPage(restored.tabId);
+  expect(await page.context().cookies()).toEqual([]);
+});
+
+test("compatibility mode refuses an encrypted restore without a passphrase", async () => {
+  const file = join(directory, "locked.json");
+  const encrypted = encryptJSON({ cookies: [] }, "test-passphrase");
+  await writeFile(file, encrypted);
+  const contexts = browser.contexts().length;
+  await expect(manager.createProfile("locked")).rejects.toThrow("CREDENTIALS_PASSPHRASE");
+  expect(browser.contexts()).toHaveLength(contexts);
+  expect(await Bun.file(file).text()).toBe(encrypted);
 });

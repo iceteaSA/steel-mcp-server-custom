@@ -83,7 +83,10 @@ export async function readProfileData(
       if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Invalid profile file");
       const raw = (await fs.readFile(file, "utf8")).trim();
       if (!raw.startsWith("{")) {
-        if (!passphrase) throw new Error("Encrypted profile requires CREDENTIALS_PASSPHRASE.");
+        if (!passphrase)
+          throw Object.assign(new Error("Encrypted profile requires CREDENTIALS_PASSPHRASE."), {
+            code: "profile_passphrase_required",
+          });
         try {
           return stateSchema.parse(decryptJSON(raw, passphrase));
         } catch {

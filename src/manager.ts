@@ -1630,7 +1630,14 @@ export class BrowserManager {
         return { tabId, restored: true };
       }
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      const code = (error as NodeJS.ErrnoException).code;
+      // Compatibility mode ignores plaintext restore errors, but encrypted state must fail closed.
+      if (
+        code !== "ENOENT" &&
+        (this.laneContext ||
+          this.env.CREDENTIALS_PASSPHRASE ||
+          code === "profile_passphrase_required")
+      ) {
         this.profiles.delete(name);
         this.tabToProfile.delete(tabId);
         await page.close().catch(() => {});
