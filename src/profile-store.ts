@@ -1,6 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
+import { isDeepStrictEqual } from "node:util";
+import { encryptJSON, decryptJSON } from "./crypto.js";
 import type { BrowserContext } from "patchright";
 import { z } from "zod";
 
@@ -47,12 +50,18 @@ export interface ProfileData {
 }
 const writes = new Map<string | object, Promise<unknown>>();
 const revisions = new Map<string, number>();
+const writing = new AsyncLocalStorage<ReadonlySet<string>>();
 
 export function profileRevision(file: string): number {
   return revisions.get(path.resolve(file)) ?? 0;
 }
 export function withProfileWrite<T>(file: string, operation: () => Promise<T>): Promise<T> {
-  return serialize(path.resolve(file), operation);
+  const key = path.resolve(file);
+  // Nested reads use the same queue slot so migration cannot deadlock a save.
+  if (writing.getStore()?.has(key)) return operation();
+  return serialize(key, () =>
+    writing.run(new Set([...(writing.getStore() ?? []), key]), operation),
+  );
 }
 export function serialize<T>(key: string | object, operation: () => Promise<T>): Promise<T> {
   const next = (writes.get(key) ?? Promise.resolve()).catch(() => {}).then(operation);
@@ -63,26 +72,77 @@ export function serialize<T>(key: string | object, operation: () => Promise<T>):
   void next.then(cleanup, cleanup);
   return next;
 }
-export async function readProfileData(file: string, allowMissing = false): Promise<ProfileData> {
-  try {
-    const stat = await fs.lstat(file);
-    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Invalid profile file");
-    return stateSchema.parse(JSON.parse(await fs.readFile(file, "utf8")));
-  } catch (error) {
-    if (allowMissing && (error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw error;
-  }
+export async function readProfileData(
+  file: string,
+  allowMissing = false,
+  passphrase?: string,
+): Promise<ProfileData> {
+  return withProfileWrite(file, async () => {
+    try {
+      const stat = await fs.lstat(file);
+      if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("Invalid profile file");
+      const raw = (await fs.readFile(file, "utf8")).trim();
+      if (!raw.startsWith("{")) {
+        if (!passphrase) throw new Error("Encrypted profile requires CREDENTIALS_PASSPHRASE.");
+        try {
+          return stateSchema.parse(decryptJSON(raw, passphrase));
+        } catch {
+          throw new Error("Cannot decrypt profile: check CREDENTIALS_PASSPHRASE.");
+        }
+      }
+      let plain: unknown;
+      try {
+        plain = JSON.parse(raw);
+      } catch {
+        throw new Error("Invalid plaintext profile.");
+      }
+      const state = stateSchema.parse(plain);
+      if (passphrase) {
+        try {
+          await atomicWriteJson(file, plain, passphrase, true);
+        } catch {
+          console.error(`[steel-mcp] profile migration failed: ${path.basename(file, ".json")}`);
+        }
+      }
+      return state;
+    } catch (error) {
+      if (allowMissing && (error as NodeJS.ErrnoException).code === "ENOENT") return {};
+      throw error;
+    }
+  });
 }
-// Callers hold `withProfileWrite` across the read, merge, and atomic write.
-export async function writeProfileData(file: string, state: ProfileData): Promise<void> {
-  await atomicWriteJson(file, state);
-  revisions.set(path.resolve(file), profileRevision(file) + 1);
+// Keep the read, merge, and atomic write in one queue slot.
+export async function writeProfileData(
+  file: string,
+  state: ProfileData,
+  passphrase?: string,
+): Promise<void> {
+  await withProfileWrite(file, async () => {
+    await readProfileData(file, true, passphrase);
+    await atomicWriteJson(file, state, passphrase);
+    revisions.set(path.resolve(file), profileRevision(file) + 1);
+  });
 }
-export async function atomicWriteJson(file: string, state: unknown): Promise<void> {
+export async function atomicWriteJson(
+  file: string,
+  state: unknown,
+  passphrase?: string,
+  compare = false,
+): Promise<void> {
   await fs.mkdir(path.dirname(file), { recursive: true });
   const temporary = `${file}.${randomUUID()}.tmp`;
   try {
-    await fs.writeFile(temporary, JSON.stringify(state, null, 2), { mode: 0o600, flag: "wx" });
+    await fs.writeFile(
+      temporary,
+      passphrase ? encryptJSON(state, passphrase) : JSON.stringify(state, null, 2),
+      { mode: 0o600, flag: "wx" },
+    );
+    if (
+      compare &&
+      (!passphrase ||
+        !isDeepStrictEqual(state, decryptJSON(await fs.readFile(temporary, "utf8"), passphrase)))
+    )
+      throw new Error("Profile migration compare mismatch");
     await fs.rename(temporary, file);
   } finally {
     await fs.unlink(temporary).catch(() => {});

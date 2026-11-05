@@ -97,7 +97,7 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 | `OUTPUT_DIR` | `/tmp/steel-mcp` | Directory for file outputs, profiles, credentials |
 | `PROFILES_DIR` | `$OUTPUT_DIR/profiles` | Profile state persistence directory |
 | `CREDENTIALS_FILE` | `$OUTPUT_DIR/credentials.json` | Credential store path |
-| `CREDENTIALS_PASSPHRASE` | — | Encrypts credentials at rest (AES-256-GCM). Plain JSON if unset |
+| `CREDENTIALS_PASSPHRASE` | — | Encrypts credentials and profile files (AES-256-GCM). Plain JSON if unset |
 | `DEFAULT_SCREENSHOT_QUALITY` | `80` | Default webp/jpeg quality (1–100) |
 | `DEFAULT_VIEWPORT_WIDTH` | `1280` | Viewport width in px |
 | `DEFAULT_VIEWPORT_HEIGHT` | `720` | Viewport height in px |
@@ -156,6 +156,38 @@ Use `save_profile` with a held lease. Close and idle release it without a save u
 A browser disconnect releases all leases. Autosave cannot read a closed browser context.
 
 `list_profiles` shows the holder and lease age in its text result. Leases stay only in this process.
+`delete_profile` closes tagged tabs, not the lane's live context. Its cookies, storage, and lease stay until lane closure.
+When `delete_profile` gives no error, autosave is off for that lease. Closure does not make a deleted file again.
+
+### Profile encryption and rollback
+
+Encryption is off unless the operator sets `CREDENTIALS_PASSPHRASE`.
+With a passphrase, all profile writes use AES-256-GCM and scrypt through `src/crypto.ts`.
+
+The first read of a plaintext file writes an encrypted temporary file with mode `0600`.
+The server decrypts that file and compares its contents before the atomic replacement.
+If the decrypted contents do not agree, the server keeps the plaintext and logs only the profile name.
+An incorrect passphrase stops the read without a write. Use the same passphrase to read an encrypted file.
+
+For rollback, stop the MCP server and the relay before these commands.
+Keep `PROFILES_DIR` and the same `CREDENTIALS_PASSPHRASE` in the command environment.
+Do not put a passphrase in a command line or in this repository.
+
+```sh
+bun run decrypt-profiles --dry-run
+bun run decrypt-profiles
+# For the built Node package:
+node dist/decrypt-profiles.mjs --dry-run
+node dist/decrypt-profiles.mjs
+```
+
+The command checks each profile before the first write. It refuses symlinks and invalid names.
+The dry run does not change files. Without `--dry-run`, the command writes plaintext with mode `0600`.
+After rollback, remove `CREDENTIALS_PASSPHRASE` before the server starts, or the next read encrypts the files again.
+
+Autosave has the same time limit as `LANE_DRAIN_MS`.
+If a page prevents the save, closure gives `autosave_timeout` and releases the lease.
+The last saved file stays available. Save before closure when the task must keep a checked snapshot.
 
 The idle lease closes a lane after `LANE_IDLE_MS`. It does not close individual idle tabs.
 The lease defaults to 15 minutes. A new call resets its activity clock.
@@ -357,9 +389,11 @@ The HTTP server closes its connections in the same shutdown interval.
 2. Grant access to that site if prompted. Check its cookie and storage-key counts.
 3. Select an existing profile or set a new profile name.
 4. Select **Push this site** and check the per-site results.
-5. Use `create_profile(name: "github", url: "https://github.com")` with the selected profile name and initial site URL. Cookies load automatically. localStorage loads for that initial URL origin only, after navigation. Recreate an active Steel profile to load new saved data.
+5. In lane mode, use `use_profile({name: "github"})` with the selected profile name. The call loads cookies and localStorage for all saved origins. In compatibility mode, use `create_profile({name: "github", url: "https://github.com"})`.
 
-Push merges cookies and storage keys into saved state. It does not remove stale data or update active Steel contexts. Use the saved profile contents panel to remove a domain before a clean replacement. Manual credential entry is not part of the extension UI. The relay keeps credential support for existing clients.
+Push merges cookies and storage keys into saved state and applies them to the lane with the profile lease.
+It does not remove stale data. Use the saved profile contents panel to remove a domain before a clean replacement.
+The relay accepts credentials from older clients. The extension UI does not accept manual credentials.
 
 ### Relay API
 

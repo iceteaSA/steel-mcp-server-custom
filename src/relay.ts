@@ -180,13 +180,13 @@ async function handlePush(payload: PushPayload, config: RelayConfig): Promise<Pu
   // the resolved path stays under profilesDir (catches bugs in the regex).
   await withProfileWrite(assertSafeProfilePath(profileName, config.profilesDir), async () => {
     const file = assertSafeProfilePath(profileName, config.profilesDir);
-    const existingState = await readProfileData(file, true);
+    const existingState = await readProfileData(file, true, config.credentialsPassphrase);
     const state = {
       ...mergeProfileData(existingState, { cookies, localStorage }),
       savedAt: new Date().toISOString(),
       pushedFrom: "extension",
     };
-    await writeProfileData(file, state);
+    await writeProfileData(file, state, config.credentialsPassphrase);
   });
 
   // --- Credentials ---
@@ -508,7 +508,11 @@ export function startRelayServer(config: RelayConfig): http.Server {
             profiles.push(
               summarizeProfile(
                 name,
-                await readProfileData(assertSafeProfilePath(name, config.profilesDir)),
+                await readProfileData(
+                  assertSafeProfilePath(name, config.profilesDir),
+                  false,
+                  config.credentialsPassphrase,
+                ),
               ),
             );
           jsonResponse(res, 200, { profiles });
@@ -528,7 +532,11 @@ export function startRelayServer(config: RelayConfig): http.Server {
             200,
             summarizeProfile(
               name,
-              await readProfileData(assertSafeProfilePath(name, config.profilesDir)),
+              await readProfileData(
+                assertSafeProfilePath(name, config.profilesDir),
+                false,
+                config.credentialsPassphrase,
+              ),
             ),
           );
           return;
@@ -537,7 +545,11 @@ export function startRelayServer(config: RelayConfig): http.Server {
           const domain = normalizeDomain(domainSchema.parse(segments[3]));
           const summary = await mutate(() =>
             withProfileWrite(assertSafeProfilePath(name, config.profilesDir), async () => {
-              const state = await readProfileData(assertSafeProfilePath(name, config.profilesDir));
+              const state = await readProfileData(
+                assertSafeProfilePath(name, config.profilesDir),
+                false,
+                config.credentialsPassphrase,
+              );
               state.cookies = (state.cookies ?? []).filter(
                 (cookie) => normalizeDomain(cookie.domain) !== domain,
               );
@@ -547,7 +559,11 @@ export function startRelayServer(config: RelayConfig): http.Server {
                 ),
               );
               state.savedAt = new Date().toISOString();
-              await writeProfileData(assertSafeProfilePath(name, config.profilesDir), state);
+              await writeProfileData(
+                assertSafeProfilePath(name, config.profilesDir),
+                state,
+                config.credentialsPassphrase,
+              );
               return summarizeProfile(name, state);
             }),
           );

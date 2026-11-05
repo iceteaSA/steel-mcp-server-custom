@@ -302,6 +302,9 @@ test("profile leases exclude another lane and release on close, idle, and browse
       "profile_busy",
     );
     const waiting = f.call("b", "use_profile", { name: "shared", wait: 2 });
+    expect((await f.call("secret-session-a", "save_profile", { name: "shared" })).isError).not.toBe(
+      true,
+    );
     await f.call("secret-session-a", "close_lane");
     expect((await waiting).isError).not.toBe(true);
     await f.call("b", "close_lane");
@@ -365,6 +368,129 @@ test("a deleted profile stays bound to its live lane context and concurrent prof
   }
 });
 
+test("idle autosave saves lane storage from tabs without a profile tag and preserves cross-origin storage", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "lease-origins-"));
+  const f = await fixture("on", { PROFILES_DIR: directory, LANE_IDLE_MS: "10000" });
+  const site = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: () => new Response("<body>lease</body>"),
+  });
+  try {
+    const origin = site.url.origin;
+    await writeFile(
+      join(directory, "saved.json"),
+      JSON.stringify({ localStorage: { "https://other.test": { original: "CROSS_ORIGIN" } } }),
+    );
+    expect((await f.call("a", "use_profile", { name: "saved", autosave: true })).isError).not.toBe(
+      true,
+    );
+    await f.call("a", "new_tab", { url: origin });
+    await f.call("a", "evaluate", { expression: "localStorage.setItem('token', 'UNTAGGED_TAB')" });
+    f.advance(10001);
+    await f.call("b", "new_tab");
+    const state = JSON.parse(await readFile(join(directory, "saved.json"), "utf8"));
+    expect(state.localStorage[origin].token).toBe("UNTAGGED_TAB");
+    expect(state.localStorage["https://other.test"].original).toBe("CROSS_ORIGIN");
+  } finally {
+    await site.stop(true);
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("failed autosave still releases the lease and removes the closed lane", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "lease-save-error-"));
+  const f = await fixture("on", { PROFILES_DIR: directory, CREDENTIALS_PASSPHRASE: "correct" });
+  try {
+    expect((await f.call("a", "use_profile", { name: "saved", autosave: true })).isError).not.toBe(
+      true,
+    );
+    expect((await f.call("a", "save_profile", { name: "saved" })).isError).not.toBe(true);
+    f.env.CREDENTIALS_PASSPHRASE = "wrong";
+    expect((await f.call("a", "close_lane")).isError).toBe(true);
+    f.env.CREDENTIALS_PASSPHRASE = "correct";
+    expect((await f.call("a", "use_profile", { name: "saved" })).isError).not.toBe(true);
+  } finally {
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("encrypted lane save and restore fail closed for wrong or missing passphrases", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "lane-encrypted-"));
+  const f = await fixture("on", { PROFILES_DIR: directory, CREDENTIALS_PASSPHRASE: "correct" });
+  try {
+    expect((await f.call("a", "use_profile", { name: "saved" })).isError).not.toBe(true);
+    await f.call("a", "cookies", {
+      setCookies: [{ name: "token", value: "ENCRYPTED_CANARY", domain: "example.test", path: "/" }],
+    });
+    expect((await f.call("a", "save_profile", { name: "saved" })).isError).not.toBe(true);
+    await f.call("a", "close_lane");
+    const original = await readFile(join(directory, "saved.json"), "utf8");
+    expect(original.startsWith("v2:")).toBe(true);
+    expect(original).not.toContain("ENCRYPTED_CANARY");
+    for (const passphrase of ["wrong", undefined]) {
+      f.env.CREDENTIALS_PASSPHRASE = passphrase;
+      const result = await f.call("b", "use_profile", { name: "saved" });
+      expect(result.isError).toBe(true);
+      expect(text(result)).toContain("CREDENTIALS_PASSPHRASE");
+      expect(await readFile(join(directory, "saved.json"), "utf8")).toBe(original);
+    }
+    f.env.CREDENTIALS_PASSPHRASE = "correct";
+    expect((await f.call("b", "use_profile", { name: "saved" })).isError).not.toBe(true);
+    expect(text(await f.call("b", "cookies"))).toContain("ENCRYPTED_CANARY");
+  } finally {
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test("autosave cannot let a looping page prevent bounded closure or retain a lease", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "lease-loop-"));
+  const f = await fixture("on", { PROFILES_DIR: directory, LANE_DRAIN_MS: "20" });
+  const entered = barrier();
+  const site = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    fetch: (request) => {
+      if (new URL(request.url).pathname === "/entered") entered.release();
+      return new Response("ready");
+    },
+  });
+  let running: ReturnType<typeof f.call> | undefined;
+  let closing: ReturnType<typeof f.call> | undefined;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    expect((await f.call("a", "use_profile", { name: "saved", autosave: true })).isError).not.toBe(
+      true,
+    );
+    await f.call("a", "new_tab", { url: site.url.origin });
+    running = f.call("a", "evaluate", {
+      expression: `(() => { localStorage.setItem('token', 'LOOP'); fetch("${site.url}entered"); while (true) {} })()`,
+    });
+    await entered.promise;
+    closing = f.call("a", "close_lane");
+    const closed = await Promise.race([
+      closing,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("autosave prevented bounded closure")), 1800);
+      }),
+    ]);
+    expect(closed.isError).toBe(true);
+    expect(text(closed)).toContain("autosave_timeout");
+    expect((await running).isError).toBe(true);
+    expect((await f.call("b", "use_profile", { name: "saved" })).isError).not.toBe(true);
+  } finally {
+    clearTimeout(timer);
+    await f.endSession();
+    await Promise.allSettled([running, closing].filter((p) => p !== undefined));
+    await site.stop(true);
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
+  }
+}, 20000);
+
 test("closing a lane during a profile wait cancels acquisition without leaking a lease", async () => {
   const f = await fixture("on", { LANE_DRAIN_MS: "10" });
   try {
@@ -377,6 +503,31 @@ test("closing a lane during a profile wait cancels acquisition without leaking a
     expect((await f.call("c", "use_profile", { name: "contended" })).isError).not.toBe(true);
   } finally {
     await f.close();
+  }
+});
+
+test("delete_profile retains its lease until the lane context closes", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "lease-delete-"));
+  const f = await fixture("on", { PROFILES_DIR: directory });
+  try {
+    expect((await f.call("a", "use_profile", { name: "saved", autosave: true })).isError).not.toBe(
+      true,
+    );
+    await f.call("a", "cookies", {
+      setCookies: [{ name: "token", value: "RETAINED_CONTEXT", domain: "example.test", path: "/" }],
+    });
+    expect(
+      (await f.call("a", "delete_profile", { name: "saved", removeSaved: true })).isError,
+    ).not.toBe(true);
+    expect(text(await f.call("a", "cookies"))).toContain("RETAINED_CONTEXT");
+    expect(text(await f.call("b", "use_profile", { name: "saved" }))).toContain("profile_busy");
+    expect((await f.call("a", "close_lane")).isError).not.toBe(true);
+    expect(await Bun.file(join(directory, "saved.json")).exists()).toBe(false);
+    expect((await f.call("b", "use_profile", { name: "saved" })).isError).not.toBe(true);
+    expect(structured(await f.call("b", "cookies"))?.cookies).toEqual([]);
+  } finally {
+    await f.close();
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

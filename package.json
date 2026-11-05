@@ -8,15 +8,17 @@
     "bugs": "https://github.com/steel-dev/mcp-server/issues",
     "type": "module",
     "bin": {
-        "mcp-server-steel": "dist/index.cjs"
+        "mcp-server-steel": "dist/index.cjs",
+        "decrypt-profiles": "dist/decrypt-profiles.mjs"
     },
     "files": [
         "dist"
     ],
     "scripts": {
-        "build": "bun build src/index.ts --outdir dist --target=node --format=cjs --external patchright --external patchright-core && mv dist/index.js dist/index.cjs",
+        "build": "bun build src/index.ts --outdir dist --target=node --format=cjs --external patchright --external patchright-core && mv dist/index.js dist/index.cjs && bun build src/decrypt-profiles.ts --outfile dist/decrypt-profiles.mjs --target=node --format=esm",
         "check:relay-node": "bun build src/relay.ts --outfile dist/relay-node.cjs --target=node --format=cjs && /usr/bin/node scripts/signin-node-check.cjs",
         "dev": "bun --watch src/index.ts",
+        "decrypt-profiles": "bun src/decrypt-profiles.ts",
         "start": "node dist/index.cjs",
         "lint": "oxlint src/",
         "format": "oxfmt --write src/",

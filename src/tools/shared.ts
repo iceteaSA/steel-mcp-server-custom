@@ -118,7 +118,7 @@ export function makeRegistrar(
       create_profile:
         "Create a named profile in the caller's lane, take its exclusive lease, and restore saved cookies and localStorage through the existing restore path. Return the initial tab ID. One profile name per lane context; a different name returns lane_profile_conflict. Use close_lane or another lane to change profiles.",
       delete_profile:
-        "Close the named profile's tabs in the caller's lane. Keep the lane context open. Optionally remove the shared saved profile file from disk.",
+        "Close the named profile's tabs in the caller's lane. Keep the lane context and live cookies/storage open, so the lease remains until lane closure. A successful delete disables autosave for that lease. Optionally remove the shared saved profile file from disk. Delete does not clear the lane's live context.",
       get_console:
         "Read console messages from the caller's lane. Filter by level, tabId, or owner label. clear removes only this lane's captured entries up to the read, regardless of filter. Maximum 500 buffered messages; default 50 returned.",
     };
@@ -171,7 +171,7 @@ export function makeRegistrar(
       name: "use_profile",
       title: "Use Profile",
       description:
-        "Take an exclusive profile lease and restore saved cookies and storage into your lane. A busy profile returns its holder label and lease age. Close releases the lease without saving unless autosave is true. Use save_profile for an explicit save.",
+        "Take an exclusive profile lease and restore saved cookies and storage into your lane. A busy profile returns its holder label and lease age. Close releases the lease without saving unless autosave is true. Use save_profile for an explicit save. delete_profile does not clear the lane's live context or release its lease.",
       toolset: "auth",
       inputSchema: {
         name: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),

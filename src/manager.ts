@@ -1604,7 +1604,7 @@ export class BrowserManager {
     this.profileVersions.set(name, profileRevision(savedPath));
     try {
       const { state, revision } = await withProfileWrite(savedPath, async () => ({
-        state: await readProfileData(savedPath),
+        state: await readProfileData(savedPath, false, this.env.CREDENTIALS_PASSPHRASE),
         revision: profileRevision(savedPath),
       }));
       this.profileVersions.set(name, revision);
@@ -1629,8 +1629,14 @@ export class BrowserManager {
         }
         return { tabId, restored: true };
       }
-    } catch {
-      // No saved state — that's fine
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        this.profiles.delete(name);
+        this.tabToProfile.delete(tabId);
+        await page.close().catch(() => {});
+        if (!this.laneContext) await context.close().catch(() => {});
+        throw error;
+      }
     }
 
     if (url) {
@@ -1661,7 +1667,7 @@ export class BrowserManager {
     const profile = this.profiles.get(name)!;
     const savedPath = assertSafeProfilePath(name, this.env.PROFILES_DIR);
     const { state, revision } = await withProfileWrite(savedPath, async () => ({
-      state: await readProfileData(savedPath),
+      state: await readProfileData(savedPath, false, this.env.CREDENTIALS_PASSPHRASE),
       revision: profileRevision(savedPath),
     }));
     if (!this.hasProfile(name) || this.profiles.get(name) !== profile) return false;
@@ -1722,6 +1728,15 @@ export class BrowserManager {
 
       // Read localStorage only from open HTTP and HTTPS pages.
       const localStorage: Record<string, Record<string, string>> = {};
+      if (this.laneContext) {
+        const snapshot = await profile.context.storageState();
+        for (const origin of snapshot.origins) {
+          if (httpOrigin(origin.origin) === origin.origin)
+            localStorage[origin.origin] = Object.fromEntries(
+              origin.localStorage.map(({ name, value }) => [name, value]),
+            );
+        }
+      }
       for (const tabId of profile.tabIds) {
         const page = this.tabs.get(tabId);
         if (!page || page.isClosed()) continue;
@@ -1745,13 +1760,13 @@ export class BrowserManager {
         }
       }
 
-      const disk = await readProfileData(savedPath, true);
+      const disk = await readProfileData(savedPath, true, this.env.CREDENTIALS_PASSPHRASE);
       const stale = (this.profileVersions.get(name) ?? 0) !== profileRevision(savedPath);
       // A newer file can contain state that this context has not received.
       const snapshot = { cookies, localStorage };
       const merged = stale ? mergeProfileData(snapshot, disk) : mergeProfileData(disk, snapshot);
       merged.savedAt = new Date().toISOString();
-      await writeProfileData(savedPath, merged);
+      await writeProfileData(savedPath, merged, this.env.CREDENTIALS_PASSPHRASE);
       if (!stale) this.profileVersions.set(name, profileRevision(savedPath));
       return merged;
     });
@@ -1805,9 +1820,12 @@ export class BrowserManager {
           const existing = result.find((r) => r.name === name);
           if (existing) {
             try {
-              const raw = await fs.readFile(path.join(dir, f), "utf8");
-              const state = JSON.parse(raw);
-              existing.savedAt = state.savedAt;
+              const state = await readProfileData(
+                path.join(dir, f),
+                false,
+                this.env.CREDENTIALS_PASSPHRASE,
+              );
+              existing.savedAt = typeof state.savedAt === "string" ? state.savedAt : undefined;
             } catch {
               /* */
             }
@@ -1816,9 +1834,12 @@ export class BrowserManager {
         }
         let savedAt: string | undefined;
         try {
-          const raw = await fs.readFile(path.join(dir, f), "utf8");
-          const state = JSON.parse(raw);
-          savedAt = state.savedAt;
+          const state = await readProfileData(
+            path.join(dir, f),
+            false,
+            this.env.CREDENTIALS_PASSPHRASE,
+          );
+          savedAt = typeof state.savedAt === "string" ? state.savedAt : undefined;
         } catch {
           /* */
         }

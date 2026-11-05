@@ -319,6 +319,28 @@ describe("POST /push — encrypted credentials", () => {
       // Verify file is encrypted (not valid JSON)
       const raw = await fs.readFile(encConfig.credentialsFile, "utf8");
       expect(() => JSON.parse(raw)).toThrow(); // It's base64, not JSON
+      const profileFile = path.join(encConfig.profilesDir, "enc-test.json");
+      const encryptedProfile = await fs.readFile(profileFile, "utf8");
+      expect(encryptedProfile.startsWith("v2:")).toBe(true);
+      expect((await fs.stat(profileFile)).mode & 0o777).toBe(0o600);
+      const detail = await fetch_(`http://127.0.0.1:${encConfig.port}/profiles/enc-test`, {
+        headers: { Authorization: `Bearer ${encConfig.secret}` },
+      });
+      expect(detail.status).toBe(200);
+      encConfig.credentialsPassphrase = "wrong";
+      const rejected = await fetch_(`http://127.0.0.1:${encConfig.port}/push`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${encConfig.secret}`,
+        },
+        body: JSON.stringify({
+          profile: "enc-test",
+          cookies: [{ name: "x", value: "CANARY", domain: "example.test", path: "/" }],
+        }),
+      });
+      expect(rejected.ok).toBe(false);
+      expect(await fs.readFile(profileFile, "utf8")).toBe(encryptedProfile);
     } finally {
       srv2.close();
     }

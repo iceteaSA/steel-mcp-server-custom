@@ -107,7 +107,7 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, _env: Env
   register({
     name: "save_profile",
     title: "Save Profile",
-    description: `Persist an active profile's cookies and localStorage to disk as JSON. The saved state is restored automatically by create_profile with the same name in future sessions. Use to preserve login sessions across browser restarts. Do NOT rely on this alone for long-term storage — the JSON file is not encrypted unless CREDENTIALS_PASSPHRASE is set for the credentials store (profiles always store plain).`,
+    description: `Save an active profile's cookies and localStorage to disk. In lane mode, save_profile requires a held lease from use_profile or new_tab({profile}). CREDENTIALS_PASSPHRASE enables encrypted storage; without it files stay plaintext. Use to keep sign-in state across browser restarts. Do not use without authority to keep the site's state.`,
     toolset: "auth",
     inputSchema: {
       name: z

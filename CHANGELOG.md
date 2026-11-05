@@ -5,6 +5,8 @@
 - Keep one named profile in each lane context. Refuse a different profile name with `lane_profile_conflict` to prevent saved-state mixing.
 - Add `use_profile` in lane mode. One lane holds each profile lease. Add bounded waits and optional autosave before closure.
 - Use a held lease for `save_profile` in lane mode. Keep compatibility mode unchanged.
+- Encrypt profile files only when `CREDENTIALS_PASSPHRASE` is set. Decrypt and compare each temporary file before atomic replacement.
+- Add `decrypt-profiles` with a dry run for plaintext rollback. Refuse incorrect passphrases and symlinks.
 
 - Use caller lanes by default, with isolated browser contexts and bounded closure. Set `STEEL_LANES=off` for compatibility mode.
 - Add `list_lanes`, `close_lane`, `request_signin`, `signin_status`, and `cancel_signin`.

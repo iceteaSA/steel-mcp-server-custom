@@ -117,7 +117,7 @@ Invalid values cause the process to exit with a descriptive error.
 | `TAB_IDLE_SWEEP_INTERVAL_MS` | `60000` (60 s) | How often the idle sweeper checks for stale tabs. |
 | `PROFILES_DIR` | `$OUTPUT_DIR/profiles` | Directory for persistent profile state (cookies, localStorage). |
 | `CREDENTIALS_FILE` | `$OUTPUT_DIR/credentials.json` | Path to credentials store (JSON or encrypted). |
-| `CREDENTIALS_PASSPHRASE` | — | Passphrase for encrypting credentials at rest (AES-256-GCM). Plain JSON if unset. |
+| `CREDENTIALS_PASSPHRASE` | — | Passphrase for credentials and profile encryption (AES-256-GCM). Plain JSON if unset. |
 | `RELAY_PORT` | `3001` | Port for the HTTP relay server (receives cookies from browser extension). `0` disables. |
 | `RELAY_SECRET` | — | Shared secret for relay auth (Bearer token). Required when `RELAY_PORT > 0`. |
 | `RELAY_PUBLIC_URL` | — | Public URL for the relay (e.g. `http://your-host:3001`). Shown in `start_browser` output. Defaults to `http://localhost:<RELAY_PORT>`. |
@@ -169,6 +169,8 @@ Without these values, the server has no `act` or `extract_ai`, with or without `
 - Use `use_profile({name, wait?, autosave?})` to get a profile lease. Use `wait` for at most 120 seconds.
 - Use `save_profile` only with a held lease. Close releases the lease without a save unless `autosave` is `true`.
 - Do not use leases between processes.
+- Keep profile encryption off unless the operator sets `CREDENTIALS_PASSPHRASE`. Do not add a passphrase to source files.
+- Stop the MCP server and relay before `bun run decrypt-profiles --dry-run` and `bun run decrypt-profiles` for rollback.
 
 For compatibility mode (`STEEL_LANES=off`):
 

@@ -55,6 +55,7 @@ export class LaneRuntime {
   }>();
   private readonly lanes = new Map<string, Lane>();
   private readonly leases = new Map<string, { lane: Lane; since: number; autosave: boolean }>();
+  private nextLabel = 0;
   private readonly leaseChanged = new Set<() => void>();
   private readonly opening = new Map<string, Promise<Lane>>();
   private readonly closed = new Map<string, { reason: CloseReason; at: number }>();
@@ -148,6 +149,9 @@ export class LaneRuntime {
       ]),
     );
     const caller = this.profileCaller.getStore();
+    for (const name of this.leases.keys()) {
+      if (!profiles.has(name)) profiles.set(name, { name, active: false, tabCount: 0 });
+    }
     const lane = caller ? this.lanes.get(caller) : undefined;
     if (lane && !lane.closing) {
       for (const profile of await lane.manager.listProfiles()) {
@@ -307,7 +311,7 @@ export class LaneRuntime {
       );
       lane = {
         caller,
-        label: `Lane ${this.lanes.size + 1}`,
+        label: `Lane ${++this.nextLabel}`,
         manager,
         created: this.now(),
         touched: this.now(),
@@ -377,17 +381,37 @@ export class LaneRuntime {
         clearTimeout(timer);
       }
       try {
-        for (const [name, lease] of this.leases) {
-          if (lease.lane === lane && lease.autosave && !lane.manager.isLaneClosed)
-            await lane.manager.saveProfile(name);
+        const autosave = [...this.leases].filter(
+          ([, lease]) => lease.lane === lane && lease.autosave,
+        );
+        if (autosave.length && !lane.manager.isLaneClosed) {
+          try {
+            await Promise.race([
+              (async () => {
+                for (const [name] of autosave) await lane.manager.saveProfile(name);
+              })(),
+              new Promise<never>((_, reject) => {
+                timer = setTimeout(
+                  () =>
+                    reject(new Error("autosave_timeout: lane closed before autosave finished.")),
+                  this.options.env.LANE_DRAIN_MS,
+                );
+              }),
+            ]);
+          } finally {
+            clearTimeout(timer);
+          }
         }
       } finally {
         this.releaseLeases(lane);
-        await lane.manager.stop();
-      }
-      if (this.lanes.get(lane.caller) === lane) {
-        this.rememberClosed(lane.caller, reason);
-        this.lanes.delete(lane.caller);
+        try {
+          await lane.manager.stop();
+        } finally {
+          if (this.lanes.get(lane.caller) === lane) {
+            this.rememberClosed(lane.caller, reason);
+            this.lanes.delete(lane.caller);
+          }
+        }
       }
     })();
     return lane.disposal;
@@ -567,9 +591,13 @@ export class LaneRuntime {
               },
               handler,
             );
-            if ((result.isError && acquired) || (name === "delete_profile" && !result.isError)) {
+            if (result.isError && acquired) {
               this.leases.delete(String(profileName));
               for (const notify of this.leaseChanged) notify();
+            }
+            if (name === "delete_profile" && !result.isError) {
+              const lease = this.leases.get(String(profileName));
+              if (lease?.lane === lane) lease.autosave = false;
             }
             return result;
           } catch (error) {
