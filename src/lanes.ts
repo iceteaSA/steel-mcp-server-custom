@@ -17,6 +17,7 @@ type Lane = {
   closing: boolean;
   running: Set<Promise<unknown>>;
   queues: Map<number, Promise<void>>;
+  queued: Set<Promise<void>>;
   pageStarting?: Promise<Page>;
   disposal?: Promise<void>;
   newlyOpened: boolean;
@@ -44,6 +45,15 @@ const CONTEXT_TOOLS = new Set([
   "export_har",
   "fetch_urls",
   "smoke_test",
+]);
+
+const FRESH_READS = new Set([
+  "list_tabs",
+  "start_browser",
+  "close_tabs",
+  "get_console",
+  "get_network",
+  "export_har",
 ]);
 
 export class LaneRuntime {
@@ -330,6 +340,7 @@ export class LaneRuntime {
         closing: false,
         running: new Set(),
         queues: new Map(),
+        queued: new Set(),
         newlyOpened: true,
       };
       this.lanes.set(caller, lane);
@@ -363,14 +374,22 @@ export class LaneRuntime {
 
   private queue<T>(lane: Lane, ids: number[], operation: () => Promise<T>): Promise<T> {
     const keys = [...new Set(ids)].sort((a, b) => a - b);
-    const previous = keys.map((id) => lane.queues.get(id) ?? Promise.resolve());
+    // Profile changes wait for prior calls. Later calls wait for the profile barrier.
+    const previous = keys.includes(0)
+      ? [...lane.queued]
+      : [
+          ...keys.map((id) => lane.queues.get(id) ?? Promise.resolve()),
+          lane.queues.get(0) ?? Promise.resolve(),
+        ];
     const result = Promise.all(previous).then(operation);
     const tail = result.then(
       () => {},
       () => {},
     );
     for (const id of keys) lane.queues.set(id, tail);
+    lane.queued.add(tail);
     void tail.then(() => {
+      lane.queued.delete(tail);
       for (const id of keys) if (lane.queues.get(id) === tail) lane.queues.delete(id);
     });
     return result;
@@ -597,7 +616,16 @@ export class LaneRuntime {
               throw new Error(
                 `profile_busy: holder=${held.lane.label}; ageSeconds=${Math.max(0, (this.now() - held.since) / 1000)}`,
               );
+            if (args.removeSaved === true && held?.lane !== lane)
+              throw new Error("profile_lease_required: use_profile before deleting saved state.");
           }
+          const blankNavigation =
+            (name === "new_tab" || name === "go_to_url") &&
+            (args.url === undefined || args.url === "about:blank");
+          const cookieRead =
+            name === "cookies" && (!Array.isArray(args.setCookies) || args.setCookies.length === 0);
+          if (!profileMutation && !FRESH_READS.has(name) && !blankNavigation && !cookieRead)
+            lane.manager.markLaneUsed?.();
           try {
             const result = await this.current.run(
               {

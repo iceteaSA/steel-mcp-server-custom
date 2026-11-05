@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Refuse a first profile binding after stateful lane use with `lane_not_fresh`. Keep empty `about:blank` tabs permitted.
+- Check cookies and origin entries before binding. Keep the used mark after pages close or cookies clear. Do not clear state on refusal.
+- Use the caller's held lease for saved-file deletion. Give `profile_busy` for a different holder and `profile_lease_required` without a holder.
+
 - Keep one named profile in each lane context. Refuse a different profile name with `lane_profile_conflict` to prevent saved-state mixing.
 - Add `use_profile` in lane mode. One lane holds each profile lease. Add bounded waits and optional autosave before closure.
 - Use a held lease for `save_profile` in lane mode. Keep compatibility mode unchanged.

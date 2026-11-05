@@ -28,26 +28,26 @@ return tab;
 
 ## Caller lanes
 
-- Use the lane that the hub selects through request metadata, not an `owner` string.
-- On `no_caller`, repair the hub's `ai.opencode/sessionID` metadata before the next stateful call.
-- Open tabs with `new_tab` and keep each `tabId` from the result.
-- Give `tabId` when a workflow uses more than one tab.
-- Use `owner` only as an optional tab label.
-- Do not use `force` for access to a different lane. Lane mode ignores it and reports a NOTE line.
-- Use `close_tabs` for selected tabs or `close_lane` for all your tabs and browser storage.
-- Use `list_lanes` for caller names, ages, and tab counts, not other lanes' URLs.
+- Use the hub-selected metadata lane, not an `owner` string.
+- On `no_caller`, repair `ai.opencode/sessionID` metadata before a stateful call.
+- Open tabs with `new_tab`, keep each `tabId`, and give it for multi-tab work.
+- Use `owner` only as an optional tab name.
+- Do not use `force` across lanes. Lane mode ignores it with a NOTE.
+- Use `close_tabs` for selected tabs or `close_lane` for all tabs and storage.
+- Use `list_lanes` for caller names, ages, and tab counts, not different lanes' URLs.
 - On `not_in_lane`, select one of your tabs through `list_tabs`.
-- On `lane_closed`, discard previous tab IDs and call without `tabId` to open a new lane.
-- On `lanes_full`, use `list_lanes` to inspect usage and `close_lane` to release your lane before a retry.
-- Read closure NOTE lines before the next step. Close, idle, or restart can reset cookies, tabs, and buffers.
+- On `lane_closed`, discard previous IDs and call without `tabId` for a new lane.
+- On `lanes_full`, use `list_lanes`, then release your lane with `close_lane` before a retry.
+- Read closure NOTEs. Close, idle, or restart can clear cookies, tabs, and buffers.
 - Save a named profile only when the task must keep state on disk.
-- Keep profile encryption off unless the operator sets `CREDENTIALS_PASSPHRASE`. Do not put passphrases in tool output.
+- Keep encryption off unless the operator sets `CREDENTIALS_PASSPHRASE`. Do not output passphrases.
 - For plaintext rollback, stop the server and relay. Use `bun run decrypt-profiles --dry-run` before `bun run decrypt-profiles`.
-- Use `use_profile({name, wait?, autosave?})` or `new_tab({profile})` only when its saved state applies to the task.
-- Use only one named `profile` in each lane. On `lane_profile_conflict`, close the lane or use a different lane. After `delete_profile`, the context keeps its binding.
+- Use `use_profile({name, wait?, autosave?})` or `new_tab({profile})` before stateful calls, only when its state applies to the task.
+- On `lane_not_fresh`, use `close_lane`, then open the profile first. Empty `about:blank` tabs do not set the used mark.
+- Keep one named `profile` in each lane. On `lane_profile_conflict`, close the lane or use a different lane. Delete keeps the bound name.
 - On `profile_busy`, wait at most 120 seconds or use a different profile. Do not remove a different lane's lease.
-- Use `save_profile` with a held lease. Set `autosave: true` for a save before lane closure. Without autosave, close releases without a save.
-- Use `close_lane` to clear live state and release leases. `delete_profile` does not clear the lane context or release its lease.
+- Hold the lease for `save_profile` or `delete_profile({removeSaved:true})`. Set `autosave: true` for a save before closure.
+- Use `close_lane` to clear state and release leases without a save, unless autosave is on. Delete keeps the live context and lease.
 - Send caller metadata for credential writes and deletes, even without a browser lane.
 - In legacy mode (`STEEL_LANES=off`), use unique owner labels and do not stop the shared browser.
 

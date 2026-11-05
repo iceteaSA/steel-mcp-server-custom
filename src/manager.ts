@@ -131,6 +131,7 @@ export class BrowserManager {
   private initializing: Promise<void> | undefined;
   private laneContext = false;
   private laneProfileName?: string;
+  private laneUsed = false;
   private laneClosed = false;
   private lanesEnabled = false;
   private allocateId: (() => number) | undefined;
@@ -497,6 +498,13 @@ export class BrowserManager {
    * been replaced in the tab registry.
    */
   private attachPageListeners(page: Page, id: number): void {
+    if (this.laneContext) {
+      if (page.url() !== "about:blank") this.markLaneUsed();
+      page.on("framenavigated", (frame) => {
+        if (frame.url() !== "about:blank") this.markLaneUsed();
+      });
+      page.on("download", () => this.markLaneUsed());
+    }
     // Dialog capture: Playwright dialogs block all page operations until
     // handled, so we resolve them immediately using the tab's pre-armed policy.
     // Default policy is dismiss (Playwright's conservative default). The agent
@@ -1565,7 +1573,21 @@ export class BrowserManager {
       }
       throw new Error(`Profile "${name}" already exists. Use delete_profile first.`);
     }
-    if (this.laneContext) this.laneProfileName = name;
+    if (this.laneContext && !this.laneProfileName) {
+      const context = this.browserContext!;
+      const notFresh = () =>
+        this.laneUsed || context.pages().some((page) => page.url() !== "about:blank");
+      const refuse = () => {
+        throw new Error("lane_not_fresh: use close_lane, then open the profile first.");
+      };
+      if (notFresh()) refuse();
+      const state = await context.storageState();
+      this.assertLaneProfile(name);
+      if (!this.laneProfileName) {
+        if (notFresh() || state.cookies.length > 0 || state.origins.length > 0) refuse();
+        this.laneProfileName = name;
+      }
+    }
     // The Steel image enables extension access in incognito contexts.
     // A second init script would conflict with that fingerprint and break WebSockets.
     const context = this.laneContext
@@ -1657,6 +1679,10 @@ export class BrowserManager {
       throw new Error(
         `lane_profile_conflict: lane holds profile "${this.laneProfileName}". Use close_lane or another lane.`,
       );
+  }
+
+  markLaneUsed(): void {
+    if (this.laneContext) this.laneUsed = true;
   }
 
   hasProfile(name: string): boolean {

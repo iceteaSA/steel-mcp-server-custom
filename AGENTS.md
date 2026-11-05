@@ -158,19 +158,20 @@ Without these values, the server has no `act` or `extract_ai`, with or without `
 
 `STEEL_LANES=on` is the default concurrency design.
 
-- Send `params._meta["ai.opencode/sessionID"]` on each stateful call. Missing identity gives `no_caller`, not a shared lane.
-- Use the caller's isolated BrowserContext. Keep it isolated from the operator context and different caller contexts.
-- Keep each `tabId` and give it on page calls. An ID from a different lane gives `not_in_lane`. A closed or unknown ID gives `lane_closed`.
-- Use `owner` only as a tab name. Do not use `force` for access to a different caller's context.
-- Use `close_tabs` for selected tabs, or `close_lane` for the caller's context. Use `list_lanes` for ages and tab counts.
-- Do not use `stop_browser` for shared cleanup. It refuses while a different lane is active.
-- Respect `LANE_IDLE_MS`, `LANE_DRAIN_MS`, and `LANE_MAX`. Active calls prevent closure until the bounded drain condition applies.
-- Use only one named `profile` in each lane context. On `lane_profile_conflict`, use `close_lane` or a different lane. After `delete_profile`, the context keeps this binding.
-- Use `use_profile({name, wait?, autosave?})` to get a profile lease. Use `wait` for at most 120 seconds.
-- Use `save_profile` only with a held lease. Close releases the lease without a save unless `autosave` is `true`.
+- Send `params._meta["ai.opencode/sessionID"]` on stateful calls. No identity gives `no_caller`, not a shared lane.
+- Keep the caller's BrowserContext isolated from the operator and different callers.
+- Give `tabId` on page calls. A different lane's ID gives `not_in_lane`. Closed or unknown IDs give `lane_closed`.
+- Use `owner` only as a tab name, not `force` for cross-caller access.
+- Use `close_tabs` for selected tabs, `close_lane` for the context, and `list_lanes` for ages and tab counts.
+- Do not use `stop_browser` for shared cleanup. A different active lane prevents it.
+- Respect `LANE_IDLE_MS`, `LANE_DRAIN_MS`, and `LANE_MAX`. Active calls prevent closure until the bounded drain.
+- Keep one named `profile` in each lane. On `lane_profile_conflict`, close the lane or use a different lane. Delete keeps the bound name.
+- Use `use_profile({name, wait?, autosave?})` before browsing or stateful calls. Empty `about:blank` tabs do not set the used mark. Limit `wait` to 120 seconds.
+- On `lane_not_fresh`, use `close_lane`, then open the profile first.
+- Hold the lease for `save_profile` and `delete_profile({removeSaved:true})`. Close saves only with `autosave: true`.
 - Do not use leases between processes.
-- Keep profile encryption off unless the operator sets `CREDENTIALS_PASSPHRASE`. Do not add a passphrase to source files.
-- Stop the MCP server and relay before `bun run decrypt-profiles --dry-run` and `bun run decrypt-profiles` for rollback.
+- Keep encryption off unless the operator sets `CREDENTIALS_PASSPHRASE`. Do not add passphrases to source.
+- Stop the MCP server and relay before rollback: `bun run decrypt-profiles --dry-run`, then `bun run decrypt-profiles`.
 
 For compatibility mode (`STEEL_LANES=off`):
 

@@ -112,13 +112,13 @@ export function makeRegistrar(
 
     const laneDescriptions: Record<string, string> = {
       new_tab:
-        "Open a new tab in the caller's lane and return its global tab ID. owner is an optional label. A profile loads saved state into the lane's existing context. One profile name per lane context; a different name returns lane_profile_conflict. Use close_lane or another lane to change profiles.",
+        "Open a new tab in the caller's lane and return its global tab ID. owner is an optional label. A profile loads saved state into the lane's existing context. First binding requires a fresh context before browsing or stateful calls; otherwise lane_not_fresh. Empty about:blank tabs are allowed. Use close_lane, then open the profile first. One profile name per lane context; a different name returns lane_profile_conflict.",
       stop_browser:
         "Refuse while another lane is active. Otherwise close only the caller's lane, not the shared Steel session or operator context. force is accepted and ignored with a NOTE line.",
       create_profile:
-        "Create a named profile in the caller's lane, take its exclusive lease, and restore saved cookies and localStorage through the existing restore path. Return the initial tab ID. One profile name per lane context; a different name returns lane_profile_conflict. Use close_lane or another lane to change profiles.",
+        "Create a named profile in the caller's lane, take its exclusive lease, and restore saved cookies and localStorage. Return the initial tab ID. First binding requires a fresh context before browsing or stateful calls; otherwise lane_not_fresh. Empty about:blank tabs are allowed. Use close_lane, then open the profile first. One profile name per lane context; a different name returns lane_profile_conflict.",
       delete_profile:
-        "Close the named profile's tabs in the caller's lane. Keep the lane context and live cookies/storage open, so the lease remains until lane closure. A successful delete disables autosave for that lease. Optionally remove the shared saved profile file from disk. Delete does not clear the lane's live context.",
+        "Close the named profile's tabs in the caller's lane. Keep the lane context, live cookies/storage, and lease until lane closure. A successful delete disables autosave for that lease. removeSaved requires the caller's own lease: profile_busy for a different holder, profile_lease_required if no holder exists. Delete does not clear the lane's live context.",
       get_console:
         "Read console messages from the caller's lane. Filter by level, tabId, or owner label. clear removes only this lane's captured entries up to the read, regardless of filter. Maximum 500 buffered messages; default 50 returned.",
     };
@@ -171,7 +171,7 @@ export function makeRegistrar(
       name: "use_profile",
       title: "Use Profile",
       description:
-        "Take an exclusive profile lease and restore saved cookies and storage into your lane. One profile per lane context; a different name returns lane_profile_conflict before lease admission. Use close_lane or another lane to change profiles. A busy profile returns its holder label and lease age. Close releases the lease without saving unless autosave is true. Use save_profile for an explicit save. delete_profile does not clear the lane's live context or release its lease.",
+        "Take an exclusive profile lease and restore saved cookies and storage into your lane. First binding requires a fresh context before browsing, cookie writes, scripts, uploads, downloads, or other stateful calls. Empty about:blank tabs are allowed. lane_not_fresh keeps current state: use close_lane, then open the profile first. The same bound name may continue. A different name returns lane_profile_conflict before lease admission. A busy profile returns its holder label and lease age. Close releases without saving unless autosave is true. delete_profile keeps the live context and lease.",
       toolset: "auth",
       inputSchema: {
         name: z.string().regex(/^[a-zA-Z0-9_-]{1,64}$/),

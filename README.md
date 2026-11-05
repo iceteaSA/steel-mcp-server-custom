@@ -151,6 +151,12 @@ A different lane gets `profile_busy` with the holder's lane label and `ageSecond
 One lane context can hold only one named profile. A different name gives `lane_profile_conflict` with the held profile name.
 Use `close_lane` or a different lane to change profiles. After `delete_profile`, the live context keeps its profile binding.
 
+Open the profile before browsing or stateful calls. The first binding can use only a new context with no cookies or origin entries.
+Empty `about:blank` tabs do not set the used mark. Navigation, cookie writes, script calls, uploads, downloads, and other stateful calls mark the context used.
+
+This mark stays when pages close or cookies clear. A refusal gives `lane_not_fresh` and keeps the current state.
+Use `close_lane`, then open the profile first. A context bound to the same name can continue its work.
+
 Use `wait` for at most 120 seconds. A wait does not hold the profile write queue.
 Use `save_profile` with a held lease. Close and idle release it without a save unless `autosave` is `true`.
 A browser disconnect releases all leases. Autosave cannot read a closed browser context.
@@ -158,6 +164,9 @@ A browser disconnect releases all leases. Autosave cannot read a closed browser 
 `list_profiles` shows the holder and lease age in its text result. Leases stay only in this process.
 `delete_profile` closes tagged tabs, not the lane's live context. Its cookies, storage, and lease stay until lane closure.
 When `delete_profile` gives no error, autosave is off for that lease. Closure does not make a deleted file again.
+
+Use the caller's held lease with `delete_profile({name, removeSaved:true})`.
+A different holder gives `profile_busy`. No holder gives `profile_lease_required`: open the profile first in a new lane.
 
 ### Profile encryption and rollback
 
