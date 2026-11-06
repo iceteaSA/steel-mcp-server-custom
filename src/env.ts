@@ -19,6 +19,7 @@ export const EnvSchema = z
     // When set, STEEL_API_KEY is optional.
     STEEL_BASE_URL: z.string().optional(),
     STEEL_LANES: z.enum(["on", "off"]).default("on"),
+    STEEL_CODE_MODE: z.enum(["on", "off"]).default("off"),
     STEEL_SITE_DENY_FILE: z
       .string()
       .default(fileURLToPath(new URL("../config/site-deny.txt", import.meta.url))),

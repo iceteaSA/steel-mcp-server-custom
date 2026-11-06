@@ -6,6 +6,7 @@ import type { ToolRegistrar } from "./shared.js";
 import { policyErrorResult } from "../site-policy.js";
 
 export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env): void {
+  const codeMode = env.STEEL_CODE_MODE === "on";
   // list_tabs -----------------------------------------------------------------
   register({
     name: "list_tabs",
@@ -109,6 +110,17 @@ CONTEXT BUDGET — tab list grows with session activity. Filter with owner or pr
     title: "New Tab",
     description: `Open a new browser tab, optionally navigating to a URL. Returns the tab ID for use with tabId parameters in other tools. Pass an owner tag for multi-agent tab management (close_tabs by owner later). Pass a profile name to open the tab in an isolated BrowserContext with its own cookies/localStorage.`,
     toolset: "tabs",
+    ...(codeMode
+      ? {
+          outputSchema: {
+            tabId: z.number(),
+            url: z.string(),
+            title: z.string(),
+            owner: z.string().optional(),
+            profile: z.string().optional(),
+          },
+        }
+      : {}),
     inputSchema: {
       url: z
         .string()
@@ -143,6 +155,17 @@ CONTEXT BUDGET — tab list grows with session activity. Filter with owner or pr
         const title = await page.title();
         const ownerSuffix = owner ? ` (owner=${owner})` : "";
         return {
+          ...(codeMode
+            ? {
+                structuredContent: {
+                  tabId,
+                  url: finalUrl,
+                  title,
+                  ...(owner !== undefined ? { owner } : {}),
+                  ...(profile !== undefined ? { profile } : {}),
+                },
+              }
+            : {}),
           content: [
             {
               type: "text",
@@ -165,6 +188,14 @@ CONTEXT BUDGET — tab list grows with session activity. Filter with owner or pr
     title: "Close Tabs",
     description: `Close browser tabs by tabId, owner tag, or the current active tab (default). Use for per-agent cleanup after a task — this only closes specific tabs, not the whole browser. For full session teardown, use stop_browser. Passing both tabId and owner closes the specific tab AND all tabs owned by that owner.`,
     toolset: "tabs",
+    ...(codeMode
+      ? {
+          outputSchema: {
+            closedTabIds: z.array(z.number()),
+            activeTabId: z.number().nullable().optional(),
+          },
+        }
+      : {}),
     inputSchema: {
       tabId: z.number().int().min(1).optional().describe("Close a specific tab by ID."),
       owner: z.string().optional().describe("Close all tabs with this owner tag."),
@@ -189,11 +220,23 @@ CONTEXT BUDGET — tab list grows with session activity. Filter with owner or pr
           const suffix = nowActive
             ? `\nNow on Tab ${nowActive.tabId}: ${nowActive.url}`
             : "\nNo tabs remaining.";
-          return { content: [{ type: "text", text: `Closed Tab ${active.tabId}.${suffix}` }] };
+          return {
+            content: [{ type: "text", text: `Closed Tab ${active.tabId}.${suffix}` }],
+            ...(codeMode
+              ? {
+                  structuredContent: {
+                    closedTabIds: [active.tabId],
+                    activeTabId: nowActive?.tabId ?? null,
+                  },
+                }
+              : {}),
+          };
         }
         const parts: string[] = [];
+        const closedTabIds: number[] = [];
         if (owner) {
           const closed = await mgr.closeTabsByOwner(owner);
+          closedTabIds.push(...closed);
           parts.push(
             closed.length === 0
               ? `No tabs with owner=${owner}.`
@@ -202,9 +245,13 @@ CONTEXT BUDGET — tab list grows with session activity. Filter with owner or pr
         }
         if (tabId) {
           await mgr.closeTab(tabId);
+          closedTabIds.push(tabId);
           parts.push(`Closed Tab ${tabId}.`);
         }
-        return { content: [{ type: "text", text: parts.join("\n") }] };
+        return {
+          content: [{ type: "text", text: parts.join("\n") }],
+          ...(codeMode ? { structuredContent: { closedTabIds } } : {}),
+        };
       } catch (err) {
         const error = err as Error;
         return { isError: true, content: [{ type: "text", text: cleanErrorMessage(error) }] };

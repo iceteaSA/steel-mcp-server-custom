@@ -1,8 +1,7 @@
-// xfail: get_page_text.text contains transport markup around page text.
 await tools.steel.new_tab({});
 try {
   await tools.steel.evaluate({expression: "document.body.innerHTML = '<main>cm-body-token</main>'"});
   const r = await tools.steel.get_page_text({});
-  if (!r.text.includes("cm-body-token") || r.text.includes("<untrusted-page-content")) throw new Error(JSON.stringify(r));
+  if (!r.text.includes("cm-body-token") || !r.text.includes("<untrusted-page-content")) throw new Error(JSON.stringify(r));
   return {text: r.text};
 } finally { await tools.steel.close_lane({}); }

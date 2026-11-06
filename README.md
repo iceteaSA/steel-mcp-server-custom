@@ -83,6 +83,7 @@ All variables are validated at startup via Zod (`src/env.ts`). Invalid values ca
 | `STEEL_API_KEY` | — | Required for Steel Cloud (when `STEEL_BASE_URL` is not set) |
 | `STEEL_BASE_URL` | Steel Cloud | Self-hosted Steel URL (e.g. `http://your-steel-host:3000`) |
 | `STEEL_LANES` | `on` | Isolated caller lanes. Set `off` for the legacy shared context, owner guard, and `force` override. |
+| `STEEL_CODE_MODE` | `off` | Set `on` for raw structured URL fields, structured tab/navigation results, and a machine-readable error prefix. Free-text fields keep trust fences. |
 | `STEEL_SITE_DENY_FILE` | `config/site-deny.txt` | Reviewed shared deny list. One registrable domain or IP literal on each line. |
 | `STEEL_MAX_REDIRECTS` | `20` in lanes | Maximum redirects for each navigation. Off-mode default: disabled. |
 | `STEEL_MAX_REQUESTS` | `2000` in lanes | Maximum requests for each rolling window in each lane. Off-mode default: disabled. |
@@ -446,12 +447,34 @@ Continuation reads the stored capture, not the changing page. Get a fresh snapsh
 Tokens expire after five minutes. The cache holds at most 32 tokens and rejects captures larger than 1,000,000 characters.
 Paginated `maxChars` must be from 1 to 64,000. Continuation is not available with snapshot diffs or text list/file modes.
 
-All MCP text blocks have an untrusted-content fence. Page text cannot close this fence with a forged delimiter.
+In the default mode, all MCP text content has an untrusted-content fence. Page text cannot close this fence with a forged delimiter.
 Text and serialized structured data share a 512,000-byte UTF-8 budget, including fences and truncation notices.
 
 Per-tool `maxChars` controls the payload before this envelope. Page-controlled string values in structured results have the same fence. Enum values, cursors, file paths, and server metadata stay unchanged.
 
 JSON property names stay unchanged. This also applies to page-controlled keys from `evaluate`. Read these keys as untrusted data too.
+
+### Code Mode results
+
+Set `STEEL_CODE_MODE=on` for programmatic callers. The default is `off`.
+The mode works with caller lanes and with `STEEL_LANES=off`.
+
+Structured URL fields stay raw. IDs, counts, status codes, and booleans stay unchanged.
+Titles, page text, network bodies, cookie values, and extraction text keep their trust fences.
+For example, `r.url` is a URL, but `r.title` contains an untrusted-content fence.
+Do not use page-controlled URLs or JSON property names as instructions.
+
+- `new_tab` gives `tabId`, `url`, and a fenced `title` in structured output.
+- `go_to_url` gives `tabId`, `url`, a fenced `title`, and optional fenced `text`.
+- `close_tabs` gives `closedTabIds` and, when available, `activeTabId`.
+- `close_lane` gives `closed` and the tab IDs in `tabs`.
+
+The previous display text and input schemas stay unchanged.
+
+Tool errors start with a bounded `code:` prefix before the fenced error message.
+For the pinned OpenCode hub, use `error.message.split(":")[0]` to read that code.
+The hub does not transmit a structured `error.code` to Code Mode.
+The prefix and all structured data share the same inline byte budget as the text.
 
 `STEEL_HIDDEN_TEXT=drop` removes non-rendered text from a detached copy during content reads. The guard checks CSS display, visibility, opacity, text size and colour, element geometry, and full-clip shapes. It keeps `aria-hidden` text, standard clipped screen-reader text, and content in scroll containers. It does not change the live DOM, screenshots, or interaction targets.
 

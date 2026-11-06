@@ -1,0 +1,20 @@
+const tab = await tools.steel.new_tab({owner: "cm-off"});
+try {
+  if (typeof tab.tabId !== "number" || tab.url !== "about:blank" || !tab.title.includes("<untrusted-page-content")) throw new Error(JSON.stringify(tab));
+  const nav = await tools.steel.go_to_url({tabId: tab.tabId, owner: "cm-off", url: "about:blank"});
+  const state = await tools.steel.page_state({tabId: tab.tabId, owner: "cm-off"});
+  const listed = await tools.steel.list_tabs({tabId: tab.tabId});
+  if (nav.url !== "about:blank" || state.url !== nav.url || listed.tabs[0].tabId !== tab.tabId) throw new Error(JSON.stringify({nav, state, listed}));
+  await tools.steel.evaluate({tabId: tab.tabId, owner: "cm-off", expression: "document.body.innerHTML = '<main>cm-off-body</main>'"});
+  const text = await tools.steel.get_page_text({tabId: tab.tabId, owner: "cm-off"});
+  const snap = await tools.steel.snapshot({tabId: tab.tabId, owner: "cm-off"});
+  if (!text.text.includes("<untrusted-page-content") || !text.text.includes("cm-off-body") || !snap.text.includes("<untrusted-page-content")) throw new Error(JSON.stringify({text, snap}));
+  let code;
+  try { await tools.steel.go_to_url({tabId: tab.tabId, owner: "cm-off", url: "https://example.org/"}); }
+  catch (error) { code = error.message.split(":")[0]; }
+  if (code !== "site_blocked") throw new Error(JSON.stringify({code}));
+  return {tabId: tab.tabId, nav, state, listed, text, snap, errorCode: code};
+} finally {
+  const closed = await tools.steel.close_tabs({tabId: tab.tabId});
+  if (!closed.closedTabIds.includes(tab.tabId)) throw new Error(JSON.stringify(closed));
+}

@@ -1,4 +1,3 @@
-// xfail: page_state.url contains a trust fence, not a URL.
 await tools.steel.new_tab({});
 try {
   const r = await tools.steel.page_state({});

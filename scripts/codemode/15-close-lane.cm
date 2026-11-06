@@ -1,0 +1,4 @@
+const tab = await tools.steel.new_tab({});
+const r = await tools.steel.close_lane({});
+if (r.closed !== true || !r.tabs.includes(tab.tabId)) throw new Error(JSON.stringify(r));
+return r;

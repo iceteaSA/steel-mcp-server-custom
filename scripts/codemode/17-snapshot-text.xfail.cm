@@ -1,7 +1,0 @@
-// xfail: snapshot.text contains transport markup instead of only the accessibility tree.
-await tools.steel.new_tab({});
-try {
-  const r = await tools.steel.snapshot({});
-  if (r.text.includes("<untrusted-page-content")) throw new Error(JSON.stringify(r));
-  return {text: r.text};
-} finally { await tools.steel.close_lane({}); }

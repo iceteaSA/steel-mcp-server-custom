@@ -1,5 +1,0 @@
-// xfail: close_lane returns a text string, not a structured close result.
-await tools.steel.new_tab({});
-const r = await tools.steel.close_lane({});
-if (typeof r !== "object" || r === null || r.closed !== true) throw new Error(JSON.stringify({actual: r, expected: {closed: true}}));
-return r;

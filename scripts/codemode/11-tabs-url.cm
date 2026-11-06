@@ -1,4 +1,3 @@
-// xfail: list_tabs preserves numeric tabId but wraps tabs[].url.
 await tools.steel.new_tab({});
 try {
   const r = await tools.steel.list_tabs({});

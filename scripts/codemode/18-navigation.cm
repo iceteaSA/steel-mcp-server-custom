@@ -1,0 +1,6 @@
+await tools.steel.new_tab({});
+try {
+  const r = await tools.steel.go_to_url({url: "about:blank"});
+  if (r.url !== "about:blank" || !r.title.includes("<untrusted-page-content")) throw new Error(JSON.stringify(r));
+  return {url: r.url, title: r.title};
+} finally { await tools.steel.close_lane({}); }

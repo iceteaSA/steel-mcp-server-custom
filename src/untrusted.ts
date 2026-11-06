@@ -46,7 +46,11 @@ export function fenceDelimiters(toolName: string) {
   return { open, close };
 }
 
-export function fenceToolResult(result: CallToolResult, toolName: string): CallToolResult {
+export function fenceToolResult(
+  result: CallToolResult,
+  toolName: string,
+  codeMode = false,
+): CallToolResult {
   const { open, close } = fenceDelimiters(toolName);
   const sanitize = (text: string) =>
     stripUnsafeControls(text).replace(/<\/?untrusted-page-content\b/gi, (tag) =>
@@ -54,6 +58,18 @@ export function fenceToolResult(result: CallToolResult, toolName: string): CallT
     );
   const visit = (value: unknown, path: string[] = []): unknown => {
     if (typeof value === "string") {
+      // Code Mode composes URLs but can show projected free text to the model.
+      if (
+        codeMode &&
+        ((["page_state", "new_tab", "go_to_url"].includes(toolName) && path[0] === "url") ||
+          (toolName === "list_tabs" && path[0] === "tabs" && path[2] === "url") ||
+          (toolName === "get_network" && path[0] === "events" && path[2] === "url") ||
+          (toolName === "fetch_urls" && path[0] === "results" && path[2] === "url") ||
+          (toolName === "get_links" && path[0] === "links" && path[2] === "href"))
+      )
+        return sanitize(value);
+      if (["new_tab", "go_to_url"].includes(toolName) && ["title", "text"].includes(path[0]))
+        return open + sanitize(value) + close;
       if (toolName === "get_network" && path[0] === "events") {
         if (path[2] === "method")
           return /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(value) ? value : sanitize(value);
@@ -108,6 +124,14 @@ export function fenceToolResult(result: CallToolResult, toolName: string): CallT
   }
   const overhead = Buffer.byteLength(open + close + TRUNCATED);
   let remaining = MAX_TEXT_BYTES - structuredBytes;
+  const firstText = result.content.find((block) => block.type === "text");
+  const code =
+    firstText?.type === "text"
+      ? /^([a-z][a-z0-9_]{0,63})(?::(?:\s|$)|$)/.exec(firstText.text)?.[1]
+      : undefined;
+  // The hub drops structured errors. Keep a bounded machine prefix outside page text.
+  let errorPrefix = codeMode && result.isError ? `${code ?? "tool_error"}: ` : "";
+  remaining -= Buffer.byteLength(errorPrefix);
   const content: CallToolResult["content"] = [];
   for (const block of result.content) {
     if (block.type !== "text") {
@@ -127,7 +151,9 @@ export function fenceToolResult(result: CallToolResult, toolName: string): CallT
     const clipped = stripUnsafeControls(clipUtf8(safe, remaining - overhead));
     const text = open + clipped + (truncated ? TRUNCATED : "") + close;
     remaining -= Buffer.byteLength(text);
-    content.push({ ...block, text });
+    content.push({ ...block, text: errorPrefix + text });
+    errorPrefix = "";
   }
+  if (errorPrefix) content.unshift({ type: "text", text: errorPrefix.trimEnd() });
   return { ...result, content, _meta: { ...result._meta, "steel/untrusted": true } };
 }

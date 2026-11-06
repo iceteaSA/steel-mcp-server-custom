@@ -1,0 +1,11 @@
+const tab = await tools.steel.new_tab({owner: "cm-default"});
+try {
+  const state = await tools.steel.page_state({owner: "cm-default"});
+  const listed = await tools.steel.list_tabs({owner: "cm-default"});
+  if (typeof tab !== "string" || !tab.includes("<untrusted-page-content") || !state.url.includes("<untrusted-page-content") || !listed.tabs[0].url.includes("<untrusted-page-content")) throw new Error(JSON.stringify({tab, state, listed}));
+  let message;
+  try { await tools.steel.go_to_url({owner: "cm-default", url: "https://example.org/"}); }
+  catch (error) { message = error.message; }
+  if (!message.startsWith("<untrusted-page-content")) throw new Error(JSON.stringify({message}));
+  return {tab, state, listed, message};
+} finally { await tools.steel.close_tabs({owner: "cm-default"}); }

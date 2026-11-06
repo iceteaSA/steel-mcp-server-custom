@@ -71,6 +71,16 @@ export function register(register: ToolRegistrar, mgr: BrowserManager, env: Env)
 
 CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (default 5K).`,
     toolset: "core",
+    ...(env.STEEL_CODE_MODE === "on"
+      ? {
+          outputSchema: {
+            url: z.string(),
+            title: z.string(),
+            tabId: z.number(),
+            text: z.string().optional(),
+          },
+        }
+      : {}),
     inputSchema: {
       url: z.string().describe("The URL to navigate to."),
       readPage: z
@@ -214,6 +224,7 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
 
         // Optional page text extraction (readPage)
         let pageText = "";
+        let structuredText: string | undefined;
         if (readPage) {
           try {
             const rawText: string =
@@ -234,8 +245,10 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
                 `\n[TRUNCATED — ${cleaned.length.toLocaleString()} total chars]`;
             }
             pageText = "\n---\n" + cleaned;
+            structuredText = cleaned;
           } catch {
             pageText = "\n---\n[readPage: failed to extract text]";
+            structuredText = "[readPage: failed to extract text]";
           }
         }
 
@@ -249,6 +262,16 @@ CONTEXT BUDGET — when readPage=true, extracted text capped at maxChars (defaul
         const pageNotice = mgr.dialogNotice(resolved) + mgr.consumeRecoveryNotice(resolved);
         const warningPrefix = priorWarning ? `[WARNING: ${priorWarning}]\n` : "";
         return {
+          ...(env.STEEL_CODE_MODE === "on"
+            ? {
+                structuredContent: {
+                  url: finalUrl,
+                  title: pageTitle,
+                  tabId: resolved,
+                  ...(structuredText !== undefined ? { text: structuredText } : {}),
+                },
+              }
+            : {}),
           content: [
             {
               type: "text",

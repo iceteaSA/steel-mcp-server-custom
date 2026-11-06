@@ -1,4 +1,3 @@
-// xfail: new_tab returns a string, so its tabId cannot feed page_state.
 const tab = await tools.steel.new_tab({owner: "cm-chain"});
 try {
   if (typeof tab.tabId !== "number") throw new Error(JSON.stringify({actual: tab, missing: "tabId"}));

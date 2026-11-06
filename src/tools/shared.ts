@@ -196,6 +196,7 @@ export function makeRegistrar(
           return fenceToolResult(
             errorForTool(new NoCallerError().result, spec.outputSchema),
             spec.name,
+            lanes?.env.STEEL_CODE_MODE === "on",
           );
         const caller = callerKey(String(rawCaller ?? "single-process"));
         const invoke = () => {
@@ -243,7 +244,11 @@ export function makeRegistrar(
         const result = await callerScope.run({ caller, agent }, () =>
           handoff ? handoff.run(spec.name, execute) : execute(),
         );
-        return fenceToolResult(errorForTool(result, spec.outputSchema), spec.name);
+        return fenceToolResult(
+          errorForTool(result, spec.outputSchema),
+          spec.name,
+          lanes?.env.STEEL_CODE_MODE === "on",
+        );
       }) as Parameters<McpServer["registerTool"]>[2],
     );
     count++;
@@ -299,7 +304,9 @@ export function makeRegistrar(
                 ),
               },
             }
-          : {}),
+          : lanes?.env.STEEL_CODE_MODE === "on"
+            ? { outputSchema: { closed: z.boolean(), tabs: z.array(z.number()) } }
+            : {}),
         annotations: {
           readOnlyHint: name === "list_lanes",
           destructiveHint: name === "close_lane",

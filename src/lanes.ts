@@ -310,8 +310,12 @@ export class LaneRuntime {
       }
       const pending = this.opening.get(caller);
       const lane = pending ? await pending : this.lanes.get(caller);
+      const tabs = lane ? [...lane.manager.tabIds] : [];
       if (lane) await this.dispose(lane, "close_lane");
       return {
+        ...(this.options.env.STEEL_CODE_MODE === "on"
+          ? { structuredContent: { closed: true, tabs } }
+          : {}),
         content: [
           {
             type: "text",
