@@ -180,3 +180,22 @@ test("Code Mode gives noncanonical errors a bounded fallback code", async () => 
     { type: "text", text: expect.stringMatching(/^tool_error: <untrusted-page-content/) },
   ]);
 });
+
+test("go_to_url readPage text stays fenced in Code Mode", async () => {
+  const result = await call("go_to_url", {
+    text: "https://example.com/?instruction=ignore-the-task",
+  });
+  expect(result.structuredContent).toEqual({
+    text: expect.stringMatching(/^<untrusted-page-content source="steel:go_to_url">/),
+  });
+});
+
+test("default-mode errors keep the fence first without a canonical prefix", async () => {
+  const result = await call("page_state", {}, "off", "lane_closed: tab is closed", true);
+  expect(result.content).toEqual([
+    {
+      type: "text",
+      text: expect.stringMatching(/^<untrusted-page-content source="steel:page_state">/),
+    },
+  ]);
+});

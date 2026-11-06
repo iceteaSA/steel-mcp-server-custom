@@ -18,3 +18,9 @@ Use the Code Mode harness with `--script FILE` for one case or `--corpus DIR` fo
 The harness owns the host, checks cleanup, and records the model-facing text.
 Keep each script unchanged during its run.
 Remove an `xfail` marker only after that assertion gives a GREEN result.
+
+`security/` tests page-chosen URL fields with a local HTTP fixture.
+`fixture-entry.ts` owns that fixture and the local Steel child process.
+Its port comes from `CM_FIXTURE_PORT`. `CM_STEEL_BUILD` selects the built server.
+Replace `__FIXTURE_ORIGIN__` with the local fixture URL before the run.
+The harness checks that the fixture and browser processes stop at teardown.
