@@ -66,9 +66,28 @@ export function fenceToolResult(
           (toolName === "get_network" && path[0] === "events" && path[2] === "url") ||
           (toolName === "fetch_urls" && path[0] === "results" && path[2] === "url") ||
           (toolName === "get_links" && path[0] === "links" && path[2] === "href"))
+      ) {
+        try {
+          const url = new URL(value);
+          const web = url.protocol === "http:" || url.protocol === "https:";
+          if (
+            (web && url.href.length <= 512) ||
+            url.href === "about:blank" ||
+            url.href === "about:srcdoc"
+          )
+            return url.href;
+          if (!web && url.protocol !== "about:")
+            return `${url.protocol}<inline, ${Buffer.byteLength(url.href.slice(url.protocol.length), "utf8")} bytes omitted>`;
+        } catch {
+          // Invalid URLs keep a trust fence.
+        }
+        return open + sanitize(value) + close;
+      }
+      if (
+        codeMode &&
+        ["new_tab", "go_to_url"].includes(toolName) &&
+        ["title", "text"].includes(path[0])
       )
-        return sanitize(value);
-      if (["new_tab", "go_to_url"].includes(toolName) && ["title", "text"].includes(path[0]))
         return open + sanitize(value) + close;
       if (toolName === "get_network" && path[0] === "events") {
         if (path[2] === "method")

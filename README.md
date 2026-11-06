@@ -459,10 +459,18 @@ JSON property names stay unchanged. This also applies to page-controlled keys fr
 Set `STEEL_CODE_MODE=on` for programmatic callers. The default is `off`.
 The mode works with caller lanes and with `STEEL_LANES=off`.
 
-Structured URL fields stay raw. IDs, counts, status codes, and booleans stay unchanged.
+HTTP and HTTPS URL fields stay raw only when the parsed, serialized URL has a maximum of 512 characters.
+The raw value is the WHATWG URL parser's `href`.
+Only `about:blank` and `about:srcdoc` stay raw for the `about:` scheme.
+Long, invalid, and other `about:` URLs keep their trust fences. The server does not truncate a URL into a different raw URL.
+Other schemes use `<scheme><inline, N bytes omitted>` without the URL payload.
+
+IDs, counts, status codes, and booleans stay unchanged.
 Titles, page text, network bodies, cookie values, and extraction text keep their trust fences.
-For example, `r.url` is a URL, but `r.title` contains an untrusted-content fence.
+For example, a short HTTP `r.url` is a URL, but `r.title` contains an untrusted-content fence.
 Do not use page-controlled URLs or JSON property names as instructions.
+
+A raw URL can show a maximum of 512 characters of percent-encoded page-chosen text. Give IDs or `origin` values if a full URL is not necessary for the model.
 
 - `new_tab` gives `tabId`, `url`, and a fenced `title` in structured output.
 - `go_to_url` gives `tabId`, `url`, a fenced `title`, and optional fenced `text`.

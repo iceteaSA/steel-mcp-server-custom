@@ -179,7 +179,20 @@ export function makeRegistrar(
       spec.name,
       {
         title: spec.title,
-        description: runtime ? (laneDescriptions[spec.name] ?? spec.description) : spec.description,
+        description:
+          (runtime ? (laneDescriptions[spec.name] ?? spec.description) : spec.description) +
+          (lanes?.env.STEEL_CODE_MODE === "on" &&
+          [
+            "page_state",
+            "list_tabs",
+            "new_tab",
+            "go_to_url",
+            "get_links",
+            "get_network",
+            "fetch_urls",
+          ].includes(spec.name)
+            ? "\n\nA raw URL can show a maximum of 512 characters of percent-encoded page-chosen text. Give IDs or `origin` values if a full URL is not necessary for the model."
+            : ""),
         inputSchema,
         outputSchema: spec.outputSchema,
         annotations: {

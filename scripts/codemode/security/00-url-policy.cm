@@ -1,4 +1,3 @@
-// xfail: raw URL fields admit long page instructions and unsafe schemes.
 const origin = "__FIXTURE_ORIGIN__";
 const normal = origin + "/?q=" + "a".repeat(80 - origin.length - 4);
 const tab = await tools.steel.new_tab({url: normal});

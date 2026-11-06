@@ -24,3 +24,5 @@ Remove an `xfail` marker only after that assertion gives a GREEN result.
 Its port comes from `CM_FIXTURE_PORT`. `CM_STEEL_BUILD` selects the built server.
 Replace `__FIXTURE_ORIGIN__` with the local fixture URL before the run.
 The harness checks that the fixture and browser processes stop at teardown.
+`controls/fixture-timeout.cm` keeps a call pending for a runner-stop cleanup check.
+Run it with a 20-second harness deadline. Check the timeout and the empty remaining-process list in the receipt.

@@ -1,0 +1,3 @@
+await tools.steel.new_tab({url: "__FIXTURE_ORIGIN__/"});
+await tools.steel.evaluate({expression: "new Promise(() => {})"});
+throw new Error("the harness must stop this pending case");
