@@ -76,8 +76,25 @@ export function fenceToolResult(
             url.href === "about:srcdoc"
           )
             return url.href;
-          if (!web && url.protocol !== "about:")
-            return `${url.protocol}<inline, ${Buffer.byteLength(url.href.slice(url.protocol.length), "utf8")} bytes omitted>`;
+          if (!web && url.protocol !== "about:") {
+            const known = [
+              "javascript:",
+              "data:",
+              "blob:",
+              "file:",
+              "mailto:",
+              "tel:",
+              "ftp:",
+              "ws:",
+              "wss:",
+              "chrome:",
+              "chrome-extension:",
+              "view-source:",
+            ].includes(url.protocol);
+            const scheme = known ? url.protocol : "<other-scheme>";
+            const omitted = known ? url.href.slice(url.protocol.length) : value;
+            return `${scheme}<inline, ${Buffer.byteLength(omitted, "utf8")} bytes omitted>`;
+          }
         } catch {
           // Invalid URLs keep a trust fence.
         }

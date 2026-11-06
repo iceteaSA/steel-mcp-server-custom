@@ -463,7 +463,9 @@ HTTP and HTTPS URL fields stay raw only when the parsed, serialized URL has a ma
 The raw value is the WHATWG URL parser's `href`.
 Only `about:blank` and `about:srcdoc` stay raw for the `about:` scheme.
 Long, invalid, and other `about:` URLs keep their trust fences. The server does not truncate a URL into a different raw URL.
-Other schemes use `<scheme><inline, N bytes omitted>` without the URL payload.
+Known non-web schemes use `<scheme><inline, N bytes omitted>` without the URL payload.
+The fixed list is `javascript`, `data`, `blob`, `file`, `mailto`, `tel`, `ftp`, `ws`, `wss`, `chrome`, `chrome-extension`, and `view-source`.
+Other schemes use `<other-scheme><inline, N bytes omitted>`, where N counts UTF-8 bytes in the full URL.
 
 IDs, counts, status codes, and booleans stay unchanged.
 Titles, page text, network bodies, cookie values, and extraction text keep their trust fences.

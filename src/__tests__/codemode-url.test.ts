@@ -113,4 +113,19 @@ for (const fixture of fixtures) {
       shape(`mailto:<inline, ${Buffer.byteLength(payload)} bytes omitted>`),
     );
   });
+
+  for (const [scheme, payload] of [
+    ["file:", "///tmp/cm-fixture"],
+    ["tel:", "+123456789"],
+    ["ws:", "//example.com/"],
+    ["wss:", "//example.com/"],
+    ["chrome:", "//settings/"],
+    ["chrome-extension:", "//fixture/page.html"],
+    ["view-source:", "https://example.com/"],
+  ])
+    test(`${fixture.tool}: known ${scheme} labels keep only their fixed name`, () => {
+      expect(run(scheme + payload).structuredContent).toEqual(
+        shape(`${scheme}<inline, ${Buffer.byteLength(payload)} bytes omitted>`),
+      );
+    });
 }

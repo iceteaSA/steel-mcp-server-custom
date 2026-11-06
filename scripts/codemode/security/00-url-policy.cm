@@ -19,6 +19,9 @@ try {
   const js = links.links.find((link) => link.text.includes("js-vector"));
   const longLink = links.links.find((link) => link.text.includes("long-vector"));
   if (!js.href.startsWith("javascript:<inline,") || !longLink.href.includes("<untrusted-page-content")) throw new Error(JSON.stringify(links));
+  const unknownShort = links.links.find((link) => link.text.includes("unknown-short"));
+  const unknownLong = links.links.find((link) => link.text.includes("unknown-long"));
+  if (unknownShort.href !== "<other-scheme><inline, 8 bytes omitted>" || unknownLong.href !== "<other-scheme><inline, 2408 bytes omitted>") throw new Error(JSON.stringify(links));
   for (const length of [512, 513]) {
     const url = origin + "/?q=" + "b".repeat(length - origin.length - 4);
     await tools.steel.evaluate({tabId: tab.tabId, expression: "history.pushState({}, '', " + JSON.stringify(url) + ")"});
