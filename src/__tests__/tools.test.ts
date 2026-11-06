@@ -10,11 +10,14 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { spawn, type ChildProcess } from "child_process";
+import { once } from "events";
+import { mkdtempSync } from "fs";
+import { tmpdir } from "os";
 import path from "path";
 import fs from "fs/promises";
 
 const DIST = path.resolve(__dirname, "../../dist/index.cjs");
-const TEST_OUTPUT = "/tmp/steel-mcp-vitest";
+const TEST_OUTPUT = mkdtempSync(path.join(tmpdir(), "steel-mcp-vitest-"));
 const TEST_CREDS = path.join(TEST_OUTPUT, "credentials.json");
 
 interface MCPResponse {
@@ -41,6 +44,7 @@ class MCPTestClient {
         BROWSER_MODE: "steel",
         STEEL_BASE_URL: "http://127.0.0.1:1",
         OUTPUT_DIR: TEST_OUTPUT,
+        PROFILES_DIR: path.join(TEST_OUTPUT, "profiles"),
         CREDENTIALS_FILE: TEST_CREDS,
         ...env,
       },
@@ -108,8 +112,11 @@ class MCPTestClient {
     return !!r.result?.isError || !!r.error;
   }
 
-  kill() {
+  async kill() {
+    if (this.proc.exitCode !== null || this.proc.signalCode !== null) return;
+    const exited = once(this.proc, "exit");
     this.proc.kill("SIGTERM");
+    await exited;
   }
 }
 
@@ -126,8 +133,9 @@ describe("non-browser tools", () => {
     await client.initialize();
   });
 
-  afterAll(() => {
-    client.kill();
+  afterAll(async () => {
+    await client.kill();
+    await fs.rm(TEST_OUTPUT, { recursive: true, force: true });
   });
 
   it("tools/list returns expected tools with correct names", async () => {
@@ -250,7 +258,7 @@ describe("non-browser tools", () => {
       expect(readme).toContain("48 default, 50 with AI tools");
       expect(readme).toContain("**51 browser tools** (53 with AI tools) in lane mode");
     } finally {
-      allTools.kill();
+      await allTools.kill();
     }
   });
 
@@ -399,7 +407,7 @@ describe("non-browser tools", () => {
     // covered by the containment test below.)
     const r = await client.tool(113, "upload_file", {
       selector: "#file",
-      files: ["/tmp/steel-mcp-vitest/__steel_mcp_nonexistent_9x7y__.txt"],
+      files: [path.join(TEST_OUTPUT, "__steel_mcp_nonexistent_9x7y__.txt")],
     });
     expect(client.isError(r)).toBe(true);
     expect(client.getText(r)).toContain("not found");
@@ -456,8 +464,9 @@ describe("browser tools", () => {
     await client.initialize();
   }, 20000);
 
-  afterAll(() => {
-    if (client) client.kill();
+  afterAll(async () => {
+    if (client) await client.kill();
+    await fs.rm(TEST_OUTPUT, { recursive: true, force: true });
   });
 
   (steelAvailable ? it : it.skip)("list_tabs returns at least one tab", async () => {
