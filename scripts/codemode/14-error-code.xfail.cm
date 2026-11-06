@@ -1,0 +1,8 @@
+// xfail: the pinned hub throws plain Error and discards structured error codes.
+try {
+  await tools.steel.go_to_url({url: "https://example.org/"});
+} catch (error) {
+  if (error.code !== "site_blocked") throw new Error(JSON.stringify({message: error.message, code: error.code}));
+  return {code: error.code, message: error.message};
+} finally { await tools.steel.close_lane({}); }
+throw new Error("blocked domain unexpectedly succeeded");

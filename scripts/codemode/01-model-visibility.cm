@@ -1,0 +1,7 @@
+await tools.steel.new_tab({});
+try {
+  await tools.steel.evaluate({expression: "(() => { document.title = 'CM_PAGE_ONLY_7d39'; document.body.innerHTML = '<main>CM_BODY_ONLY_7d39</main>'; return true; })()"});
+  await tools.steel.page_state({});
+  await tools.steel.get_page_text({});
+  return {sentinel: "CM_RETURN_ONLY_7d39"};
+} finally { await tools.steel.close_lane({}); }

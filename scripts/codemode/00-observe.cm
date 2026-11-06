@@ -1,0 +1,11 @@
+const opened = await tools.steel.new_tab({owner: "cm-audit"});
+try {
+  const state = await tools.steel.page_state({});
+  const tabs = await tools.steel.list_tabs({});
+  const snapshot = await tools.steel.snapshot({});
+  const text = await tools.steel.get_page_text({});
+  let error;
+  try { await tools.steel.go_to_url({url: "https://example.org/"}); }
+  catch (caught) { error = {message: caught.message, code: caught.code}; }
+  return {opened, state, tabs, snapshot, text, error};
+} finally { await tools.steel.close_lane({}); }

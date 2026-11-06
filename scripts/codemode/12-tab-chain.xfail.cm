@@ -1,0 +1,9 @@
+// xfail: new_tab returns a string, so its tabId cannot feed page_state.
+const tab = await tools.steel.new_tab({owner: "cm-chain"});
+try {
+  if (typeof tab.tabId !== "number") throw new Error(JSON.stringify({actual: tab, missing: "tabId"}));
+  const state = await tools.steel.page_state({tabId: tab.tabId});
+  const listed = await tools.steel.list_tabs({tabId: tab.tabId});
+  if (state.url !== "about:blank" || listed.tabs[0].tabId !== tab.tabId) throw new Error("tab chain mismatch");
+  return {tabId: tab.tabId, url: state.url};
+} finally { await tools.steel.close_lane({}); }

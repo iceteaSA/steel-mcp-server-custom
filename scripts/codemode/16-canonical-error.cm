@@ -1,0 +1,8 @@
+try {
+  await tools.steel.go_to_url({url: "https://example.org/"});
+} catch (error) {
+  const match = error.message.match(/(?:^|\n)(site_blocked):/);
+  if (!match) throw error;
+  return {code: match[1], message: error.message};
+} finally { await tools.steel.close_lane({}); }
+throw new Error("blocked domain unexpectedly succeeded");

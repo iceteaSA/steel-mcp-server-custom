@@ -1,0 +1,7 @@
+// xfail: list_tabs preserves numeric tabId but wraps tabs[].url.
+await tools.steel.new_tab({});
+try {
+  const r = await tools.steel.list_tabs({});
+  if (typeof r.tabs[0].tabId !== "number" || r.tabs[0].url !== "about:blank") throw new Error(JSON.stringify(r.tabs[0]));
+  return {tabId: r.tabs[0].tabId, url: r.tabs[0].url};
+} finally { await tools.steel.close_lane({}); }

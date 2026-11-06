@@ -1,0 +1,7 @@
+// xfail: page_state.url contains a trust fence, not a URL.
+await tools.steel.new_tab({});
+try {
+  const r = await tools.steel.page_state({});
+  if (r.url !== "about:blank") throw new Error(JSON.stringify({actual: r.url, expected: "about:blank"}));
+  return {url: r.url};
+} finally { await tools.steel.close_lane({}); }
