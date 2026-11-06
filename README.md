@@ -462,9 +462,10 @@ The mode works with caller lanes and with `STEEL_LANES=off`.
 HTTP and HTTPS URL fields stay raw only when the parsed, serialized URL has a maximum of 512 characters.
 The raw value is the WHATWG URL parser's `href`.
 Only `about:blank` and `about:srcdoc` stay raw for the `about:` scheme.
+
 Long, invalid, and other `about:` URLs keep their trust fences. The server does not truncate a URL into a different raw URL.
 Known non-web schemes use `<scheme><inline, N bytes omitted>` without the URL payload.
-The fixed list is `javascript`, `data`, `blob`, `file`, `mailto`, `tel`, `ftp`, `ws`, `wss`, `chrome`, `chrome-extension`, and `view-source`.
+The known names are `javascript`, `data`, `blob`, `file`, `mailto`, `tel`, `ftp`, `ws`, `wss`, `chrome`, `chrome-extension`, and `view-source`.
 Other schemes use `<other-scheme><inline, N bytes omitted>`, where N counts UTF-8 bytes in the full URL.
 
 IDs, counts, status codes, and booleans stay unchanged.
